@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import { analyzeImage, analyzeText } from "@/lib/ai/analyze-image";
 import { extractTextFromPdfBuffer } from "@/lib/pdf/extract-pdf-text";
 import { extractTextFromDocxBuffer } from "@/lib/docx/extract-docx-text";
-import type { AnalysisSourceHint } from "@/lib/types";
+import type { AnalysisSourceHint, AIAnalysisResult } from "@/lib/types";
 
 /** pdf-parse / mammoth krever Node (ikke Edge). */
 export const runtime = "nodejs";
@@ -93,7 +94,8 @@ function docxDataUrlToBuffer(dataUrl: string): Buffer {
 async function analyzeFromExtractedText(
   rawText: string,
   preamble: string,
-  sourceHint: AnalysisSourceHint
+  sourceHint: AnalysisSourceHint,
+  request: NextRequest,
 ) {
   let textForModel = rawText;
   if (textForModel.length > MAX_DOC_TEXT_FOR_MODEL) {
@@ -117,8 +119,7 @@ async function analyzeFromExtractedText(
         "\n\n[... Teksten er forkortet i visning ...]"
       : rawText;
 
-  return NextResponse.json({
-    ...result,
+  return wrapResponse(result, request, sourceHint.type, {
     sourceHint,
     extractedText: {
       raw: displayRaw,
@@ -179,6 +180,192 @@ function isMultipart(request: NextRequest): boolean {
   return ct.includes("multipart/form-data");
 }
 
+/* ------------------------------------------------------------------ */
+/*  Adapter: AIAnalysisResult  →  PortalImportProposalBundle (v1)     */
+/* ------------------------------------------------------------------ */
+
+const NB_MONTHS: Record<string, number> = {
+  januar: 1, februar: 2, mars: 3, april: 4, mai: 5, juni: 6,
+  juli: 7, august: 8, september: 9, oktober: 10, november: 11, desember: 12,
+};
+
+function tryParseNorwegianDate(raw: string | null): string | null {
+  if (!raw) return null;
+
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw.trim());
+  if (isoMatch) return raw.trim();
+
+  const nbMatch = /(\d{1,2})\.\s*([a-zæøå]+)\s+(\d{4})/i.exec(raw);
+  if (nbMatch) {
+    const day = Number(nbMatch[1]);
+    const month = NB_MONTHS[nbMatch[2].toLowerCase()];
+    const year = Number(nbMatch[3]);
+    if (month && day >= 1 && day <= 31) {
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
+  const slashMatch = /^(\d{1,2})[./](\d{1,2})[./](\d{4})$/.exec(raw.trim());
+  if (slashMatch) {
+    const d = Number(slashMatch[1]);
+    const m = Number(slashMatch[2]);
+    const y = Number(slashMatch[3]);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    }
+  }
+
+  return null;
+}
+
+function extractStartEnd(time: string | null): { start: string; end: string } {
+  const fallback = { start: "08:00", end: "09:00" };
+  if (!time) return fallback;
+  const rangeMatch = /(\d{1,2}[.:]\d{2})\s*[-–]\s*(\d{1,2}[.:]\d{2})/.exec(time);
+  if (rangeMatch) {
+    return {
+      start: rangeMatch[1].replace(".", ":"),
+      end: rangeMatch[2].replace(".", ":"),
+    };
+  }
+  const singleMatch = /(\d{1,2})[.:](\d{2})/.exec(time);
+  if (singleMatch) {
+    const h = Number(singleMatch[1]);
+    const m = singleMatch[2];
+    const s = `${String(h).padStart(2, "0")}:${m}`;
+    const eH = Math.min(h + 1, 23);
+    const e = `${String(eH).padStart(2, "0")}:${m}`;
+    return { start: s, end: e };
+  }
+  return fallback;
+}
+
+function buildEventItems(
+  result: AIAnalysisResult,
+  sourceType: string,
+): Array<{
+  proposalId: string;
+  kind: "event";
+  sourceId: string;
+  originalSourceType: string;
+  confidence: number;
+  event: {
+    date: string;
+    personId: string;
+    title: string;
+    start: string;
+    end: string;
+    notes?: string;
+    location?: string;
+  };
+}> {
+  const items: Array<{
+    proposalId: string;
+    kind: "event";
+    sourceId: string;
+    originalSourceType: string;
+    confidence: number;
+    event: {
+      date: string;
+      personId: string;
+      title: string;
+      start: string;
+      end: string;
+      notes?: string;
+      location?: string;
+    };
+  }> = [];
+
+  const sourceId = randomUUID();
+
+  const buildItem = (
+    date: string,
+    time: string | null,
+    titleSuffix: string | null,
+    notes: string | null,
+  ) => {
+    const { start, end } = extractStartEnd(time);
+    const item: (typeof items)[number] = {
+      proposalId: randomUUID(),
+      kind: "event",
+      sourceId,
+      originalSourceType: sourceType,
+      confidence: result.confidence,
+      event: {
+        date,
+        personId: "pending",
+        title: titleSuffix ? `${result.title} – ${titleSuffix}` : result.title,
+        start,
+        end,
+      },
+    };
+    const n = notes ?? result.description;
+    if (n) item.event.notes = n;
+    if (result.location) item.event.location = result.location;
+    return item;
+  };
+
+  if (result.scheduleByDay.length > 0) {
+    for (const day of result.scheduleByDay) {
+      const isoDate = tryParseNorwegianDate(day.date);
+      if (!isoDate) continue;
+      items.push(buildItem(isoDate, day.time, day.dayLabel, day.details));
+    }
+  }
+
+  if (items.length === 0 && result.schedule.length > 0) {
+    for (const slot of result.schedule) {
+      const isoDate = tryParseNorwegianDate(slot.date);
+      if (!isoDate) continue;
+      items.push(buildItem(isoDate, slot.time, slot.label, null));
+    }
+  }
+
+  if (items.length === 0) {
+    const today = new Date().toISOString().slice(0, 10);
+    items.push(buildItem(today, null, null, null));
+  }
+
+  return items;
+}
+
+function toPortalBundle(
+  result: AIAnalysisResult,
+  sourceType: string,
+): Record<string, unknown> {
+  return {
+    schemaVersion: "1.0.0",
+    provenance: {
+      sourceSystem: "tankestrom",
+      sourceType,
+      generatedAt: new Date().toISOString(),
+      importRunId: randomUUID(),
+    },
+    items: buildEventItems(result, sourceType),
+  };
+}
+
+function wrapResponse(
+  result: AIAnalysisResult,
+  request: NextRequest,
+  sourceType: string,
+  extra?: Record<string, unknown>,
+): NextResponse {
+  if (isPortalRequest(request)) {
+    return NextResponse.json(toPortalBundle(result, sourceType));
+  }
+  return NextResponse.json(extra ? { ...result, ...extra } : result);
+}
+
+function isPortalRequest(request: NextRequest): boolean {
+  if (isMultipart(request)) return true;
+  const accept = request.headers.get("accept") ?? "";
+  if (accept.includes("application/vnd.foreldre.proposal+json")) return true;
+  const param = request.nextUrl.searchParams.get("format");
+  if (param === "portal") return true;
+  return false;
+}
+
 export async function POST(request: NextRequest) {
   try {
     if (!process.env.OPENAI_API_KEY?.trim()) {
@@ -207,7 +394,7 @@ export async function POST(request: NextRequest) {
         );
       }
       const result = await analyzeText(trimmed);
-      return NextResponse.json(result);
+      return wrapResponse(result, request, "text");
     }
 
     if (pdf && typeof pdf === "string") {
@@ -269,7 +456,7 @@ export async function POST(request: NextRequest) {
         type: "pdf",
         fileName: safeName,
         pageCount: Math.max(1, extracted.numpages),
-      });
+      }, request);
     }
 
     if (docx && typeof docx === "string") {
@@ -336,7 +523,7 @@ export async function POST(request: NextRequest) {
       return analyzeFromExtractedText(rawText, preamble, {
         type: "docx",
         fileName: safeName,
-      });
+      }, request);
     }
 
     if (image && typeof image === "string") {
@@ -353,7 +540,7 @@ export async function POST(request: NextRequest) {
         );
       }
       const result = await analyzeImage(image);
-      return NextResponse.json(result);
+      return wrapResponse(result, request, "image");
     }
 
     return NextResponse.json(
