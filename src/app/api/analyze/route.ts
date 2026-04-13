@@ -95,7 +95,7 @@ async function analyzeFromExtractedText(
   rawText: string,
   preamble: string,
   sourceHint: AnalysisSourceHint,
-  request: NextRequest,
+  portalMode: boolean,
 ) {
   let textForModel = rawText;
   if (textForModel.length > MAX_DOC_TEXT_FOR_MODEL) {
@@ -119,7 +119,7 @@ async function analyzeFromExtractedText(
         "\n\n[... Teksten er forkortet i visning ...]"
       : rawText;
 
-  return wrapResponse(result, request, sourceHint.type, {
+  return wrapResponse(result, portalMode, sourceHint.type, {
     sourceHint,
     extractedText: {
       raw: displayRaw,
@@ -347,22 +347,35 @@ function toPortalBundle(
 
 function wrapResponse(
   result: AIAnalysisResult,
-  request: NextRequest,
+  portalMode: boolean,
   sourceType: string,
   extra?: Record<string, unknown>,
 ): NextResponse {
-  if (isPortalRequest(request)) {
-    return NextResponse.json(toPortalBundle(result, sourceType));
+  if (portalMode) {
+    const bundle = toPortalBundle(result, sourceType);
+    console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
+      schemaVersion: bundle.schemaVersion,
+      itemCount: (bundle.items as unknown[]).length,
+    });
+    return NextResponse.json(bundle);
   }
   return NextResponse.json(extra ? { ...result, ...extra } : result);
 }
 
-function isPortalRequest(request: NextRequest): boolean {
-  if (isMultipart(request)) return true;
-  const accept = request.headers.get("accept") ?? "";
+/**
+ * Detect portal-mode ONCE before the body is consumed.
+ * Must be called before request.json() / request.formData().
+ */
+function detectPortalMode(request: NextRequest): boolean {
+  const ct = (request.headers.get("content-type") ?? "").toLowerCase();
+  if (ct.includes("multipart/form-data")) return true;
+
+  const accept = (request.headers.get("accept") ?? "").toLowerCase();
   if (accept.includes("application/vnd.foreldre.proposal+json")) return true;
+
   const param = request.nextUrl.searchParams.get("format");
   if (param === "portal") return true;
+
   return false;
 }
 
@@ -378,7 +391,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { image, text, pdf, docx, fileName }: ParsedBody = isMultipart(request)
+    const multipart = isMultipart(request);
+    const portalMode = detectPortalMode(request);
+    console.log("[api/analyze] incoming request", {
+      contentType: request.headers.get("content-type"),
+      multipart,
+      portalMode,
+    });
+
+    const { image, text, pdf, docx, fileName }: ParsedBody = multipart
       ? await parseMultipartBody(request)
       : await request.json();
 
@@ -394,7 +415,7 @@ export async function POST(request: NextRequest) {
         );
       }
       const result = await analyzeText(trimmed);
-      return wrapResponse(result, request, "text");
+      return wrapResponse(result, portalMode, "text");
     }
 
     if (pdf && typeof pdf === "string") {
@@ -456,7 +477,7 @@ export async function POST(request: NextRequest) {
         type: "pdf",
         fileName: safeName,
         pageCount: Math.max(1, extracted.numpages),
-      }, request);
+      }, portalMode);
     }
 
     if (docx && typeof docx === "string") {
@@ -523,7 +544,7 @@ export async function POST(request: NextRequest) {
       return analyzeFromExtractedText(rawText, preamble, {
         type: "docx",
         fileName: safeName,
-      }, request);
+      }, portalMode);
     }
 
     if (image && typeof image === "string") {
@@ -540,7 +561,7 @@ export async function POST(request: NextRequest) {
         );
       }
       const result = await analyzeImage(image);
-      return wrapResponse(result, request, "image");
+      return wrapResponse(result, portalMode, "image");
     }
 
     return NextResponse.json(
