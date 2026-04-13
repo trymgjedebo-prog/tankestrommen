@@ -128,6 +128,57 @@ async function analyzeFromExtractedText(
   });
 }
 
+interface ParsedBody {
+  image?: string;
+  text?: string;
+  pdf?: string;
+  docx?: string;
+  fileName?: string;
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  const buf = Buffer.from(await file.arrayBuffer());
+  return `data:${file.type || "application/octet-stream"};base64,${buf.toString("base64")}`;
+}
+
+async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
+  const form = await request.formData();
+  const file = form.get("file") as File | null;
+  const textField = form.get("text") as string | null;
+
+  if (textField && typeof textField === "string") {
+    return { text: textField };
+  }
+
+  if (!file) {
+    return {};
+  }
+
+  const name = file.name.toLowerCase();
+  const mime = file.type.toLowerCase();
+  const dataUrl = await fileToDataUrl(file);
+
+  if (mime === "application/pdf" || name.endsWith(".pdf")) {
+    return { pdf: dataUrl, fileName: file.name };
+  }
+  if (
+    name.endsWith(".docx") ||
+    mime.includes("wordprocessingml.document")
+  ) {
+    return { docx: dataUrl, fileName: file.name };
+  }
+  if (mime.startsWith("image/")) {
+    return { image: dataUrl };
+  }
+
+  return { pdf: dataUrl, fileName: file.name };
+}
+
+function isMultipart(request: NextRequest): boolean {
+  const ct = request.headers.get("content-type") ?? "";
+  return ct.includes("multipart/form-data");
+}
+
 export async function POST(request: NextRequest) {
   try {
     if (!process.env.OPENAI_API_KEY?.trim()) {
@@ -140,14 +191,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body = await request.json();
-    const { image, text, pdf, docx, fileName } = body as {
-      image?: string;
-      text?: string;
-      pdf?: string;
-      docx?: string;
-      fileName?: string;
-    };
+    const { image, text, pdf, docx, fileName }: ParsedBody = isMultipart(request)
+      ? await parseMultipartBody(request)
+      : await request.json();
 
     if (text && typeof text === "string") {
       const trimmed = text.trim();
