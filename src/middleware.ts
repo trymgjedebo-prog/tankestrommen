@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
+  "https://olivedrab-ant-122520.hostingersite.com",
   "http://127.0.0.1:5173",
 ];
 
