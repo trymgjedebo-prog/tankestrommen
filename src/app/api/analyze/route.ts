@@ -3,7 +3,11 @@ import { randomUUID } from "node:crypto";
 import { analyzeImage, analyzeText } from "@/lib/ai/analyze-image";
 import { extractTextFromPdfBuffer } from "@/lib/pdf/extract-pdf-text";
 import { extractTextFromDocxBuffer } from "@/lib/docx/extract-docx-text";
-import type { AnalysisSourceHint, AIAnalysisResult } from "@/lib/types";
+import type {
+  AnalysisSourceHint,
+  AIAnalysisResult,
+  DayScheduleEntry,
+} from "@/lib/types";
 
 /** pdf-parse / mammoth krever Node (ikke Edge). */
 export const runtime = "nodejs";
@@ -189,6 +193,31 @@ const NB_MONTHS: Record<string, number> = {
   juli: 7, august: 8, september: 9, oktober: 10, november: 11, desember: 12,
 };
 
+function getIsoWeekDateUtc(year: number, week: number, isoWeekday: number): Date {
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4IsoWeekday = jan4.getUTCDay() === 0 ? 7 : jan4.getUTCDay();
+  const week1Monday = new Date(Date.UTC(year, 0, 4 - (jan4IsoWeekday - 1)));
+  const d = new Date(week1Monday);
+  d.setUTCDate(week1Monday.getUTCDate() + (week - 1) * 7 + (isoWeekday - 1));
+  return d;
+}
+
+function isoDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function detectIsoWeekdayFromText(raw: string): number | null {
+  const s = raw.toLowerCase();
+  if (/\b(man(day)?|mandag)\b/i.test(s)) return 1;
+  if (/\b(tue(s(day)?)?|tirsdag)\b/i.test(s)) return 2;
+  if (/\b(wed(nesday)?|onsdag)\b/i.test(s)) return 3;
+  if (/\b(thu(rs(day)?)?|torsdag)\b/i.test(s)) return 4;
+  if (/\b(fri(day)?|fredag)\b/i.test(s)) return 5;
+  if (/\b(sat(urday)?|l[øo]rdag)\b/i.test(s)) return 6;
+  if (/\b(sun(day)?|s[øo]ndag)\b/i.test(s)) return 7;
+  return null;
+}
+
 function tryParseNorwegianDate(raw: string | null): string | null {
   if (!raw) return null;
 
@@ -215,6 +244,31 @@ function tryParseNorwegianDate(raw: string | null): string | null {
     }
   }
 
+  // Fallback for ISO-week input without explicit year.
+  // If the week has already passed this year, prefer next year to avoid stale dates near year-end.
+  const weekMatch = /\buke\s*(\d{1,2})(?:\D+(20\d{2}))?/i.exec(raw);
+  if (weekMatch) {
+    const week = Number(weekMatch[1]);
+    if (Number.isFinite(week) && week >= 1 && week <= 53) {
+      const now = new Date();
+      const thisYear = now.getFullYear();
+      const explicitYear = weekMatch[2] ? Number(weekMatch[2]) : null;
+      const isoWeekday = detectIsoWeekdayFromText(raw) ?? 1;
+
+      if (explicitYear) {
+        return isoDateKey(getIsoWeekDateUtc(explicitYear, week, isoWeekday));
+      }
+
+      const candidateThisYear = getIsoWeekDateUtc(thisYear, week, isoWeekday);
+      const todayUtc = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+      );
+      return candidateThisYear < todayUtc
+        ? isoDateKey(getIsoWeekDateUtc(thisYear + 1, week, isoWeekday))
+        : isoDateKey(candidateThisYear);
+    }
+  }
+
   return null;
 }
 
@@ -238,6 +292,30 @@ function extractStartEnd(time: string | null): { start: string; end: string } {
     return { start: s, end: e };
   }
   return fallback;
+}
+
+function composeDayNotes(
+  day: DayScheduleEntry,
+  fallbackDescription: string | null
+): string | null {
+  const parts: string[] = [];
+  if (day.details) parts.push(day.details);
+  if (day.highlights.length > 0) {
+    parts.push(`Høydepunkter: ${day.highlights.join("; ")}`);
+  }
+  if (day.rememberItems.length > 0) {
+    parts.push(`Husk: ${day.rememberItems.join("; ")}`);
+  }
+  if (day.deadlines.length > 0) {
+    parts.push(`Frister: ${day.deadlines.join("; ")}`);
+  }
+  if (day.notes.length > 0) {
+    parts.push(`Notater: ${day.notes.join("; ")}`);
+  }
+  if (parts.length === 0 && fallbackDescription) {
+    parts.push(fallbackDescription);
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
 }
 
 function buildEventItems(
@@ -277,6 +355,8 @@ function buildEventItems(
   }> = [];
 
   const sourceId = randomUUID();
+  const usedKeys = new Set<string>();
+  const today = new Date().toISOString().slice(0, 10);
 
   const buildItem = (
     date: string,
@@ -308,21 +388,49 @@ function buildEventItems(
   if (result.scheduleByDay.length > 0) {
     for (const day of result.scheduleByDay) {
       const isoDate = tryParseNorwegianDate(day.date);
-      if (!isoDate) continue;
-      items.push(buildItem(isoDate, day.time, day.dayLabel, day.details));
+      const key = `${isoDate ?? today}|${day.time ?? ""}|${day.dayLabel ?? ""}`;
+      if (usedKeys.has(key)) continue;
+      const notes = composeDayNotes(day, result.description);
+      if (!isoDate) {
+        const extra = [
+          notes,
+          day.date ? `Original dato: ${day.date}` : null,
+          day.dayLabel ? `Dag: ${day.dayLabel}` : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        items.push(
+          buildItem(today, day.time, day.dayLabel, extra || result.description)
+        );
+      } else {
+        items.push(buildItem(isoDate, day.time, day.dayLabel, notes));
+      }
+      usedKeys.add(key);
     }
   }
 
-  if (items.length === 0 && result.schedule.length > 0) {
+  if (result.schedule.length > 0) {
     for (const slot of result.schedule) {
       const isoDate = tryParseNorwegianDate(slot.date);
-      if (!isoDate) continue;
-      items.push(buildItem(isoDate, slot.time, slot.label, null));
+      const key = `${isoDate ?? today}|${slot.time ?? ""}|${slot.label ?? ""}`;
+      if (usedKeys.has(key)) continue;
+      if (!isoDate) {
+        const notes = [
+          result.description,
+          slot.date ? `Original dato: ${slot.date}` : null,
+          slot.label ? `Etikett: ${slot.label}` : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        items.push(buildItem(today, slot.time, slot.label, notes));
+      } else {
+        items.push(buildItem(isoDate, slot.time, slot.label, null));
+      }
+      usedKeys.add(key);
     }
   }
 
   if (items.length === 0) {
-    const today = new Date().toISOString().slice(0, 10);
     items.push(buildItem(today, null, null, null));
   }
 
