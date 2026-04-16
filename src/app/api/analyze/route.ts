@@ -193,6 +193,65 @@ const NB_MONTHS: Record<string, number> = {
   juli: 7, august: 8, september: 9, oktober: 10, november: 11, desember: 12,
 };
 
+const NB_MONTH_ALIASES: Record<string, keyof typeof NB_MONTHS> = {
+  jan: "januar",
+  feb: "februar",
+  mar: "mars",
+  apr: "april",
+  mai: "mai",
+  jun: "juni",
+  jul: "juli",
+  aug: "august",
+  sep: "september",
+  sept: "september",
+  okt: "oktober",
+  nov: "november",
+  des: "desember",
+};
+
+const NB_WEEKDAYS: Record<string, number> = {
+  mandag: 1,
+  tirsdag: 2,
+  onsdag: 3,
+  torsdag: 4,
+  fredag: 5,
+  lordag: 6,
+  sondag: 7,
+};
+
+function normalizeNorwegianLetters(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/å/g, "a")
+    .replace(/ø/g, "o")
+    .replace(/æ/g, "e");
+}
+
+function normalizeMonthName(rawMonth: string): string {
+  const cleaned = normalizeNorwegianLetters(rawMonth.replace(/\./g, "").trim());
+  return NB_MONTH_ALIASES[cleaned] ?? cleaned;
+}
+
+function parseIsoWeekDate(year: number, week: number, isoWeekday: number): string | null {
+  if (week < 1 || week > 53 || isoWeekday < 1 || isoWeekday > 7) return null;
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4IsoDay = jan4.getUTCDay() || 7;
+  const week1Monday = new Date(jan4);
+  week1Monday.setUTCDate(jan4.getUTCDate() - (jan4IsoDay - 1));
+  const target = new Date(week1Monday);
+  target.setUTCDate(week1Monday.getUTCDate() + (week - 1) * 7 + (isoWeekday - 1));
+  return target.toISOString().slice(0, 10);
+}
+
+function parseWeekNumber(raw: string | null): number | null {
+  if (!raw) return null;
+  const m = /\b(?:uke|week|v)\s*[.:]?\s*(\d{1,2})\b/i.exec(raw);
+  if (!m) return null;
+  const week = Number(m[1]);
+  return week >= 1 && week <= 53 ? week : null;
+}
+
+/** Brukes av `tryParseNorwegianDate` etter merge med main (ISO-uke → Date). */
 function getIsoWeekDateUtc(year: number, week: number, isoWeekday: number): Date {
   const jan4 = new Date(Date.UTC(year, 0, 4));
   const jan4IsoWeekday = jan4.getUTCDay() === 0 ? 7 : jan4.getUTCDay();
@@ -218,16 +277,46 @@ function detectIsoWeekdayFromText(raw: string): number | null {
   return null;
 }
 
+function parseIsoWeekday(raw: string | null): number | null {
+  if (!raw) return null;
+  const fromText = detectIsoWeekdayFromText(raw);
+  if (fromText !== null) return fromText;
+  const normalized = normalizeNorwegianLetters(raw);
+  for (const [label, weekday] of Object.entries(NB_WEEKDAYS)) {
+    if (normalized.includes(label)) return weekday;
+  }
+  return null;
+}
+
+function inferRealisticYear(candidates: number[], weekNumber: number | null): number {
+  const currentYear = new Date().getFullYear();
+  const realistic = candidates.filter((y) => y >= currentYear - 1 && y <= currentYear + 2);
+  if (realistic.length > 0) return realistic[0];
+  if (weekNumber && weekNumber >= 1 && weekNumber <= 26) return currentYear;
+  return currentYear;
+}
+
+function collectYearCandidates(result: AIAnalysisResult): number[] {
+  const context = [
+    result.title,
+    result.description,
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+    ...result.schedule.map((s) => `${s.label ?? ""} ${s.date ?? ""}`),
+  ].join(" ");
+  const years = Array.from(context.matchAll(/\b(20\d{2})\b/g), (m) => Number(m[1]));
+  return years.filter((y) => Number.isFinite(y));
+}
+
 function tryParseNorwegianDate(raw: string | null): string | null {
   if (!raw) return null;
 
   const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw.trim());
   if (isoMatch) return raw.trim();
 
-  const nbMatch = /(\d{1,2})\.\s*([a-zæøå]+)\s+(\d{4})/i.exec(raw);
+  const nbMatch = /(\d{1,2})\.\s*([a-zæøå.]+)\s+(\d{4})/i.exec(raw);
   if (nbMatch) {
     const day = Number(nbMatch[1]);
-    const month = NB_MONTHS[nbMatch[2].toLowerCase()];
+    const month = NB_MONTHS[normalizeMonthName(nbMatch[2])];
     const year = Number(nbMatch[3]);
     if (month && day >= 1 && day <= 31) {
       return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
@@ -270,6 +359,74 @@ function tryParseNorwegianDate(raw: string | null): string | null {
   }
 
   return null;
+}
+
+function parseDateWithFallbackYear(raw: string | null, fallbackYear: number): string | null {
+  if (!raw) return null;
+  const explicit = tryParseNorwegianDate(raw);
+  if (explicit) return explicit;
+
+  const nbMatchNoYear = /(\d{1,2})\.\s*([a-zæøå.]+)\b/i.exec(raw);
+  if (nbMatchNoYear) {
+    const day = Number(nbMatchNoYear[1]);
+    const month = NB_MONTHS[normalizeMonthName(nbMatchNoYear[2])];
+    if (month && day >= 1 && day <= 31) {
+      return `${fallbackYear}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
+  const slashNoYear = /^(\d{1,2})[./](\d{1,2})$/.exec(raw.trim());
+  if (slashNoYear) {
+    const day = Number(slashNoYear[1]);
+    const month = Number(slashNoYear[2]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${fallbackYear}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
+  return null;
+}
+
+function normalizeSpace(input: string): string {
+  return input.replace(/\s+/g, " ").trim();
+}
+
+function isGenericWeekPlanTitle(title: string): boolean {
+  const normalized = normalizeNorwegianLetters(title);
+  const hasPlanKeyword =
+    /\b(a-plan|aplan|ukeplan|aktivitetsplan)\b/.test(normalized);
+  const hasWeek = /\b(?:uke|week|v)\s*\.?:?\s*\d{1,2}\b/.test(normalized);
+  if (!hasPlanKeyword || !hasWeek) return false;
+  // Short titles with just plan+week are considered too generic for calendar blocks.
+  return normalizeSpace(title).length <= 28;
+}
+
+function getPlanPrefix(title: string): string | null {
+  const normalized = normalizeNorwegianLetters(title);
+  if (/\b(a-plan|aplan)\b/.test(normalized)) return "A-plan";
+  if (/\b(ukeplan)\b/.test(normalized)) return "Ukeplan";
+  if (/\b(aktivitetsplan)\b/.test(normalized)) return "Aktivitetsplan";
+  return null;
+}
+
+function buildCalendarEventTitle(
+  result: AIAnalysisResult,
+  titleSuffix: string | null
+): string {
+  const baseTitle = normalizeSpace(result.title || "").trim();
+  const suffix = normalizeSpace(titleSuffix || "").trim();
+  const targetGroup = normalizeSpace(result.targetGroup || "").trim();
+
+  if (!suffix) return baseTitle || "Hendelse";
+
+  if (isGenericWeekPlanTitle(baseTitle)) {
+    const prefix = getPlanPrefix(baseTitle);
+    if (prefix && targetGroup) return `${prefix} ${targetGroup} – ${suffix}`;
+    if (targetGroup) return `${targetGroup} – ${suffix}`;
+    if (prefix) return `${prefix} – ${suffix}`;
+  }
+
+  return baseTitle ? `${baseTitle} – ${suffix}` : suffix;
 }
 
 function extractStartEnd(time: string | null): { start: string; end: string } {
@@ -355,14 +512,73 @@ function buildEventItems(
   }> = [];
 
   const sourceId = randomUUID();
-  const usedKeys = new Set<string>();
-  const today = new Date().toISOString().slice(0, 10);
+  const weekContext = [
+    result.title,
+    result.description,
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+    ...result.schedule.map((s) => `${s.label ?? ""} ${s.date ?? ""}`),
+  ].join(" ");
+  const weekNumber = parseWeekNumber(weekContext);
+  const resolvedYear = inferRealisticYear(collectYearCandidates(result), weekNumber);
+
+  const resolveDate = (rawDate: string | null, rawLabel: string | null): string | null => {
+    // Preserve existing explicit date parsing first.
+    const direct = parseDateWithFallbackYear(rawDate, resolvedYear);
+    if (direct) return direct;
+    if (!weekNumber) return null;
+    const weekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
+    if (!weekday) return null;
+    return parseIsoWeekDate(resolvedYear, weekNumber, weekday);
+  };
+
+  const asListSection = (heading: string, values: string[]): string | null => {
+    const clean = values
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+    if (clean.length === 0) return null;
+    return `${heading}\n${clean.map((v) => `- ${v}`).join("\n")}`;
+  };
+
+  const buildStructuredNotes = (
+    noteBase: string | null,
+    dayContext?: {
+      rememberItems: string[];
+      deadlines: string[];
+      notes: string[];
+      highlights: string[];
+    },
+  ): string | null => {
+    if (!dayContext) {
+      return noteBase ?? result.description;
+    }
+
+    const sections: string[] = [];
+    const base = (noteBase ?? "").trim();
+    if (base) sections.push(base);
+    const highlightsSection = asListSection("Dagens innhold", dayContext.highlights);
+    if (highlightsSection) sections.push(highlightsSection);
+    const tasksSection = asListSection("Gjøremål / husk", dayContext.rememberItems);
+    if (tasksSection) sections.push(tasksSection);
+    const deadlinesSection = asListSection("Frister", dayContext.deadlines);
+    if (deadlinesSection) sections.push(deadlinesSection);
+    const notesSection = asListSection("Notater", dayContext.notes);
+    if (notesSection) sections.push(notesSection);
+
+    if (sections.length === 0) return null;
+    return sections.join("\n\n");
+  };
 
   const buildItem = (
     date: string,
     time: string | null,
     titleSuffix: string | null,
     notes: string | null,
+    dayContext?: {
+      rememberItems: string[];
+      deadlines: string[];
+      notes: string[];
+      highlights: string[];
+    },
   ) => {
     const { start, end } = extractStartEnd(time);
     const item: (typeof items)[number] = {
@@ -374,12 +590,12 @@ function buildEventItems(
       event: {
         date,
         personId: "pending",
-        title: titleSuffix ? `${result.title} – ${titleSuffix}` : result.title,
+        title: buildCalendarEventTitle(result, titleSuffix),
         start,
         end,
       },
     };
-    const n = notes ?? result.description;
+    const n = buildStructuredNotes(notes, dayContext);
     if (n) item.event.notes = n;
     if (result.location) item.event.location = result.location;
     return item;
@@ -387,46 +603,24 @@ function buildEventItems(
 
   if (result.scheduleByDay.length > 0) {
     for (const day of result.scheduleByDay) {
-      const isoDate = tryParseNorwegianDate(day.date);
-      const key = `${isoDate ?? today}|${day.time ?? ""}|${day.dayLabel ?? ""}`;
-      if (usedKeys.has(key)) continue;
-      const notes = composeDayNotes(day, result.description);
-      if (!isoDate) {
-        const extra = [
-          notes,
-          day.date ? `Original dato: ${day.date}` : null,
-          day.dayLabel ? `Dag: ${day.dayLabel}` : null,
-        ]
-          .filter(Boolean)
-          .join("\n");
-        items.push(
-          buildItem(today, day.time, day.dayLabel, extra || result.description)
-        );
-      } else {
-        items.push(buildItem(isoDate, day.time, day.dayLabel, notes));
-      }
-      usedKeys.add(key);
+      const isoDate = resolveDate(day.date, day.dayLabel);
+      if (!isoDate) continue;
+      items.push(
+        buildItem(isoDate, day.time, day.dayLabel, day.details, {
+          rememberItems: day.rememberItems,
+          deadlines: day.deadlines,
+          notes: day.notes,
+          highlights: day.highlights,
+        }),
+      );
     }
   }
 
   if (result.schedule.length > 0) {
     for (const slot of result.schedule) {
-      const isoDate = tryParseNorwegianDate(slot.date);
-      const key = `${isoDate ?? today}|${slot.time ?? ""}|${slot.label ?? ""}`;
-      if (usedKeys.has(key)) continue;
-      if (!isoDate) {
-        const notes = [
-          result.description,
-          slot.date ? `Original dato: ${slot.date}` : null,
-          slot.label ? `Etikett: ${slot.label}` : null,
-        ]
-          .filter(Boolean)
-          .join("\n");
-        items.push(buildItem(today, slot.time, slot.label, notes));
-      } else {
-        items.push(buildItem(isoDate, slot.time, slot.label, null));
-      }
-      usedKeys.add(key);
+      const isoDate = resolveDate(slot.date, slot.label);
+      if (!isoDate) continue;
+      items.push(buildItem(isoDate, slot.time, slot.label, null));
     }
   }
 
