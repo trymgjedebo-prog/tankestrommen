@@ -3,7 +3,11 @@ import { randomUUID } from "node:crypto";
 import { analyzeImage, analyzeText } from "@/lib/ai/analyze-image";
 import { extractTextFromPdfBuffer } from "@/lib/pdf/extract-pdf-text";
 import { extractTextFromDocxBuffer } from "@/lib/docx/extract-docx-text";
-import type { AnalysisSourceHint, AIAnalysisResult } from "@/lib/types";
+import type {
+  AnalysisSourceHint,
+  AIAnalysisResult,
+  DayScheduleEntry,
+} from "@/lib/types";
 
 /** pdf-parse / mammoth krever Node (ikke Edge). */
 export const runtime = "nodejs";
@@ -301,6 +305,31 @@ function tryParseNorwegianDate(raw: string | null): string | null {
     }
   }
 
+  // Fallback for ISO-week input without explicit year.
+  // If the week has already passed this year, prefer next year to avoid stale dates near year-end.
+  const weekMatch = /\buke\s*(\d{1,2})(?:\D+(20\d{2}))?/i.exec(raw);
+  if (weekMatch) {
+    const week = Number(weekMatch[1]);
+    if (Number.isFinite(week) && week >= 1 && week <= 53) {
+      const now = new Date();
+      const thisYear = now.getFullYear();
+      const explicitYear = weekMatch[2] ? Number(weekMatch[2]) : null;
+      const isoWeekday = detectIsoWeekdayFromText(raw) ?? 1;
+
+      if (explicitYear) {
+        return isoDateKey(getIsoWeekDateUtc(explicitYear, week, isoWeekday));
+      }
+
+      const candidateThisYear = getIsoWeekDateUtc(thisYear, week, isoWeekday);
+      const todayUtc = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+      );
+      return candidateThisYear < todayUtc
+        ? isoDateKey(getIsoWeekDateUtc(thisYear + 1, week, isoWeekday))
+        : isoDateKey(candidateThisYear);
+    }
+  }
+
   return null;
 }
 
@@ -392,6 +421,30 @@ function extractStartEnd(time: string | null): { start: string; end: string } {
     return { start: s, end: e };
   }
   return fallback;
+}
+
+function composeDayNotes(
+  day: DayScheduleEntry,
+  fallbackDescription: string | null
+): string | null {
+  const parts: string[] = [];
+  if (day.details) parts.push(day.details);
+  if (day.highlights.length > 0) {
+    parts.push(`Høydepunkter: ${day.highlights.join("; ")}`);
+  }
+  if (day.rememberItems.length > 0) {
+    parts.push(`Husk: ${day.rememberItems.join("; ")}`);
+  }
+  if (day.deadlines.length > 0) {
+    parts.push(`Frister: ${day.deadlines.join("; ")}`);
+  }
+  if (day.notes.length > 0) {
+    parts.push(`Notater: ${day.notes.join("; ")}`);
+  }
+  if (parts.length === 0 && fallbackDescription) {
+    parts.push(fallbackDescription);
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
 }
 
 function buildEventItems(
@@ -535,7 +588,7 @@ function buildEventItems(
     }
   }
 
-  if (items.length === 0 && result.schedule.length > 0) {
+  if (result.schedule.length > 0) {
     for (const slot of result.schedule) {
       const isoDate = resolveDate(slot.date, slot.label);
       if (!isoDate) continue;
@@ -544,7 +597,6 @@ function buildEventItems(
   }
 
   if (items.length === 0) {
-    const today = new Date().toISOString().slice(0, 10);
     items.push(buildItem(today, null, null, null));
   }
 
