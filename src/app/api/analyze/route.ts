@@ -616,7 +616,7 @@ function buildEventItems(
     }
   }
 
-  if (result.schedule.length > 0) {
+  if (items.length === 0 && result.schedule.length > 0) {
     for (const slot of result.schedule) {
       const isoDate = resolveDate(slot.date, slot.label);
       if (!isoDate) continue;
@@ -625,6 +625,7 @@ function buildEventItems(
   }
 
   if (items.length === 0) {
+    const today = new Date().toISOString().slice(0, 10);
     items.push(buildItem(today, null, null, null));
   }
 
