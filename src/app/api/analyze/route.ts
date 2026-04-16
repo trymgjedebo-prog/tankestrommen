@@ -247,8 +247,36 @@ function parseWeekNumber(raw: string | null): number | null {
   return week >= 1 && week <= 53 ? week : null;
 }
 
+/** Brukes av `tryParseNorwegianDate` etter merge med main (ISO-uke → Date). */
+function getIsoWeekDateUtc(year: number, week: number, isoWeekday: number): Date {
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4IsoWeekday = jan4.getUTCDay() === 0 ? 7 : jan4.getUTCDay();
+  const week1Monday = new Date(Date.UTC(year, 0, 4 - (jan4IsoWeekday - 1)));
+  const d = new Date(week1Monday);
+  d.setUTCDate(week1Monday.getUTCDate() + (week - 1) * 7 + (isoWeekday - 1));
+  return d;
+}
+
+function isoDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function detectIsoWeekdayFromText(raw: string): number | null {
+  const s = raw.toLowerCase();
+  if (/\b(man(day)?|mandag)\b/i.test(s)) return 1;
+  if (/\b(tue(s(day)?)?|tirsdag)\b/i.test(s)) return 2;
+  if (/\b(wed(nesday)?|onsdag)\b/i.test(s)) return 3;
+  if (/\b(thu(rs(day)?)?|torsdag)\b/i.test(s)) return 4;
+  if (/\b(fri(day)?|fredag)\b/i.test(s)) return 5;
+  if (/\b(sat(urday)?|l[øo]rdag)\b/i.test(s)) return 6;
+  if (/\b(sun(day)?|s[øo]ndag)\b/i.test(s)) return 7;
+  return null;
+}
+
 function parseIsoWeekday(raw: string | null): number | null {
   if (!raw) return null;
+  const fromText = detectIsoWeekdayFromText(raw);
+  if (fromText !== null) return fromText;
   const normalized = normalizeNorwegianLetters(raw);
   for (const [label, weekday] of Object.entries(NB_WEEKDAYS)) {
     if (normalized.includes(label)) return weekday;
