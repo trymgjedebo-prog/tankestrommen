@@ -429,6 +429,72 @@ function buildCalendarEventTitle(
   return baseTitle ? `${baseTitle} – ${suffix}` : suffix;
 }
 
+function trimSentence(raw: string, maxLen = 56): string {
+  const firstChunk = raw.split(/[.;\n]/)[0] ?? raw;
+  const cleaned = normalizeSpace(firstChunk).replace(/^[-:]\s*/, "");
+  if (cleaned.length <= maxLen) return cleaned;
+  return `${cleaned.slice(0, maxLen - 1).trimEnd()}…`;
+}
+
+function planHeadTitle(result: AIAnalysisResult): string {
+  const baseTitle = normalizeSpace(result.title || "");
+  if (!isGenericWeekPlanTitle(baseTitle)) return baseTitle || "Hendelse";
+  const prefix = getPlanPrefix(baseTitle);
+  const targetGroup = normalizeSpace(result.targetGroup || "");
+  if (prefix && targetGroup) return `${prefix} ${targetGroup}`;
+  if (targetGroup) return targetGroup;
+  if (prefix) return prefix;
+  return baseTitle || "Hendelse";
+}
+
+function extractEventProgramHint(dayContext?: {
+  rememberItems: string[];
+  deadlines: string[];
+  notes: string[];
+  highlights: string[];
+  details?: string | null;
+}): string | null {
+  if (!dayContext) return null;
+  const candidates = [dayContext.details ?? "", ...dayContext.highlights]
+    .map((v) => normalizeSpace(v))
+    .filter((v) => v.length > 0);
+  for (const candidate of candidates) {
+    if (isTaskLikeText(candidate)) continue;
+    const hint = trimSentence(candidate, 42);
+    if (hint.length >= 4) return hint;
+  }
+  return null;
+}
+
+function buildEventProposalTitle(
+  result: AIAnalysisResult,
+  titleSuffix: string | null,
+  dayContext?: {
+    rememberItems: string[];
+    deadlines: string[];
+    notes: string[];
+    highlights: string[];
+    details?: string | null;
+  },
+): string {
+  const fallback = buildCalendarEventTitle(result, titleSuffix);
+  const programHint = extractEventProgramHint(dayContext);
+  if (!programHint) return fallback;
+  if (isGenericWeekPlanTitle(result.title || "")) {
+    return `${planHeadTitle(result)} – ${programHint}`;
+  }
+  return fallback;
+}
+
+function normalizeTaskTitle(taskText: string): string {
+  const stripped = normalizeSpace(taskText)
+    .replace(/^(husk|lekse(?:r)?|oppgave(?:r)?)\s*[:\-]\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const compact = trimSentence(stripped, 54);
+  return compact || "Oppgave";
+}
+
 function extractStartEnd(time: string | null): { start: string; end: string } {
   const fallback = { start: "08:00", end: "09:00" };
   if (!time) return fallback;
@@ -475,10 +541,7 @@ function composeDayNotes(
   return parts.length > 0 ? parts.join("\n") : null;
 }
 
-function buildEventItems(
-  result: AIAnalysisResult,
-  sourceType: string,
-): Array<{
+type PortalEventItem = {
   proposalId: string;
   kind: "event";
   sourceId: string;
@@ -493,23 +556,52 @@ function buildEventItems(
     notes?: string;
     location?: string;
   };
-}> {
-  const items: Array<{
-    proposalId: string;
-    kind: "event";
-    sourceId: string;
-    originalSourceType: string;
-    confidence: number;
-    event: {
-      date: string;
-      personId: string;
-      title: string;
-      start: string;
-      end: string;
-      notes?: string;
-      location?: string;
-    };
-  }> = [];
+};
+
+type PortalTaskItem = {
+  proposalId: string;
+  kind: "task";
+  sourceId: string;
+  originalSourceType: string;
+  confidence: number;
+  task: {
+    date: string;
+    personId: string;
+    title: string;
+    notes?: string;
+  };
+};
+
+type PortalProposalItem = PortalEventItem | PortalTaskItem;
+
+const TASK_KEYWORDS =
+  /\b(lekse|lekser|husk|ta med|les|skriv|oppgave|øv|ov|gjør|gjor)\b/i;
+const EVENT_KEYWORDS =
+  /\b(prøve|prove|tentamen|tur|aktivitetsdag|forestilling|møte|mote|arrangement)\b/i;
+
+function splitTaskCandidates(raw: string | null): string[] {
+  if (!raw) return [];
+  return raw
+    .split(/\n|;|•|-/)
+    .map((part) => normalizeSpace(part))
+    .filter((part) => part.length > 0);
+}
+
+function isTaskLikeText(raw: string | null): boolean {
+  if (!raw) return false;
+  return TASK_KEYWORDS.test(normalizeNorwegianLetters(raw));
+}
+
+function isEventLikeText(raw: string | null): boolean {
+  if (!raw) return false;
+  return EVENT_KEYWORDS.test(normalizeNorwegianLetters(raw));
+}
+
+function buildProposalItems(
+  result: AIAnalysisResult,
+  sourceType: string,
+): PortalProposalItem[] {
+  const items: PortalProposalItem[] = [];
 
   const sourceId = randomUUID();
   const weekContext = [
@@ -588,7 +680,7 @@ function buildEventItems(
     return sections.join("\n\n");
   };
 
-  const buildItem = (
+  const buildEventItem = (
     date: string,
     time: string | null,
     titleSuffix: string | null,
@@ -599,9 +691,9 @@ function buildEventItems(
       notes: string[];
       highlights: string[];
     },
-  ) => {
+  ): PortalEventItem => {
     const { start, end } = extractStartEnd(time);
-    const item: (typeof items)[number] = {
+    const item: PortalEventItem = {
       proposalId: randomUUID(),
       kind: "event",
       sourceId,
@@ -610,7 +702,7 @@ function buildEventItems(
       event: {
         date,
         personId: "pending",
-        title: buildCalendarEventTitle(result, titleSuffix),
+        title: buildEventProposalTitle(result, titleSuffix, dayContext),
         start,
         end,
       },
@@ -621,18 +713,78 @@ function buildEventItems(
     return item;
   };
 
+  const buildTaskItem = (
+    date: string,
+    dayLabel: string | null,
+    taskText: string,
+  ): PortalTaskItem => {
+    const cleanTask = normalizeTaskTitle(taskText);
+    const day = normalizeSpace(dayLabel || "");
+    const title = day ? `${day} – ${cleanTask}` : cleanTask;
+    return {
+      proposalId: randomUUID(),
+      kind: "task",
+      sourceId,
+      originalSourceType: sourceType,
+      confidence: result.confidence,
+      task: {
+        date,
+        personId: "pending",
+        title: title || "Oppgave",
+        notes: result.title ? `Fra: ${result.title}` : undefined,
+      },
+    };
+  };
+
   if (result.scheduleByDay.length > 0) {
     for (const day of result.scheduleByDay) {
       const isoDate = resolveDate(day.date, day.dayLabel);
       if (!isoDate) continue;
-      items.push(
-        buildItem(isoDate, day.time, day.dayLabel, day.details, {
-          rememberItems: day.rememberItems,
-          deadlines: day.deadlines,
-          notes: day.notes,
-          highlights: day.highlights,
-        }),
+
+      const taskCandidates = [
+        ...day.rememberItems,
+        ...day.deadlines,
+        ...day.notes.flatMap((n) => splitTaskCandidates(n)),
+        ...splitTaskCandidates(day.details),
+      ];
+      const taskTexts = Array.from(
+        new Set(
+          taskCandidates
+            .map((text) => normalizeSpace(text))
+            .filter(
+              (text) =>
+                text.length > 0 &&
+                isTaskLikeText(text) &&
+                !isEventLikeText(text),
+            ),
+        ),
       );
+
+      const combinedDayText = [
+        day.details,
+        ...day.highlights,
+        ...day.notes,
+      ].join(" ");
+      const hasEventSignal =
+        Boolean(day.time) ||
+        isEventLikeText(combinedDayText) ||
+        day.highlights.length > 0 ||
+        (day.details !== null && !isTaskLikeText(day.details));
+
+      if (hasEventSignal || taskTexts.length === 0) {
+        items.push(
+          buildEventItem(isoDate, day.time, day.dayLabel, day.details, {
+            rememberItems: day.rememberItems,
+            deadlines: day.deadlines,
+            notes: day.notes,
+            highlights: day.highlights,
+          }),
+        );
+      }
+
+      for (const taskText of taskTexts) {
+        items.push(buildTaskItem(isoDate, day.dayLabel, taskText));
+      }
     }
   }
 
@@ -640,13 +792,18 @@ function buildEventItems(
     for (const slot of result.schedule) {
       const isoDate = resolveDate(slot.date, slot.label);
       if (!isoDate) continue;
-      items.push(buildItem(isoDate, slot.time, slot.label, null));
+      const slotSignal = `${slot.label ?? ""} ${slot.date ?? ""}`;
+      if (isTaskLikeText(slotSignal) && !isEventLikeText(slotSignal)) {
+        items.push(buildTaskItem(isoDate, slot.label, slotSignal));
+      } else {
+        items.push(buildEventItem(isoDate, slot.time, slot.label, null));
+      }
     }
   }
 
   if (items.length === 0) {
     const today = new Date().toISOString().slice(0, 10);
-    items.push(buildItem(today, null, null, null));
+    items.push(buildEventItem(today, null, null, null));
   }
 
   return items;
@@ -664,7 +821,7 @@ function toPortalBundle(
       generatedAt: new Date().toISOString(),
       importRunId: randomUUID(),
     },
-    items: buildEventItems(result, sourceType),
+    items: buildProposalItems(result, sourceType),
   };
 }
 
