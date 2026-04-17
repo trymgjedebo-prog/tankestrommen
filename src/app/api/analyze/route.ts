@@ -459,7 +459,8 @@ function extractEventProgramHint(dayContext?: {
     .map((v) => normalizeSpace(v))
     .filter((v) => v.length > 0);
   for (const candidate of candidates) {
-    if (isTaskLikeText(candidate)) continue;
+    if (isStandaloneTaskCandidate(candidate)) continue;
+    if (isPacklistOrRememberSuppliesOnly(candidate)) continue;
     const hint = trimSentence(candidate, 42);
     if (hint.length >= 4) return hint;
   }
@@ -574,8 +575,21 @@ type PortalTaskItem = {
 
 type PortalProposalItem = PortalEventItem | PortalTaskItem;
 
-const TASK_KEYWORDS =
-  /\b(lekse|lekser|husk|ta med|les|skriv|oppgave|øv|ov|gjør|gjor)\b/i;
+/** Ekte skolearbeid / frist – ikke generell huskeliste eller pakkeliste. */
+const ACTIONABLE_TASK_RE = new RegExp(
+  [
+    String.raw`\b(innlevering|innlever(?:es|ing)?|lever\s*inn|frist|innleveringsdag)\b`,
+    String.raw`\blekse(?:r)?\b`,
+    String.raw`\boppgave(?:r)?\b`,
+    String.raw`\b(gjør|gjor|fullfør|fullfor)\s+\w+`, // f.eks. «gjør oppgave»
+    String.raw`les\s+(?:side|s\.?\s*\d+|kap\.?|kapitel|kapittel|\d)`,
+    String.raw`skriv\s+(?:stil|essay|sammendrag|besvarelse|tekst|reportasje|notat)`,
+    String.raw`øv(?:e)?\s+(?:til\s+)?(?:prøve|prove|tentamen|eksamen)`,
+    String.raw`forbered(?:else)?\s+(?:til\s+)?(?:prøve|prove|tentamen)`,
+  ].join("|"),
+  "i",
+);
+
 const EVENT_KEYWORDS =
   /\b(prøve|prove|tentamen|tur|aktivitetsdag|forestilling|møte|mote|arrangement)\b/i;
 
@@ -587,9 +601,34 @@ function splitTaskCandidates(raw: string | null): string[] {
     .filter((part) => part.length > 0);
 }
 
-function isTaskLikeText(raw: string | null): boolean {
+/** Linjer som primært er «ta med» / utstyr – skal ikke bli egne tasks. */
+function isPacklistOrRememberSuppliesOnly(raw: string | null): boolean {
   if (!raw) return false;
-  return TASK_KEYWORDS.test(normalizeNorwegianLetters(raw));
+  const n = normalizeNorwegianLetters(raw);
+  if (ACTIONABLE_TASK_RE.test(n)) return false;
+  if (/\b(ta med|ta med deg|pakke(?:liste)?)\b/i.test(raw)) return true;
+  if (
+    /\bhusk\b/i.test(raw) &&
+    /\b(pennal|skrivebok|skrivebøker|lærebok|larebok|notatbok|pc|laptop|ipad|nettbrett|oppladet|lader|sekken?|gymklær|treningstøy|matboks|flaske)\b/i.test(
+      n,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(pennal|skrivebok|skrivebøker|oppladet\s*pc)\b/i.test(n) &&
+    raw.length < 90
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isStandaloneTaskCandidate(text: string): boolean {
+  const t = normalizeSpace(text);
+  if (!t || isEventLikeText(t)) return false;
+  if (isPacklistOrRememberSuppliesOnly(t)) return false;
+  return ACTIONABLE_TASK_RE.test(normalizeNorwegianLetters(t));
 }
 
 function isEventLikeText(raw: string | null): boolean {
@@ -669,7 +708,7 @@ function buildProposalItems(
     if (base) sections.push(base);
     const highlightsSection = asListSection("Dagens innhold", dayContext.highlights);
     if (highlightsSection) sections.push(highlightsSection);
-    const tasksSection = asListSection("Gjøremål / husk", dayContext.rememberItems);
+    const tasksSection = asListSection("Husk / ta med", dayContext.rememberItems);
     if (tasksSection) sections.push(tasksSection);
     const deadlinesSection = asListSection("Frister", dayContext.deadlines);
     if (deadlinesSection) sections.push(deadlinesSection);
@@ -741,8 +780,8 @@ function buildProposalItems(
       const isoDate = resolveDate(day.date, day.dayLabel);
       if (!isoDate) continue;
 
+      // Huskeliste / «ta med» ligger i event-notater; ikke egne tasks.
       const taskCandidates = [
-        ...day.rememberItems,
         ...day.deadlines,
         ...day.notes.flatMap((n) => splitTaskCandidates(n)),
         ...splitTaskCandidates(day.details),
@@ -751,12 +790,7 @@ function buildProposalItems(
         new Set(
           taskCandidates
             .map((text) => normalizeSpace(text))
-            .filter(
-              (text) =>
-                text.length > 0 &&
-                isTaskLikeText(text) &&
-                !isEventLikeText(text),
-            ),
+            .filter((text) => text.length > 0 && isStandaloneTaskCandidate(text)),
         ),
       );
 
@@ -765,11 +799,31 @@ function buildProposalItems(
         ...day.highlights,
         ...day.notes,
       ].join(" ");
+      const detailParts = day.details ? splitTaskCandidates(day.details) : [];
+      const hasNonTaskDetailPart =
+        detailParts.some(
+          (p) => !isStandaloneTaskCandidate(p) && normalizeSpace(p).length > 0,
+        ) ||
+        (detailParts.length === 0 &&
+          Boolean(day.details) &&
+          normalizeSpace(day.details ?? "").length > 0 &&
+          !isStandaloneTaskCandidate(day.details ?? ""));
+      const hasNonTaskNote = day.notes.some((n) => {
+        const parts = splitTaskCandidates(n);
+        if (parts.length === 0) {
+          return normalizeSpace(n).length > 0 && !isStandaloneTaskCandidate(n);
+        }
+        return parts.some(
+          (p) => !isStandaloneTaskCandidate(p) && normalizeSpace(p).length > 0,
+        );
+      });
       const hasEventSignal =
         Boolean(day.time) ||
         isEventLikeText(combinedDayText) ||
         day.highlights.length > 0 ||
-        (day.details !== null && !isTaskLikeText(day.details));
+        hasNonTaskDetailPart ||
+        day.rememberItems.length > 0 ||
+        hasNonTaskNote;
 
       if (hasEventSignal || taskTexts.length === 0) {
         items.push(
@@ -793,7 +847,7 @@ function buildProposalItems(
       const isoDate = resolveDate(slot.date, slot.label);
       if (!isoDate) continue;
       const slotSignal = `${slot.label ?? ""} ${slot.date ?? ""}`;
-      if (isTaskLikeText(slotSignal) && !isEventLikeText(slotSignal)) {
+      if (isStandaloneTaskCandidate(slotSignal) && !isEventLikeText(slotSignal)) {
         items.push(buildTaskItem(isoDate, slot.label, slotSignal));
       } else {
         items.push(buildEventItem(isoDate, slot.time, slot.label, null));
