@@ -520,11 +520,31 @@ function buildEventItems(
   ].join(" ");
   const weekNumber = parseWeekNumber(weekContext);
   const resolvedYear = inferRealisticYear(collectYearCandidates(result), weekNumber);
+  const weekPlanLike =
+    /\b(a-plan|aplan|ukeplan|aktivitetsplan)\b/i.test(result.title) &&
+    weekNumber !== null;
 
   const resolveDate = (rawDate: string | null, rawLabel: string | null): string | null => {
     // Preserve existing explicit date parsing first.
     const direct = parseDateWithFallbackYear(rawDate, resolvedYear);
-    if (direct) return direct;
+    if (direct) {
+      const explicitYearMatch = rawDate ? /\b(20\d{2})\b/.exec(rawDate) : null;
+      const explicitYear = explicitYearMatch ? Number(explicitYearMatch[1]) : null;
+      const weekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
+      // Merge-safe guard: for week plans, ignore stale AI years (e.g. 2023) if
+      // we can calculate date from current week/year context and weekday.
+      if (
+        weekPlanLike &&
+        weekNumber &&
+        explicitYear &&
+        Math.abs(explicitYear - resolvedYear) >= 2 &&
+        weekday
+      ) {
+        const byWeek = parseIsoWeekDate(resolvedYear, weekNumber, weekday);
+        if (byWeek) return byWeek;
+      }
+      return direct;
+    }
     if (!weekNumber) return null;
     const weekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
     if (!weekday) return null;
