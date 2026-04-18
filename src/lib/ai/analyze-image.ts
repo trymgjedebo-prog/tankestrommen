@@ -7,7 +7,7 @@ import type {
   SchoolProfileGradeBand,
   SchoolProfileLesson,
   SchoolProfileWeekday,
-  SchoolProfileWeekdayKey,
+  SchoolProfileWeekdayIndex,
   SchoolWeeklyProfile,
   TimeSlot,
 } from "@/lib/types";
@@ -85,7 +85,7 @@ Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøyaktig disse nøkle
   Når schoolWeeklyProfile er utfylt: sett schedule til [] og scheduleByDay til [] (unngå duplikat kalenderdata).
   Objektet har:
   - gradeBand: trinn/klasse fritekst (f.eks. «10. trinn», «10B», «VG2») eller null – serveren normaliserer til Foreldre-App-koder
-  - weekdays: objekt med nøkler kun på engelsk: monday, tuesday, wednesday, thursday, friday, (saturday, sunday kun hvis synlig). Hver verdi er ENTEN:
+  - weekdays: objekt med nøkler "0"–"4" (0=mandag … 4=fredag), alternativt man/tir/ons/tor/fre. Lørdag/søndag ikke i skoleprofil-MVP. Hver verdi er ENTEN:
     - { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" } når bare skolestart/-slutt er oppgitt, ELLER
     - { "useSimpleDay": false, "lessons": [ { "subjectKey": "norsk", "customLabel": null eller tekst, "start": "HH:MM", "end": "HH:MM" }, ... ] }
   subjectKey: kort slug på norsk fagnavn i små bokstaver og bindestrek (norsk, matematikk, engelsk, naturfag, samfunnsfag, kroppsoving, musikk, kunst_og_håndverk, osv.). Bruk customLabel når faget trenger presisering (f.eks. «Spansk valgfag»).
@@ -176,38 +176,71 @@ function normalizeHHMM(raw: string | null): string | null {
   return null;
 }
 
-const EN_WEEKDAY_KEYS = new Set<string>([
-  "monday",
-  "tuesday",
-  "wednesday",
-  "thursday",
-  "friday",
-  "saturday",
-  "sunday",
-]);
-
-const NB_WEEKDAY_TO_EN: Record<string, SchoolProfileWeekdayKey> = {
-  mandag: "monday",
-  ma: "monday",
-  tirsdag: "tuesday",
-  ti: "tuesday",
-  onsdag: "wednesday",
-  on: "wednesday",
-  torsdag: "thursday",
-  to: "thursday",
-  fredag: "friday",
-  fr: "friday",
-  lordag: "saturday",
-  "lørdag": "saturday",
-  sondag: "sunday",
-  "søndag": "sunday",
-};
-
-function canonicalWeekdayKey(raw: string): SchoolProfileWeekdayKey | null {
+/** Mandag = "0" … fredag = "4" (Foreldre-App). Lør/søn → null. */
+function canonicalSchoolProfileWeekdayIndex(
+  raw: string,
+): SchoolProfileWeekdayIndex | null {
   const k = raw.toLowerCase().trim().replace(/\.$/, "");
-  if (EN_WEEKDAY_KEYS.has(k)) return k as SchoolProfileWeekdayKey;
-  const nb = normalizeNorwegianLetters(k.replace(/\s+/g, ""));
-  return NB_WEEKDAY_TO_EN[nb] ?? null;
+  const collapsed = k.replace(/\s+/g, "");
+
+  if (/^[0-4]$/.test(collapsed)) {
+    return collapsed as SchoolProfileWeekdayIndex;
+  }
+
+  const nbAbbr: Record<string, SchoolProfileWeekdayIndex> = {
+    man: "0",
+    tir: "1",
+    ons: "2",
+    tor: "3",
+    fre: "4",
+  };
+  if (nbAbbr[collapsed]) return nbAbbr[collapsed];
+
+  const nb = normalizeNorwegianLetters(collapsed);
+  if (nb === "lordag" || nb === "sondag" || nb === "laurdag") return null;
+
+  const nbFull: Record<string, SchoolProfileWeekdayIndex> = {
+    mandag: "0",
+    tirsdag: "1",
+    onsdag: "2",
+    torsdag: "3",
+    fredag: "4",
+  };
+  if (nbFull[nb]) return nbFull[nb];
+
+  if (
+    collapsed === "saturday" ||
+    collapsed === "sunday" ||
+    collapsed === "sat" ||
+    collapsed === "sun"
+  ) {
+    return null;
+  }
+
+  const enFull: Record<string, SchoolProfileWeekdayIndex> = {
+    monday: "0",
+    tuesday: "1",
+    wednesday: "2",
+    thursday: "3",
+    friday: "4",
+  };
+  if (enFull[collapsed]) return enFull[collapsed];
+
+  const enShort: Record<string, SchoolProfileWeekdayIndex> = {
+    mon: "0",
+    ma: "0",
+    tue: "1",
+    ti: "1",
+    wed: "2",
+    on: "2",
+    thu: "3",
+    to: "3",
+    fri: "4",
+    fr: "4",
+  };
+  if (enShort[collapsed]) return enShort[collapsed];
+
+  return null;
 }
 
 function normalizeSchoolProfileLesson(raw: unknown): SchoolProfileLesson | null {
@@ -358,21 +391,24 @@ function normalizeSchoolWeeklyProfileRaw(
     context?.description,
   ]);
 
-  let weekdays: Partial<Record<SchoolProfileWeekdayKey, SchoolProfileWeekday>> =
+  let weekdays: Partial<Record<SchoolProfileWeekdayIndex, SchoolProfileWeekday>> =
     {};
 
   if (Array.isArray(o.weekdays)) {
     for (const row of o.weekdays) {
       if (!row || typeof row !== "object") continue;
       const r = row as Record<string, unknown>;
-      const wk = typeof r.weekday === "string" ? canonicalWeekdayKey(r.weekday) : null;
+      const wk =
+        typeof r.weekday === "string"
+          ? canonicalSchoolProfileWeekdayIndex(r.weekday)
+          : null;
       if (!wk) continue;
       const entry = normalizeSchoolProfileWeekday(r);
       if (entry) weekdays[wk] = entry;
     }
   } else if (o.weekdays && typeof o.weekdays === "object") {
     for (const [key, val] of Object.entries(o.weekdays as Record<string, unknown>)) {
-      const wk = canonicalWeekdayKey(key);
+      const wk = canonicalSchoolProfileWeekdayIndex(key);
       if (!wk) continue;
       const entry = normalizeSchoolProfileWeekday(val);
       if (entry) weekdays[wk] = entry;
@@ -831,7 +867,7 @@ Return this JSON shape:
   "contacts": string[],
   "schoolWeeklyProfile": null | {
     "gradeBand": string | null (class/year free text, e.g. "10B", "10. trinn", "VG2"; server maps to 1-4, 5-7, 8-10, vg1, vg2, vg3),
-    "weekdays": object whose keys are only monday, tuesday, wednesday, thursday, friday (saturday/sunday only if in source). Each value is either:
+    "weekdays": object whose keys are "0"–"4" (Monday=0 … Friday=4), or man/tir/ons/tor/fre. Each value is either:
       { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" }
       or { "useSimpleDay": false, "lessons": [ { "subjectKey": string, "customLabel": string | null, "start": "HH:MM", "end": "HH:MM" } ] }
   }

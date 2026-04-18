@@ -43,15 +43,11 @@ export type AnalysisSourceHint =
   | { type: "docx"; fileName: string; fileUrl?: string }
   | { type: "image"; fileName: string; fileUrl?: string };
 
-/** Ukedag-nøkler i API (matcher typisk lagring i Foreldre-App). */
-export type SchoolProfileWeekdayKey =
-  | "monday"
-  | "tuesday"
-  | "wednesday"
-  | "thursday"
-  | "friday"
-  | "saturday"
-  | "sunday";
+/**
+ * Mandag = "0" … fredag = "4" (Foreldre-App `ChildSchoolProfile.weekdays`).
+ * Lørdag/søndag inngår ikke i skoleprofil-MVP.
+ */
+export type SchoolProfileWeekdayIndex = "0" | "1" | "2" | "3" | "4";
 
 /** Én undervisningstime i en fast ukesplan. */
 export interface SchoolProfileLesson {
@@ -93,7 +89,7 @@ export type SchoolProfileGradeBand =
  */
 export interface SchoolWeeklyProfile {
   gradeBand: SchoolProfileGradeBand | null;
-  weekdays: Partial<Record<SchoolProfileWeekdayKey, SchoolProfileWeekday>>;
+  weekdays: Partial<Record<SchoolProfileWeekdayIndex, SchoolProfileWeekday>>;
 }
 
 export interface AIAnalysisResult {
