@@ -6,6 +6,7 @@ import type {
   ExtractedText,
   SchoolProfileGradeBand,
   SchoolProfileLesson,
+  SchoolProfileLessonCandidate,
   SchoolProfileWeekday,
   SchoolProfileWeekdayIndex,
   SchoolWeeklyProfile,
@@ -83,13 +84,33 @@ Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøyaktig disse nøkle
   - confidence: tall 0–1 for OCR/lesbarhet (number)
 - schoolWeeklyProfile: null ELLER et objekt for FAST UKENTLIG TIMEPLAN (samme fag/timer hver uke, typisk «Timeplan», «Ukeskjema», tabell med klokkeslett + fag mandag–fredag). IKKE bruk dette for A-plan, aktivitetsplan for én bestemt uke, invitasjoner eller endagshendelser – da null.
   Når schoolWeeklyProfile er utfylt: sett schedule til [] og scheduleByDay til [] (unngå duplikat kalenderdata).
+
+GRID-TIMEPLAN – LES LAYOUTEN FØR DU TOLKER TEKSTEN:
+  Timeplaner er en 2D-ruter. Du MÅ tolke hver fagboks ut fra HVOR den står visuelt:
+  1) Først finn DAGSKOLONNENE langs toppen: Mandag, Tirsdag, Onsdag, Torsdag, Fredag (stå ALDRI på feil kolonne – om boksen ligger midt mellom to, pek på den dagen boksens senter er innenfor).
+  2) Finn TIDSRADENE langs venstre kolonne. Dette er tidsnavene som hver rad starter/ender på (f.eks. 08:15, 09:00, 09:15, 10:05, 10:45, 11:30, 12:15, 13:00).
+  3) For HVER fagboks: bestem hvilken dag-kolonne (horisontal posisjon) og hvilken tidsrad (vertikal posisjon) den dekker. Fagboksens vertikale høyde avgjør start og slutt. En boks som går over flere rader → lengre time.
+  4) IKKE gjett fag etter rekkefølge i en liste. Rekkefølgen i kildeteksten er ikke pålitelig; KUN visuell plassering gjelder.
+  5) Kryssjekk før du skriver time: "Denne boksen ligger under kolonne X og fra rad Y1 til Y2 → dag=X, start=Y1, slutt=Y2".
+  6) Hvis to bokser står i SAMME slot (samme dag + samme tidsrad) med ulike fag (f.eks. «Matte D1» over, «Norsk D2» under, eller delt boks):
+     - Rapporter det som ÉN lesson for slotten med subjectKey=mest sannsynlige fag for en tilfeldig elev, customLabel=den originale teksten slik den står, og legg alle alternativ i subjectCandidates (se under).
+     - IKKE legg det som to separate lessons for samme elev.
+  7) Pauser som «Lillefri», «Storefri», «Friminutt», «Pause», «Lunsj», «Midttime» er IKKE fag – IKKE ta dem med i lessons.
+  8) Tekst inni boksen kan overstyre raden:
+     - «Begynner 10.05» / «Starter 10:05» → bytt ut start med 10:05.
+     - «varer til 09.45» / «Slutter 09:45» → bytt ut slutt med 09:45.
+     - «30 min» / «45 min» → beregn sluttet ut fra start hvis starten er sikker, ellers bruk raden.
+     - «Etter høstferien» / «Fra uke …» → fortsatt ta med (dette er en fast time), men du kan legge teksten i customLabel.
+  9) Hvis en time bare dekker PART av en rad og tekst bekrefter kortere varighet, tro på teksten først, raden som fallback.
+  10) Når usikker på en spesifikk boks, hopp den over fremfor å gjette feil dag/tid. Hellere en ufullstendig timeplan enn feilplassert fag.
+
   Objektet har:
   - gradeBand: trinn/klasse fritekst (f.eks. «10. trinn», «10B», «VG2») eller null – serveren normaliserer til Foreldre-App-koder
   - weekdays: objekt med nøkler "0"–"4" (0=mandag … 4=fredag), alternativt man/tir/ons/tor/fre. Lørdag/søndag ikke i skoleprofil-MVP. Hver verdi er ENTEN:
     - { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" } når bare skolestart/-slutt er oppgitt, ELLER
-    - { "useSimpleDay": false, "lessons": [ { "subjectKey": "norsk", "customLabel": null eller tekst, "start": "HH:MM", "end": "HH:MM" }, ... ] }
-  subjectKey: kort slug på norsk fagnavn i små bokstaver og bindestrek (norsk, matematikk, engelsk, naturfag, samfunnsfag, kroppsoving, musikk, kunst_og_håndverk, osv.). Bruk customLabel når faget trenger presisering (f.eks. «Spansk valgfag»).
-  Tider: 24-timersformat HH:MM.
+    - { "useSimpleDay": false, "lessons": [ { "subjectKey": "norsk", "customLabel": null eller tekst, "start": "HH:MM", "end": "HH:MM", "subjectCandidates": [ { "subject": "Matematikk", "subjectKey": "matematikk", "weight": 1 }, { "subject": "Norsk", "subjectKey": "norsk", "weight": 1 } ] }, ... ] }
+  subjectKey: kort slug på norsk fagnavn i små bokstaver og bindestrek (norsk, matematikk, engelsk, naturfag, samfunnsfag, kroppsoving, musikk, kunst_og_håndverk, osv.). Bruk customLabel når faget trenger presisering (f.eks. «Spansk valgfag»). subjectCandidates KUN når samme slot har flere alternative fag/spor – da en rad per alternativ, weight=1 for begge (eller høyere for førstnevnte).
+  Tider: 24-timersformat HH:MM. Sorter lessons innen hver dag etter start tid, stigende.
 
 Hvis bildet ikke inneholder lesbar tekst, sett lav confidence og forklar kort i description.`;
 
@@ -243,6 +264,88 @@ function canonicalSchoolProfileWeekdayIndex(
   return null;
 }
 
+/** Pauser/slots som IKKE skal være lessons i en skoleprofil. */
+const BREAK_SUBJECT_KEYS = new Set<string>([
+  "lillefri",
+  "storefri",
+  "friminutt",
+  "friminutter",
+  "pause",
+  "pauser",
+  "lunsj",
+  "lunch",
+  "spising",
+  "mat",
+  "matpause",
+  "midttime",
+]);
+
+const BREAK_TEXT_RE =
+  /\b(lillefri|storefri|friminutt|friminutter|pause|pauser|lunsj|spising|matpause|midttime)\b/i;
+
+function hhmmToMinutes(t: string): number | null {
+  const m = /^(\d{2}):(\d{2})$/.exec(t);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+function minutesToHHMM(n: number): string | null {
+  if (!Number.isFinite(n) || n < 0 || n >= 24 * 60) return null;
+  const h = Math.floor(n / 60);
+  const min = n % 60;
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
+/** Trekk «Begynner 10.05», «Starter 10:05», «varer til 09.45», «Slutter 09:45», «30 min» ut av tekst. */
+function extractTimeHintsFromText(text: string | null): {
+  start?: string;
+  end?: string;
+  durationMinutes?: number;
+} {
+  if (!text) return {};
+  const out: { start?: string; end?: string; durationMinutes?: number } = {};
+
+  const startRe =
+    /\b(?:begynner|starter|start\s+(?:kl\.?|at)?)\s*(?:kl\.?\s*)?(\d{1,2})[.:](\d{2})\b/i;
+  const endRe =
+    /\b(?:varer\s+til|slutter|til)\s*(?:kl\.?\s*)?(\d{1,2})[.:](\d{2})\b/i;
+  const durRe = /\b(\d{1,3})\s*min(?:utt|utes)?\b/i;
+
+  const s = startRe.exec(text);
+  if (s) {
+    const hh = String(Number(s[1])).padStart(2, "0");
+    if (Number(s[1]) <= 23 && Number(s[2]) <= 59) out.start = `${hh}:${s[2]}`;
+  }
+  const e = endRe.exec(text);
+  if (e) {
+    const hh = String(Number(e[1])).padStart(2, "0");
+    if (Number(e[1]) <= 23 && Number(e[2]) <= 59) out.end = `${hh}:${e[2]}`;
+  }
+  const d = durRe.exec(text);
+  if (d) {
+    const n = Number(d[1]);
+    if (n > 0 && n <= 600) out.durationMinutes = n;
+  }
+  return out;
+}
+
+function normalizeSchoolProfileLessonCandidate(
+  raw: unknown,
+): SchoolProfileLessonCandidate | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const subject = asNonEmptyString(o.subject);
+  const rawKey = typeof o.subjectKey === "string" ? o.subjectKey.trim() : "";
+  const subjectKey =
+    slugifySubjectKey(rawKey) || (subject ? slugifySubjectKey(subject) : null);
+  if (!subjectKey || !subject) return null;
+  if (BREAK_SUBJECT_KEYS.has(subjectKey)) return null;
+  const rawWeight = typeof o.weight === "number" ? o.weight : Number(o.weight);
+  const weight =
+    Number.isFinite(rawWeight) && rawWeight > 0 ? Math.min(2, rawWeight) : 1;
+  return { subject, subjectKey, weight };
+}
+
 function normalizeSchoolProfileLesson(raw: unknown): SchoolProfileLesson | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
@@ -250,15 +353,76 @@ function normalizeSchoolProfileLesson(raw: unknown): SchoolProfileLesson | null 
   const fromSubj = typeof o.subject === "string" ? o.subject.trim() : "";
   const key = slugifySubjectKey(fromKey) || slugifySubjectKey(fromSubj);
   if (!key) return null;
-  const start = normalizeHHMM(asNonEmptyString(o.start));
-  const end = normalizeHHMM(asNonEmptyString(o.end));
+
+  if (BREAK_SUBJECT_KEYS.has(key)) return null;
+  const customLabel = asNonEmptyString(o.customLabel);
+  if (customLabel && BREAK_TEXT_RE.test(customLabel) && !/\b(matte|norsk|engelsk|naturfag|samfunnsfag|krle|rle|kroppsov|musikk|kunst|historie|fysikk|kjemi|biologi|tysk|spansk|fransk)\b/i.test(customLabel)) {
+    return null;
+  }
+
+  let start = normalizeHHMM(asNonEmptyString(o.start));
+  let end = normalizeHHMM(asNonEmptyString(o.end));
+
+  const hints = extractTimeHintsFromText(customLabel);
+  if (hints.start) start = hints.start;
+  if (hints.end) end = hints.end;
+  if (!end && start && hints.durationMinutes) {
+    const startMin = hhmmToMinutes(start);
+    if (startMin !== null) end = minutesToHHMM(startMin + hints.durationMinutes);
+  }
+  if (!start && end && hints.durationMinutes) {
+    const endMin = hhmmToMinutes(end);
+    if (endMin !== null) start = minutesToHHMM(endMin - hints.durationMinutes);
+  }
+
   if (!start || !end) return null;
-  return {
+  const startMin = hhmmToMinutes(start);
+  const endMin = hhmmToMinutes(end);
+  if (startMin === null || endMin === null || endMin <= startMin) return null;
+
+  const rawCandidates = Array.isArray(o.subjectCandidates)
+    ? (o.subjectCandidates
+        .map(normalizeSchoolProfileLessonCandidate)
+        .filter(
+          (x): x is SchoolProfileLessonCandidate => x !== null,
+        ) as SchoolProfileLessonCandidate[])
+    : [];
+  // Dedup candidates by subjectKey, keep first occurrence order.
+  const seen = new Set<string>();
+  const candidates = rawCandidates.filter((c) => {
+    if (seen.has(c.subjectKey)) return false;
+    seen.add(c.subjectKey);
+    return true;
+  });
+
+  const lesson: SchoolProfileLesson = {
     subjectKey: key,
-    customLabel: asNonEmptyString(o.customLabel),
+    customLabel,
     start,
     end,
   };
+  if (candidates.length >= 2) lesson.subjectCandidates = candidates;
+  return lesson;
+}
+
+function dedupeAndSortLessons(
+  lessons: SchoolProfileLesson[],
+): SchoolProfileLesson[] {
+  const sorted = [...lessons].sort((a, b) => {
+    const am = hhmmToMinutes(a.start) ?? 0;
+    const bm = hhmmToMinutes(b.start) ?? 0;
+    if (am !== bm) return am - bm;
+    return (hhmmToMinutes(a.end) ?? 0) - (hhmmToMinutes(b.end) ?? 0);
+  });
+  const seen = new Set<string>();
+  const out: SchoolProfileLesson[] = [];
+  for (const l of sorted) {
+    const key = `${l.start}-${l.end}|${l.subjectKey}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(l);
+  }
+  return out;
 }
 
 function normalizeSchoolProfileWeekday(raw: unknown): SchoolProfileWeekday | null {
@@ -273,9 +437,11 @@ function normalizeSchoolProfileWeekday(raw: unknown): SchoolProfileWeekday | nul
   }
 
   if (Array.isArray(o.lessons)) {
-    const lessons = o.lessons
-      .map(normalizeSchoolProfileLesson)
-      .filter((x): x is SchoolProfileLesson => x !== null);
+    const lessons = dedupeAndSortLessons(
+      o.lessons
+        .map(normalizeSchoolProfileLesson)
+        .filter((x): x is SchoolProfileLesson => x !== null),
+    );
     if (lessons.length === 0) return null;
     return { useSimpleDay: false, lessons };
   }

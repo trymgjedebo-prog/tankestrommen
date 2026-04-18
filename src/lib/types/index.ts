@@ -49,12 +49,25 @@ export type AnalysisSourceHint =
  */
 export type SchoolProfileWeekdayIndex = "0" | "1" | "2" | "3" | "4";
 
+/** Alternativt fag i samme tidsslot (f.eks. «Matte D1 / Norsk D2»). */
+export interface SchoolProfileLessonCandidate {
+  subjectKey: string;
+  subject: string;
+  /** 1 = foretrukket / først i kilden, lavere = mindre sannsynlig for dette barnet. */
+  weight: number;
+}
+
 /** Én undervisningstime i en fast ukesplan. */
 export interface SchoolProfileLesson {
   subjectKey: string;
   customLabel: string | null;
   start: string;
   end: string;
+  /**
+   * Valgfritt: hvis samme slot inneholder to valgfag/spor, legg dem her slik at
+   * Foreldre-App kan matche til riktig fag for eleven. Utelates når bare ett fag.
+   */
+  subjectCandidates?: SchoolProfileLessonCandidate[];
 }
 
 export interface SchoolProfileWeekdaySimple {
