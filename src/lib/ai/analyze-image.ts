@@ -4,6 +4,10 @@ import type {
   DayScheduleEntry,
   EventCategory,
   ExtractedText,
+  SchoolProfileLesson,
+  SchoolProfileWeekday,
+  SchoolProfileWeekdayKey,
+  SchoolWeeklyProfile,
   TimeSlot,
 } from "@/lib/types";
 
@@ -76,6 +80,15 @@ Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøyaktig disse nøkle
   - raw: transkripsjon av relevant tekst fra bildet (string)
   - language: ISO 639-1 språkkode, typisk "no" (string)
   - confidence: tall 0–1 for OCR/lesbarhet (number)
+- schoolWeeklyProfile: null ELLER et objekt for FAST UKENTLIG TIMEPLAN (samme fag/timer hver uke, typisk «Timeplan», «Ukeskjema», tabell med klokkeslett + fag mandag–fredag). IKKE bruk dette for A-plan, aktivitetsplan for én bestemt uke, invitasjoner eller endagshendelser – da null.
+  Når schoolWeeklyProfile er utfylt: sett schedule til [] og scheduleByDay til [] (unngå duplikat kalenderdata).
+  Objektet har:
+  - gradeBand: trinn/klasse tekstlig, f.eks. «10. trinn», «8A», «VG2», eller null
+  - weekdays: objekt med nøkler kun på engelsk: monday, tuesday, wednesday, thursday, friday, (saturday, sunday kun hvis synlig). Hver verdi er ENTEN:
+    - { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" } når bare skolestart/-slutt er oppgitt, ELLER
+    - { "useSimpleDay": false, "lessons": [ { "subjectKey": "norsk", "customLabel": null eller tekst, "start": "HH:MM", "end": "HH:MM" }, ... ] }
+  subjectKey: kort slug på norsk fagnavn i små bokstaver og bindestrek (norsk, matematikk, engelsk, naturfag, samfunnsfag, kroppsoving, musikk, kunst_og_håndverk, osv.). Bruk customLabel når faget trenger presisering (f.eks. «Spansk valgfag»).
+  Tider: 24-timersformat HH:MM.
 
 Hvis bildet ikke inneholder lesbar tekst, sett lav confidence og forklar kort i description.`;
 
@@ -120,6 +133,154 @@ function normalizeStringArray(raw: unknown): string[] {
 
 function asNonEmptyString(raw: unknown): string | null {
   return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+function normalizeSpace(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function normalizeNorwegianLetters(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/å/g, "a")
+    .replace(/ø/g, "o")
+    .replace(/æ/g, "e");
+}
+
+function slugifySubjectKey(raw: string): string | null {
+  const s = normalizeSpace(raw);
+  if (s.length < 2) return null;
+  const slug = normalizeNorwegianLetters(s)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || null;
+}
+
+function normalizeHHMM(raw: string | null): string | null {
+  if (!raw) return null;
+  const t = raw.trim().replace(/\./g, ":");
+  const m = /^(\d{1,2}):(\d{2})\s*$/.exec(t);
+  if (m) {
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+  }
+  const bare = /^(\d{1,2})\s*$/.exec(t);
+  if (bare) {
+    const h = Number(bare[1]);
+    if (h < 0 || h > 23) return null;
+    return `${String(h).padStart(2, "0")}:00`;
+  }
+  return null;
+}
+
+const EN_WEEKDAY_KEYS = new Set<string>([
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+]);
+
+const NB_WEEKDAY_TO_EN: Record<string, SchoolProfileWeekdayKey> = {
+  mandag: "monday",
+  ma: "monday",
+  tirsdag: "tuesday",
+  ti: "tuesday",
+  onsdag: "wednesday",
+  on: "wednesday",
+  torsdag: "thursday",
+  to: "thursday",
+  fredag: "friday",
+  fr: "friday",
+  lordag: "saturday",
+  "lørdag": "saturday",
+  sondag: "sunday",
+  "søndag": "sunday",
+};
+
+function canonicalWeekdayKey(raw: string): SchoolProfileWeekdayKey | null {
+  const k = raw.toLowerCase().trim().replace(/\.$/, "");
+  if (EN_WEEKDAY_KEYS.has(k)) return k as SchoolProfileWeekdayKey;
+  const nb = normalizeNorwegianLetters(k.replace(/\s+/g, ""));
+  return NB_WEEKDAY_TO_EN[nb] ?? null;
+}
+
+function normalizeSchoolProfileLesson(raw: unknown): SchoolProfileLesson | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const fromKey = typeof o.subjectKey === "string" ? o.subjectKey.trim() : "";
+  const fromSubj = typeof o.subject === "string" ? o.subject.trim() : "";
+  const key = slugifySubjectKey(fromKey) || slugifySubjectKey(fromSubj);
+  if (!key) return null;
+  const start = normalizeHHMM(asNonEmptyString(o.start));
+  const end = normalizeHHMM(asNonEmptyString(o.end));
+  if (!start || !end) return null;
+  return {
+    subjectKey: key,
+    customLabel: asNonEmptyString(o.customLabel),
+    start,
+    end,
+  };
+}
+
+function normalizeSchoolProfileWeekday(raw: unknown): SchoolProfileWeekday | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+
+  if (o.useSimpleDay === true) {
+    const schoolStart = normalizeHHMM(asNonEmptyString(o.schoolStart));
+    const schoolEnd = normalizeHHMM(asNonEmptyString(o.schoolEnd));
+    if (!schoolStart || !schoolEnd) return null;
+    return { useSimpleDay: true, schoolStart, schoolEnd };
+  }
+
+  if (Array.isArray(o.lessons)) {
+    const lessons = o.lessons
+      .map(normalizeSchoolProfileLesson)
+      .filter((x): x is SchoolProfileLesson => x !== null);
+    if (lessons.length === 0) return null;
+    return { useSimpleDay: false, lessons };
+  }
+
+  return null;
+}
+
+function normalizeSchoolWeeklyProfileRaw(raw: unknown): SchoolWeeklyProfile | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const gradeBand =
+    o.gradeBand === null || o.gradeBand === undefined
+      ? null
+      : asNonEmptyString(o.gradeBand);
+
+  let weekdays: Partial<Record<SchoolProfileWeekdayKey, SchoolProfileWeekday>> =
+    {};
+
+  if (Array.isArray(o.weekdays)) {
+    for (const row of o.weekdays) {
+      if (!row || typeof row !== "object") continue;
+      const r = row as Record<string, unknown>;
+      const wk = typeof r.weekday === "string" ? canonicalWeekdayKey(r.weekday) : null;
+      if (!wk) continue;
+      const entry = normalizeSchoolProfileWeekday(r);
+      if (entry) weekdays[wk] = entry;
+    }
+  } else if (o.weekdays && typeof o.weekdays === "object") {
+    for (const [key, val] of Object.entries(o.weekdays as Record<string, unknown>)) {
+      const wk = canonicalWeekdayKey(key);
+      if (!wk) continue;
+      const entry = normalizeSchoolProfileWeekday(val);
+      if (entry) weekdays[wk] = entry;
+    }
+  }
+
+  if (Object.keys(weekdays).length === 0) return null;
+  return { gradeBand: gradeBand ?? null, weekdays };
 }
 
 function detectIsoWeekday(dayLabel: string | null): number | null {
@@ -431,6 +592,10 @@ function normalizeAIAnalysisResult(
     fallbackDescriptionParts.push(`Kontakt: ${contacts.join("; ")}`);
   }
 
+  const schoolWeeklyProfile = normalizeSchoolWeeklyProfileRaw(
+    o.schoolWeeklyProfile,
+  );
+
   return {
     title: typeof o.title === "string" ? o.title : "Uten tittel",
     schedule: (() => {
@@ -475,6 +640,7 @@ function normalizeAIAnalysisResult(
         : String(o.sourceUrl),
     confidence: clamp01(o.confidence),
     extractedText: normalizeExtractedText(o.extractedText),
+    ...(schoolWeeklyProfile ? { schoolWeeklyProfile } : {}),
   };
 }
 
@@ -520,6 +686,8 @@ Rules:
 18. Include reminders/NB/practical notices in "notes".
 19. If there is no extraordinary event, still populate that day with concise schoolwork/task summaries.
 20. Summarize into clean actionable language; do not copy long raw paragraphs.
+21. If the source is a recurring weekly timetable (same subjects/periods every week: "timeplan", "ukeskjema", grid with clock times + subjects Mon–Fri), set "schoolWeeklyProfile" to an object and set "days" to []. Do not copy each lesson into "days".
+22. For A-plans, one-off weekly activity plans, invitations, or week-specific narratives, set "schoolWeeklyProfile" to null and use "days" as usual.
 
 Return this JSON shape:
 
@@ -538,8 +706,16 @@ Return this JSON shape:
     }
   ],
   "generalImportantInfo": string[],
-  "contacts": string[]
-}`;
+  "contacts": string[],
+  "schoolWeeklyProfile": null | {
+    "gradeBand": string | null,
+    "weekdays": object whose keys are only monday, tuesday, wednesday, thursday, friday (saturday/sunday only if in source). Each value is either:
+      { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" }
+      or { "useSimpleDay": false, "lessons": [ { "subjectKey": string, "customLabel": string | null, "start": "HH:MM", "end": "HH:MM" } ] }
+  }
+}
+
+Use English weekday keys only. subjectKey: lowercase slug from Norwegian subject name (norsk, matematikk, engelsk). customLabel when extra detail is needed. Times 24h HH:MM.`;
 
 function getOpenAIClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
@@ -597,7 +773,7 @@ export async function analyzeImage(
       },
     ],
     response_format: { type: "json_object" },
-    max_tokens: 1500,
+    max_tokens: 2800,
     temperature: 0.2,
   });
 
@@ -619,7 +795,7 @@ export async function analyzeText(
       },
     ],
     response_format: { type: "json_object" },
-    max_tokens: 1500,
+    max_tokens: 4000,
     temperature: 0.2,
   });
 

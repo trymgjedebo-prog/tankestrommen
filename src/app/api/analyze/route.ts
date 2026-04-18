@@ -7,6 +7,7 @@ import type {
   AnalysisSourceHint,
   AIAnalysisResult,
   DayScheduleEntry,
+  SchoolWeeklyProfile,
 } from "@/lib/types";
 
 /** pdf-parse / mammoth krever Node (ikke Edge). */
@@ -560,20 +561,21 @@ type SchoolSubjectCandidate = {
   weight: number;
 };
 
-type SchoolOverrideKind =
+type SchoolDayOverrideKind =
   | "exam_day"
   | "trip_day"
   | "activity_day"
   | "free_day"
-  | "delayed_start";
+  | "delayed_start"
+  | "early_end";
 
 /** Hvordan Foreldre-App bør behandle dagen – «merge» berikelse, «replace» trumfer normal plan. */
-type SchoolOverrideMode = "merge" | "replace";
+type SchoolDayOverrideMode = "merge" | "replace";
 
-type SchoolOverride = {
-  overrideMode: SchoolOverrideMode;
-  overrideKind: SchoolOverrideKind;
-  /** HH:MM, hvis kjent (særlig for delayed_start / heldagsprøve). */
+type SchoolDayOverride = {
+  overrideMode: SchoolDayOverrideMode;
+  overrideKind: SchoolDayOverrideKind;
+  /** HH:MM, hvis kjent (særlig for delayed_start / early_end / heldagsprøve). */
   effectiveStart: string | null;
   effectiveEnd: string | null;
   /** Kort setning fra kilden, for UI-visning. */
@@ -597,11 +599,6 @@ type EventSchoolContext = {
   itemType: SchoolPortalItemType;
   confidence: number;
   sourceKind: string;
-  /**
-   * Valgfritt: markerer at dagen er spesiell og potensielt trumfer normal plan.
-   * Mangler når dagen er en vanlig skoledag (bakoverkompatibelt).
-   */
-  schoolOverride?: SchoolOverride;
 };
 
 type PortalEventItem = {
@@ -619,7 +616,13 @@ type PortalEventItem = {
     notes?: string;
     location?: string;
     metadata?: {
-      schoolContext: EventSchoolContext;
+      /** Vanlig skolekontekst for berikelse av eksisterende skoleblokk. */
+      schoolContext?: EventSchoolContext;
+      /**
+       * Avviksdag som potensielt trumfer normal skoleplan.
+       * Foreldre-App leser dette fra `event.metadata.schoolDayOverride`.
+       */
+      schoolDayOverride?: SchoolDayOverride;
     };
   };
 };
@@ -895,8 +898,8 @@ function parseProgramSchoolFields(line: string | null): {
 
 /** Svake og sterke signaler for spesialdager. Holdes bevisst enkelt i MVP. */
 const OVERRIDE_PATTERNS: Array<{
-  kind: SchoolOverrideKind;
-  mode: SchoolOverrideMode;
+  kind: SchoolDayOverrideKind;
+  mode: SchoolDayOverrideMode;
   baseConfidence: number;
   regex: RegExp;
 }> = [
@@ -935,6 +938,13 @@ const OVERRIDE_PATTERNS: Array<{
     regex:
       /\b(senere\s+start|sen\s+start|skolen\s+starter\s+(?:kl\.?\s*)?\d{1,2}(?:[.:]\d{2})?|oppmote\s+kl|oppmøte\s+kl|møt\s+(?:kl\.?\s*)?\d)/i,
   },
+  {
+    kind: "early_end",
+    mode: "replace",
+    baseConfidence: 0.7,
+    regex:
+      /\b(tidligere\s+slutt|tidlig\s+slutt|kortere\s+dag|skoledagen\s+slutter\s+(?:kl\.?\s*)?\d{1,2}(?:[.:]\d{2})?|slutter\s+tidlig|fri\s+etter\s+(?:kl\.?\s*)?\d)/i,
+  },
 ];
 
 function extractEffectiveTimes(text: string): {
@@ -969,10 +979,10 @@ function firstSentenceContaining(text: string, re: RegExp): string | null {
   return normalizeSpace(text);
 }
 
-function detectSchoolOverride(
+function detectSchoolDayOverride(
   day: DayScheduleEntry,
   fallbackTime: string | null,
-): SchoolOverride | null {
+): SchoolDayOverride | null {
   const haystack = [
     day.dayLabel ?? "",
     day.details ?? "",
@@ -1076,8 +1086,6 @@ function buildEventSchoolContext(
   const multiCandidates =
     parsed.subjectCandidates.length > 1 ? parsed.subjectCandidates : undefined;
 
-  const override = detectSchoolOverride(day, time);
-
   return {
     subject: parsed.subject ? cleanSubjectToken(parsed.subject) : null,
     subjectKey: parsed.subjectKey,
@@ -1088,7 +1096,6 @@ function buildEventSchoolContext(
     itemType,
     confidence: result.confidence,
     sourceKind: portalSourceKind(sourceType, weekPlanLike, result.title),
-    ...(override ? { schoolOverride: override } : {}),
   };
 }
 
@@ -1187,6 +1194,7 @@ function buildProposalItems(
       highlights: string[];
     },
     schoolContext?: EventSchoolContext | null,
+    schoolDayOverride?: SchoolDayOverride | null,
   ): PortalEventItem => {
     const { start, end } = extractStartEnd(time);
     const item: PortalEventItem = {
@@ -1206,8 +1214,11 @@ function buildProposalItems(
     const n = buildStructuredNotes(notes, dayContext);
     if (n) item.event.notes = n;
     if (result.location) item.event.location = result.location;
-    if (schoolContext) {
-      item.event.metadata = { schoolContext };
+    if (schoolContext || schoolDayOverride) {
+      item.event.metadata = {
+        ...(schoolContext ? { schoolContext } : {}),
+        ...(schoolDayOverride ? { schoolDayOverride } : {}),
+      };
     }
     return item;
   };
@@ -1293,13 +1304,26 @@ function buildProposalItems(
           weekPlanLike,
           day.time,
         );
+        // Override detekteres separat og legges på event.metadata.schoolDayOverride.
+        // Vanlige skoledager får kun schoolContext; avviksdager får ev. begge.
+        const dayOverride = isSchoolPlanBundleContext(result, weekPlanLike)
+          ? detectSchoolDayOverride(day, day.time)
+          : null;
         items.push(
-          buildEventItem(isoDate, day.time, day.dayLabel, day.details, {
-            rememberItems: day.rememberItems,
-            deadlines: day.deadlines,
-            notes: day.notes,
-            highlights: day.highlights,
-          }, schoolCtx),
+          buildEventItem(
+            isoDate,
+            day.time,
+            day.dayLabel,
+            day.details,
+            {
+              rememberItems: day.rememberItems,
+              deadlines: day.deadlines,
+              notes: day.notes,
+              highlights: day.highlights,
+            },
+            schoolCtx,
+            dayOverride,
+          ),
         );
       }
 
@@ -1317,23 +1341,57 @@ function buildProposalItems(
       if (isStandaloneTaskCandidate(slotSignal) && !isEventLikeText(slotSignal)) {
         items.push(buildTaskItem(isoDate, slot.label, slotSignal));
       } else {
-        items.push(buildEventItem(isoDate, slot.time, slot.label, null, undefined, null));
+        items.push(
+          buildEventItem(isoDate, slot.time, slot.label, null, undefined, null, null),
+        );
       }
     }
   }
 
   if (items.length === 0) {
     const today = new Date().toISOString().slice(0, 10);
-    items.push(buildEventItem(today, null, null, null, undefined, null));
+    items.push(buildEventItem(today, null, null, null, undefined, null, null));
   }
 
   return items;
+}
+
+function isUsableSchoolWeeklyProfile(
+  p: SchoolWeeklyProfile | undefined,
+): p is SchoolWeeklyProfile {
+  if (!p || typeof p !== "object") return false;
+  const keys = Object.keys(p.weekdays ?? {});
+  return keys.length > 0;
+}
+
+/**
+ * Egen import-flyt for fast timeplan → Foreldre-App `ChildSchoolProfile`.
+ * Toppnivåfelt (ikke `items`) så kalender-import ikke blander inn profile-rader.
+ */
+function buildSchoolProfileProposal(
+  result: AIAnalysisResult,
+  sourceType: string,
+): Record<string, unknown> | undefined {
+  if (!isUsableSchoolWeeklyProfile(result.schoolWeeklyProfile)) return undefined;
+  return {
+    proposalId: randomUUID(),
+    kind: "school_profile",
+    schemaVersion: "1.0.0",
+    confidence: result.confidence,
+    profile: result.schoolWeeklyProfile,
+    sourceTitle: result.title,
+    originalSourceType: sourceType,
+  };
 }
 
 function toPortalBundle(
   result: AIAnalysisResult,
   sourceType: string,
 ): Record<string, unknown> {
+  const schoolProfileProposal = buildSchoolProfileProposal(result, sourceType);
+  const items = schoolProfileProposal
+    ? []
+    : buildProposalItems(result, sourceType);
   return {
     schemaVersion: "1.0.0",
     provenance: {
@@ -1342,7 +1400,8 @@ function toPortalBundle(
       generatedAt: new Date().toISOString(),
       importRunId: randomUUID(),
     },
-    items: buildProposalItems(result, sourceType),
+    items,
+    ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
   };
 }
 
@@ -1357,6 +1416,7 @@ function wrapResponse(
     console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
       schemaVersion: bundle.schemaVersion,
       itemCount: (bundle.items as unknown[]).length,
+      hasSchoolProfile: Boolean(bundle.schoolProfileProposal),
     });
     return NextResponse.json(bundle);
   }

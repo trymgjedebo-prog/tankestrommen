@@ -43,6 +43,48 @@ export type AnalysisSourceHint =
   | { type: "docx"; fileName: string; fileUrl?: string }
   | { type: "image"; fileName: string; fileUrl?: string };
 
+/** Ukedag-nøkler i API (matcher typisk lagring i Foreldre-App). */
+export type SchoolProfileWeekdayKey =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+/** Én undervisningstime i en fast ukesplan. */
+export interface SchoolProfileLesson {
+  subjectKey: string;
+  customLabel: string | null;
+  start: string;
+  end: string;
+}
+
+export interface SchoolProfileWeekdaySimple {
+  useSimpleDay: true;
+  schoolStart: string;
+  schoolEnd: string;
+}
+
+export interface SchoolProfileWeekdayLessons {
+  useSimpleDay: false;
+  lessons: SchoolProfileLesson[];
+}
+
+export type SchoolProfileWeekday =
+  | SchoolProfileWeekdaySimple
+  | SchoolProfileWeekdayLessons;
+
+/**
+ * Gjentakende ukesplan (timeplan) – ikke én ukes A-plan.
+ * Brukes til ChildSchoolProfile / faste skoleblokker i Foreldre-App.
+ */
+export interface SchoolWeeklyProfile {
+  gradeBand: string | null;
+  weekdays: Partial<Record<SchoolProfileWeekdayKey, SchoolProfileWeekday>>;
+}
+
 export interface AIAnalysisResult {
   title: string;
   schedule: TimeSlot[];
@@ -59,6 +101,11 @@ export interface AIAnalysisResult {
   extractedText: ExtractedText;
   /** Valgfri merking av kilde (f.eks. PDF med filnavn og antall sider). */
   sourceHint?: AnalysisSourceHint;
+  /**
+   * Når kilden er en fast timeplan (samme mønster hver uke).
+   * Tom/undefined for A-plan, invitasjoner og ukespesifikt innhold.
+   */
+  schoolWeeklyProfile?: SchoolWeeklyProfile;
 }
 
 export interface ProposedEvent {
