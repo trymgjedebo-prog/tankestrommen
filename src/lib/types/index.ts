@@ -126,6 +126,36 @@ export interface AIAnalysisResult {
    * Tom/undefined for A-plan, invitasjoner og ukespesifikt innhold.
    */
   schoolWeeklyProfile?: SchoolWeeklyProfile;
+  /**
+   * Intern diagnostikk for grid-timeplan-parsing. Serialiseres til klienten
+   * kun når `?debug=1` er satt i portal-modus. Ikke en del av stabil kontrakt.
+   */
+  schoolWeeklyProfileDebug?: SchoolWeeklyProfileDebug;
+}
+
+/** Debug-rapport per dag fra normalisering av skoleprofil. */
+export interface SchoolWeeklyProfileDebug {
+  rawGradeBand: string | null;
+  resolvedGradeBand: SchoolProfileGradeBand | null;
+  days: Array<{
+    rawKey: string;
+    canonicalIndex: SchoolProfileWeekdayIndex | null;
+    kept: boolean;
+    reason?: string;
+    inputLessons: number;
+    keptLessons: number;
+    droppedLessons: Array<{
+      index: number;
+      raw: unknown;
+      reason: string;
+    }>;
+    adjustedLessons: Array<{
+      index: number;
+      subjectKey: string | null;
+      changes: string[];
+    }>;
+  }>;
+  rawRoot: unknown;
 }
 
 export interface ProposedEvent {

@@ -10,6 +10,7 @@ import type {
   SchoolProfileWeekday,
   SchoolProfileWeekdayIndex,
   SchoolWeeklyProfile,
+  SchoolWeeklyProfileDebug,
   TimeSlot,
 } from "@/lib/types";
 
@@ -346,39 +347,86 @@ function normalizeSchoolProfileLessonCandidate(
   return { subject, subjectKey, weight };
 }
 
-function normalizeSchoolProfileLesson(raw: unknown): SchoolProfileLesson | null {
-  if (!raw || typeof raw !== "object") return null;
+type LessonNormalizationResult =
+  | { ok: true; lesson: SchoolProfileLesson; changes: string[] }
+  | { ok: false; reason: string };
+
+function normalizeSchoolProfileLesson(
+  raw: unknown,
+): LessonNormalizationResult {
+  if (!raw || typeof raw !== "object") {
+    return { ok: false, reason: "not_object" };
+  }
   const o = raw as Record<string, unknown>;
   const fromKey = typeof o.subjectKey === "string" ? o.subjectKey.trim() : "";
   const fromSubj = typeof o.subject === "string" ? o.subject.trim() : "";
   const key = slugifySubjectKey(fromKey) || slugifySubjectKey(fromSubj);
-  if (!key) return null;
-
-  if (BREAK_SUBJECT_KEYS.has(key)) return null;
-  const customLabel = asNonEmptyString(o.customLabel);
-  if (customLabel && BREAK_TEXT_RE.test(customLabel) && !/\b(matte|norsk|engelsk|naturfag|samfunnsfag|krle|rle|kroppsov|musikk|kunst|historie|fysikk|kjemi|biologi|tysk|spansk|fransk)\b/i.test(customLabel)) {
-    return null;
+  if (!key) {
+    return { ok: false, reason: "missing_subject_key" };
   }
 
-  let start = normalizeHHMM(asNonEmptyString(o.start));
-  let end = normalizeHHMM(asNonEmptyString(o.end));
+  if (BREAK_SUBJECT_KEYS.has(key)) {
+    return { ok: false, reason: `break_subject_key:${key}` };
+  }
+  const customLabel = asNonEmptyString(o.customLabel);
+  if (
+    customLabel &&
+    BREAK_TEXT_RE.test(customLabel) &&
+    !/\b(matte|norsk|engelsk|naturfag|samfunnsfag|krle|rle|kroppsov|musikk|kunst|historie|fysikk|kjemi|biologi|tysk|spansk|fransk)\b/i.test(
+      customLabel,
+    )
+  ) {
+    return { ok: false, reason: "break_in_custom_label" };
+  }
+
+  const changes: string[] = [];
+  const rawStart = asNonEmptyString(o.start);
+  const rawEnd = asNonEmptyString(o.end);
+  let start = normalizeHHMM(rawStart);
+  let end = normalizeHHMM(rawEnd);
+  if (rawStart && !start) changes.push(`invalid_raw_start:${rawStart}`);
+  if (rawEnd && !end) changes.push(`invalid_raw_end:${rawEnd}`);
 
   const hints = extractTimeHintsFromText(customLabel);
-  if (hints.start) start = hints.start;
-  if (hints.end) end = hints.end;
+  if (hints.start && hints.start !== start) {
+    changes.push(`start_override_from_label:${start ?? "∅"}→${hints.start}`);
+    start = hints.start;
+  }
+  if (hints.end && hints.end !== end) {
+    changes.push(`end_override_from_label:${end ?? "∅"}→${hints.end}`);
+    end = hints.end;
+  }
   if (!end && start && hints.durationMinutes) {
     const startMin = hhmmToMinutes(start);
-    if (startMin !== null) end = minutesToHHMM(startMin + hints.durationMinutes);
+    if (startMin !== null) {
+      const newEnd = minutesToHHMM(startMin + hints.durationMinutes);
+      if (newEnd) {
+        changes.push(`end_from_duration:${hints.durationMinutes}min→${newEnd}`);
+        end = newEnd;
+      }
+    }
   }
   if (!start && end && hints.durationMinutes) {
     const endMin = hhmmToMinutes(end);
-    if (endMin !== null) start = minutesToHHMM(endMin - hints.durationMinutes);
+    if (endMin !== null) {
+      const newStart = minutesToHHMM(endMin - hints.durationMinutes);
+      if (newStart) {
+        changes.push(
+          `start_from_duration:${hints.durationMinutes}min→${newStart}`,
+        );
+        start = newStart;
+      }
+    }
   }
 
-  if (!start || !end) return null;
+  if (!start || !end) {
+    return { ok: false, reason: "missing_start_or_end" };
+  }
   const startMin = hhmmToMinutes(start);
   const endMin = hhmmToMinutes(end);
-  if (startMin === null || endMin === null || endMin <= startMin) return null;
+  if (startMin === null || endMin === null || endMin <= startMin) {
+    return { ok: false, reason: `non_positive_duration:${start}-${end}` };
+  }
 
   const rawCandidates = Array.isArray(o.subjectCandidates)
     ? (o.subjectCandidates
@@ -387,7 +435,6 @@ function normalizeSchoolProfileLesson(raw: unknown): SchoolProfileLesson | null 
           (x): x is SchoolProfileLessonCandidate => x !== null,
         ) as SchoolProfileLessonCandidate[])
     : [];
-  // Dedup candidates by subjectKey, keep first occurrence order.
   const seen = new Set<string>();
   const candidates = rawCandidates.filter((c) => {
     if (seen.has(c.subjectKey)) return false;
@@ -401,8 +448,11 @@ function normalizeSchoolProfileLesson(raw: unknown): SchoolProfileLesson | null 
     start,
     end,
   };
-  if (candidates.length >= 2) lesson.subjectCandidates = candidates;
-  return lesson;
+  if (candidates.length >= 2) {
+    lesson.subjectCandidates = candidates;
+    changes.push(`subjectCandidates:${candidates.length}`);
+  }
+  return { ok: true, lesson, changes };
 }
 
 function dedupeAndSortLessons(
@@ -425,28 +475,89 @@ function dedupeAndSortLessons(
   return out;
 }
 
-function normalizeSchoolProfileWeekday(raw: unknown): SchoolProfileWeekday | null {
-  if (!raw || typeof raw !== "object") return null;
+type WeekdayNormalizationReport = {
+  inputLessons: number;
+  keptLessons: number;
+  droppedLessons: Array<{ index: number; raw: unknown; reason: string }>;
+  adjustedLessons: Array<{
+    index: number;
+    subjectKey: string | null;
+    changes: string[];
+  }>;
+};
+
+function normalizeSchoolProfileWeekday(raw: unknown): {
+  weekday: SchoolProfileWeekday | null;
+  report: WeekdayNormalizationReport;
+  rejectReason?: string;
+} {
+  const report: WeekdayNormalizationReport = {
+    inputLessons: 0,
+    keptLessons: 0,
+    droppedLessons: [],
+    adjustedLessons: [],
+  };
+  if (!raw || typeof raw !== "object") {
+    return { weekday: null, report, rejectReason: "weekday_not_object" };
+  }
   const o = raw as Record<string, unknown>;
 
   if (o.useSimpleDay === true) {
     const schoolStart = normalizeHHMM(asNonEmptyString(o.schoolStart));
     const schoolEnd = normalizeHHMM(asNonEmptyString(o.schoolEnd));
-    if (!schoolStart || !schoolEnd) return null;
-    return { useSimpleDay: true, schoolStart, schoolEnd };
+    if (!schoolStart || !schoolEnd) {
+      return {
+        weekday: null,
+        report,
+        rejectReason: "simple_day_missing_start_or_end",
+      };
+    }
+    return {
+      weekday: { useSimpleDay: true, schoolStart, schoolEnd },
+      report,
+    };
   }
 
   if (Array.isArray(o.lessons)) {
-    const lessons = dedupeAndSortLessons(
-      o.lessons
-        .map(normalizeSchoolProfileLesson)
-        .filter((x): x is SchoolProfileLesson => x !== null),
-    );
-    if (lessons.length === 0) return null;
-    return { useSimpleDay: false, lessons };
+    report.inputLessons = o.lessons.length;
+    const accepted: SchoolProfileLesson[] = [];
+    o.lessons.forEach((entry, index) => {
+      const res = normalizeSchoolProfileLesson(entry);
+      if (!res.ok) {
+        report.droppedLessons.push({
+          index,
+          raw: entry,
+          reason: res.reason,
+        });
+        return;
+      }
+      if (res.changes.length > 0) {
+        report.adjustedLessons.push({
+          index,
+          subjectKey: res.lesson.subjectKey,
+          changes: res.changes,
+        });
+      }
+      accepted.push(res.lesson);
+    });
+    const lessons = dedupeAndSortLessons(accepted);
+    if (lessons.length < accepted.length) {
+      report.adjustedLessons.push({
+        index: -1,
+        subjectKey: null,
+        changes: [
+          `deduped:${accepted.length - lessons.length}`,
+        ],
+      });
+    }
+    report.keptLessons = lessons.length;
+    if (lessons.length === 0) {
+      return { weekday: null, report, rejectReason: "no_lessons_after_filter" };
+    }
+    return { weekday: { useSimpleDay: false, lessons }, report };
   }
 
-  return null;
+  return { weekday: null, report, rejectReason: "no_lessons_array" };
 }
 
 /**
@@ -542,47 +653,100 @@ function normalizeSchoolWeeklyProfileRaw(
     targetGroup?: string | null;
     description?: string | null;
   },
-): SchoolWeeklyProfile | null {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw !== "object") return null;
+): { profile: SchoolWeeklyProfile | null; debug: SchoolWeeklyProfileDebug } {
+  const debug: SchoolWeeklyProfileDebug = {
+    rawGradeBand: null,
+    resolvedGradeBand: null,
+    days: [],
+    rawRoot: raw,
+  };
+  if (raw === null || raw === undefined) return { profile: null, debug };
+  if (typeof raw !== "object") return { profile: null, debug };
   const o = raw as Record<string, unknown>;
   const rawGrade =
     o.gradeBand === null || o.gradeBand === undefined
       ? null
       : asNonEmptyString(o.gradeBand);
+  debug.rawGradeBand = rawGrade;
 
   const gradeBand = normalizeGradeBandForPortal(rawGrade, [
     context?.title,
     context?.targetGroup,
     context?.description,
   ]);
+  debug.resolvedGradeBand = gradeBand;
 
-  let weekdays: Partial<Record<SchoolProfileWeekdayIndex, SchoolProfileWeekday>> =
-    {};
+  const weekdays: Partial<
+    Record<SchoolProfileWeekdayIndex, SchoolProfileWeekday>
+  > = {};
+
+  const pushDay = (
+    rawKey: string,
+    payload: unknown,
+    wk: SchoolProfileWeekdayIndex | null,
+  ) => {
+    if (!wk) {
+      debug.days.push({
+        rawKey,
+        canonicalIndex: null,
+        kept: false,
+        reason: "weekday_key_not_recognized",
+        inputLessons: 0,
+        keptLessons: 0,
+        droppedLessons: [],
+        adjustedLessons: [],
+      });
+      return;
+    }
+    const { weekday, report, rejectReason } =
+      normalizeSchoolProfileWeekday(payload);
+    if (!weekday) {
+      debug.days.push({
+        rawKey,
+        canonicalIndex: wk,
+        kept: false,
+        reason: rejectReason ?? "rejected",
+        inputLessons: report.inputLessons,
+        keptLessons: 0,
+        droppedLessons: report.droppedLessons,
+        adjustedLessons: report.adjustedLessons,
+      });
+      return;
+    }
+    weekdays[wk] = weekday;
+    debug.days.push({
+      rawKey,
+      canonicalIndex: wk,
+      kept: true,
+      inputLessons: report.inputLessons,
+      keptLessons: report.keptLessons,
+      droppedLessons: report.droppedLessons,
+      adjustedLessons: report.adjustedLessons,
+    });
+  };
 
   if (Array.isArray(o.weekdays)) {
     for (const row of o.weekdays) {
       if (!row || typeof row !== "object") continue;
       const r = row as Record<string, unknown>;
+      const rawKey = typeof r.weekday === "string" ? r.weekday : "(no key)";
       const wk =
         typeof r.weekday === "string"
           ? canonicalSchoolProfileWeekdayIndex(r.weekday)
           : null;
-      if (!wk) continue;
-      const entry = normalizeSchoolProfileWeekday(r);
-      if (entry) weekdays[wk] = entry;
+      pushDay(rawKey, r, wk);
     }
   } else if (o.weekdays && typeof o.weekdays === "object") {
     for (const [key, val] of Object.entries(o.weekdays as Record<string, unknown>)) {
       const wk = canonicalSchoolProfileWeekdayIndex(key);
-      if (!wk) continue;
-      const entry = normalizeSchoolProfileWeekday(val);
-      if (entry) weekdays[wk] = entry;
+      pushDay(key, val, wk);
     }
   }
 
-  if (Object.keys(weekdays).length === 0) return null;
-  return { gradeBand, weekdays };
+  if (Object.keys(weekdays).length === 0) {
+    return { profile: null, debug };
+  }
+  return { profile: { gradeBand, weekdays }, debug };
 }
 
 function detectIsoWeekday(dayLabel: string | null): number | null {
@@ -911,7 +1075,7 @@ function normalizeAIAnalysisResult(
     return null;
   })();
 
-  const schoolWeeklyProfile = normalizeSchoolWeeklyProfileRaw(
+  const schoolWeeklyProfileResult = normalizeSchoolWeeklyProfileRaw(
     o.schoolWeeklyProfile,
     {
       title: titleForGradeContext,
@@ -919,6 +1083,35 @@ function normalizeAIAnalysisResult(
       description: descriptionForGradeContext,
     },
   );
+  const schoolWeeklyProfile = schoolWeeklyProfileResult.profile;
+  const schoolWeeklyProfileDebug = schoolWeeklyProfileResult.debug;
+
+  if (schoolWeeklyProfileDebug.rawRoot !== undefined && schoolWeeklyProfileDebug.rawRoot !== null) {
+    const summary = {
+      rawGradeBand: schoolWeeklyProfileDebug.rawGradeBand,
+      resolvedGradeBand: schoolWeeklyProfileDebug.resolvedGradeBand,
+      days: schoolWeeklyProfileDebug.days.map((d) => ({
+        rawKey: d.rawKey,
+        canonicalIndex: d.canonicalIndex,
+        kept: d.kept,
+        reason: d.reason,
+        inputLessons: d.inputLessons,
+        keptLessons: d.keptLessons,
+        drops: d.droppedLessons.map((x) => ({ i: x.index, reason: x.reason })),
+        adjustments: d.adjustedLessons,
+      })),
+    };
+    console.log(
+      "[analyze-image] schoolWeeklyProfile debug:",
+      JSON.stringify(summary, null, 2),
+    );
+    if (schoolWeeklyProfile) {
+      console.log(
+        "[analyze-image] schoolWeeklyProfile normalized:",
+        JSON.stringify(schoolWeeklyProfile, null, 2),
+      );
+    }
+  }
 
   return {
     title: typeof o.title === "string" ? o.title : "Uten tittel",
@@ -965,6 +1158,10 @@ function normalizeAIAnalysisResult(
     confidence: clamp01(o.confidence),
     extractedText: normalizeExtractedText(o.extractedText),
     ...(schoolWeeklyProfile ? { schoolWeeklyProfile } : {}),
+    ...(schoolWeeklyProfileDebug.rawRoot !== undefined &&
+    schoolWeeklyProfileDebug.rawRoot !== null
+      ? { schoolWeeklyProfileDebug }
+      : {}),
   };
 }
 
@@ -1092,7 +1289,7 @@ export async function analyzeImage(
         role: "user",
         content: [
           { type: "text", text: "Analyser bildet og returner JSON som beskrevet." },
-          { type: "image_url", image_url: { url: imageUrl, detail: "auto" } },
+          { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
         ],
       },
     ],

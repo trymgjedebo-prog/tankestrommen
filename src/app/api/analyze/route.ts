@@ -101,6 +101,7 @@ async function analyzeFromExtractedText(
   preamble: string,
   sourceHint: AnalysisSourceHint,
   portalMode: boolean,
+  includeDebug: boolean = false,
 ) {
   let textForModel = rawText;
   if (textForModel.length > MAX_DOC_TEXT_FOR_MODEL) {
@@ -124,14 +125,20 @@ async function analyzeFromExtractedText(
         "\n\n[... Teksten er forkortet i visning ...]"
       : rawText;
 
-  return wrapResponse(result, portalMode, sourceHint.type, {
-    sourceHint,
-    extractedText: {
-      raw: displayRaw,
-      language: result.extractedText.language || "no",
-      confidence: 1,
+  return wrapResponse(
+    result,
+    portalMode,
+    sourceHint.type,
+    {
+      sourceHint,
+      extractedText: {
+        raw: displayRaw,
+        language: result.extractedText.language || "no",
+        confidence: 1,
+      },
     },
-  });
+    includeDebug,
+  );
 }
 
 interface ParsedBody {
@@ -1387,6 +1394,7 @@ function buildSchoolProfileProposal(
 function toPortalBundle(
   result: AIAnalysisResult,
   sourceType: string,
+  includeDebug: boolean,
 ): Record<string, unknown> {
   const schoolProfileProposal = buildSchoolProfileProposal(result, sourceType);
   const items = schoolProfileProposal
@@ -1402,7 +1410,21 @@ function toPortalBundle(
     },
     items,
     ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
+    ...(includeDebug && result.schoolWeeklyProfileDebug
+      ? {
+          debug: {
+            schoolWeeklyProfile: result.schoolWeeklyProfileDebug,
+          },
+        }
+      : {}),
   };
+}
+
+function isDebugRequest(request: NextRequest): boolean {
+  const p = request.nextUrl.searchParams.get("debug");
+  if (p === "1" || p === "true") return true;
+  const h = (request.headers.get("x-tankestrom-debug") ?? "").toLowerCase();
+  return h === "1" || h === "true";
 }
 
 function wrapResponse(
@@ -1410,17 +1432,27 @@ function wrapResponse(
   portalMode: boolean,
   sourceType: string,
   extra?: Record<string, unknown>,
+  includeDebug: boolean = false,
 ): NextResponse {
   if (portalMode) {
-    const bundle = toPortalBundle(result, sourceType);
+    const bundle = toPortalBundle(result, sourceType, includeDebug);
     console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
       schemaVersion: bundle.schemaVersion,
       itemCount: (bundle.items as unknown[]).length,
       hasSchoolProfile: Boolean(bundle.schoolProfileProposal),
+      debug: Boolean(bundle.debug),
     });
     return NextResponse.json(bundle);
   }
-  return NextResponse.json(extra ? { ...result, ...extra } : result);
+  // Non-portal: strip debug by default, keep when asked.
+  const clean = includeDebug ? result : stripWeeklyProfileDebug(result);
+  return NextResponse.json(extra ? { ...clean, ...extra } : clean);
+}
+
+function stripWeeklyProfileDebug(result: AIAnalysisResult): AIAnalysisResult {
+  if (!result.schoolWeeklyProfileDebug) return result;
+  const { schoolWeeklyProfileDebug: _omit, ...rest } = result;
+  return rest as AIAnalysisResult;
 }
 
 /**
@@ -1454,10 +1486,12 @@ export async function POST(request: NextRequest) {
 
     const multipart = isMultipart(request);
     const portalMode = detectPortalMode(request);
+    const debug = isDebugRequest(request);
     console.log("[api/analyze] incoming request", {
       contentType: request.headers.get("content-type"),
       multipart,
       portalMode,
+      debug,
     });
 
     const { image, text, pdf, docx, fileName }: ParsedBody = multipart
@@ -1476,7 +1510,7 @@ export async function POST(request: NextRequest) {
         );
       }
       const result = await analyzeText(trimmed);
-      return wrapResponse(result, portalMode, "text");
+      return wrapResponse(result, portalMode, "text", undefined, debug);
     }
 
     if (pdf && typeof pdf === "string") {
@@ -1534,11 +1568,17 @@ export async function POST(request: NextRequest) {
 
       const preamble = `Dette er tekst uttrekk fra PDF-filen «${safeName}» (${extracted.numpages || "?"} sider). Tolke og strukturer innholdet som beskrevet.\n\n`;
 
-      return analyzeFromExtractedText(rawText, preamble, {
-        type: "pdf",
-        fileName: safeName,
-        pageCount: Math.max(1, extracted.numpages),
-      }, portalMode);
+      return analyzeFromExtractedText(
+        rawText,
+        preamble,
+        {
+          type: "pdf",
+          fileName: safeName,
+          pageCount: Math.max(1, extracted.numpages),
+        },
+        portalMode,
+        debug,
+      );
     }
 
     if (docx && typeof docx === "string") {
@@ -1602,10 +1642,16 @@ export async function POST(request: NextRequest) {
 
       const preamble = `Dette er tekst uttrekk fra Word-filen «${safeName}» (.docx). Tolke og strukturer innholdet som beskrevet (ukeplan, datoer, kontakt osv. når det finnes).\n\n`;
 
-      return analyzeFromExtractedText(rawText, preamble, {
-        type: "docx",
-        fileName: safeName,
-      }, portalMode);
+      return analyzeFromExtractedText(
+        rawText,
+        preamble,
+        {
+          type: "docx",
+          fileName: safeName,
+        },
+        portalMode,
+        debug,
+      );
     }
 
     if (image && typeof image === "string") {
@@ -1622,7 +1668,7 @@ export async function POST(request: NextRequest) {
         );
       }
       const result = await analyzeImage(image);
-      return wrapResponse(result, portalMode, "image");
+      return wrapResponse(result, portalMode, "image", undefined, debug);
     }
 
     return NextResponse.json(
