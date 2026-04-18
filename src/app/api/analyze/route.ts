@@ -542,6 +542,68 @@ function composeDayNotes(
   return parts.length > 0 ? parts.join("\n") : null;
 }
 
+/** MVP: Foreldre-App beriker skoleblokk via metadata på importerte events. */
+type SchoolPortalItemType =
+  | "lesson_note"
+  | "homework"
+  | "reminder"
+  | "general";
+
+type SchoolSubjectCandidate = {
+  /** Visningsnavn, f.eks. «Spansk». */
+  subject: string;
+  subjectKey: string;
+  /**
+   * 1 = høyest (første i plan / foretrukket for matching).
+   * Lavere for neste alternativ – Foreldre-App kan velge blant kandidater.
+   */
+  weight: number;
+};
+
+type SchoolOverrideKind =
+  | "exam_day"
+  | "trip_day"
+  | "activity_day"
+  | "free_day"
+  | "delayed_start";
+
+/** Hvordan Foreldre-App bør behandle dagen – «merge» berikelse, «replace» trumfer normal plan. */
+type SchoolOverrideMode = "merge" | "replace";
+
+type SchoolOverride = {
+  overrideMode: SchoolOverrideMode;
+  overrideKind: SchoolOverrideKind;
+  /** HH:MM, hvis kjent (særlig for delayed_start / heldagsprøve). */
+  effectiveStart: string | null;
+  effectiveEnd: string | null;
+  /** Kort setning fra kilden, for UI-visning. */
+  reason: string | null;
+  /** 0–1. Settes lavere når deteksjon er svak. */
+  confidence: number;
+};
+
+type EventSchoolContext = {
+  /** Primært fagnavn for visning/matching (kan være første språk ved valg). */
+  subject: string | null;
+  subjectKey: string | null;
+  customLabel: string | null;
+  /**
+   * Valgfritt: flere mulige fag (f.eks. spansk/tysk/fransk).
+   * Mangler i JSON når tom – bakoverkompatibelt for eldre klienter.
+   */
+  subjectCandidates?: SchoolSubjectCandidate[];
+  lessonStart: string | null;
+  lessonEnd: string | null;
+  itemType: SchoolPortalItemType;
+  confidence: number;
+  sourceKind: string;
+  /**
+   * Valgfritt: markerer at dagen er spesiell og potensielt trumfer normal plan.
+   * Mangler når dagen er en vanlig skoledag (bakoverkompatibelt).
+   */
+  schoolOverride?: SchoolOverride;
+};
+
 type PortalEventItem = {
   proposalId: string;
   kind: "event";
@@ -556,6 +618,9 @@ type PortalEventItem = {
     end: string;
     notes?: string;
     location?: string;
+    metadata?: {
+      schoolContext: EventSchoolContext;
+    };
   };
 };
 
@@ -634,6 +699,397 @@ function isStandaloneTaskCandidate(text: string): boolean {
 function isEventLikeText(raw: string | null): boolean {
   if (!raw) return false;
   return EVENT_KEYWORDS.test(normalizeNorwegianLetters(raw));
+}
+
+function isSchoolPlanBundleContext(
+  result: AIAnalysisResult,
+  weekPlanLike: boolean,
+): boolean {
+  if (weekPlanLike) return true;
+  const t = normalizeNorwegianLetters(result.title);
+  return /\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t);
+}
+
+function slugifySubjectKey(raw: string): string | null {
+  const s = normalizeSpace(raw);
+  if (s.length < 2) return null;
+  const slug = normalizeNorwegianLetters(s)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || null;
+}
+
+/** Venstre side ser ut som språkvalg / valgfag-bøtte (ikke konkret fagnavn). */
+const GENERIC_SUBJECT_BUCKET_RE =
+  /^(sprak|språk|fremmedsprak|fremmedspråk|valgfag|sprakvalg|språkvalg|felles|aktivitet|uke|programfag|program|linje|modul|moduler|studieretning)\b/i;
+
+/** Typiske språk / spor der høyre side ofte lister alternativer. */
+const LANGUAGE_OR_TRACK_HINT_RE =
+  /\b(spansk|tysk|fransk|engelsk|italiensk|latin|russisk|portugis|polsk|mandarin|kinesisk|arabisk|kroatisk|svensk|dansk|nynorsk|bokmal|bokmål)\b/i;
+
+/** Vanlige programfag (korte token – brukes til vekt-profil, ikke hard krav). */
+const PROGRAM_SUBJECT_TOKEN_RE =
+  /\b(matematikk|naturfag|samfunnsfag|norsk|engelsk|krle|rle|kunst|musikk|kor|korps|kroppsoving|kroppsøving|matte|natur|samf|historie|geografi|biologi|fysikk|kjemi|informasjon|programmering)\b/i;
+
+type CandidateWeightProfile = "language_alternatives" | "elective_list" | "default";
+
+function cleanSubjectToken(raw: string): string {
+  return normalizeSpace(raw.replace(/[.,;:]+$/g, ""));
+}
+
+function splitSubjectAlternatives(text: string): string[] {
+  return text
+    .split(/\s*(?:,|\/|\||\bor\b|\beller\b)\s*/i)
+    .map((s) => cleanSubjectToken(s))
+    .filter((s) => s.length >= 2 && s.length <= 44);
+}
+
+function tokenLooksLikeLanguageOrTrack(s: string): boolean {
+  return LANGUAGE_OR_TRACK_HINT_RE.test(s);
+}
+
+function tokenLooksLikeProgramSubject(s: string): boolean {
+  return PROGRAM_SUBJECT_TOKEN_RE.test(normalizeNorwegianLetters(s));
+}
+
+function detectCandidateWeightProfile(
+  uniq: string[],
+  genericLeft: boolean,
+): CandidateWeightProfile {
+  if (uniq.length < 2) return "default";
+  const allLang =
+    uniq.length >= 2 && uniq.every((s) => tokenLooksLikeLanguageOrTrack(s));
+  if (allLang) return "language_alternatives";
+  if (genericLeft) return "elective_list";
+  const allProg =
+    uniq.length >= 2 && uniq.every((s) => tokenLooksLikeProgramSubject(s));
+  if (allProg) return "elective_list";
+  return "default";
+}
+
+/** Vekter for Foreldre-App: tydeligere topp ved språk, litt flatere ved lange lister. */
+function alternativeWeights(
+  n: number,
+  profile: CandidateWeightProfile,
+): number[] {
+  if (n <= 0) return [];
+  if (n === 1) return [1];
+  if (profile === "language_alternatives") {
+    return Array.from({ length: n }, (_, i) =>
+      Math.max(0.58, 1 - i * (0.1 + 0.015 * Math.max(0, n - 3))),
+    );
+  }
+  if (profile === "elective_list") {
+    return Array.from({ length: n }, (_, i) =>
+      Math.max(0.48, 1 - i * (0.14 + 0.025 * Math.max(0, n - 3))),
+    );
+  }
+  return Array.from({ length: n }, (_, i) =>
+    Math.max(0.38, 1 - (i * 0.7) / Math.max(n, 1)),
+  );
+}
+
+function shouldTreatRightAsSubjectAlternatives(left: string, right: string): boolean {
+  const alts = splitSubjectAlternatives(right);
+  if (alts.length < 2) return false;
+  if (GENERIC_SUBJECT_BUCKET_RE.test(normalizeNorwegianLetters(left))) return true;
+  return LANGUAGE_OR_TRACK_HINT_RE.test(right);
+}
+
+function dedupeSubjectCandidates(
+  candidates: SchoolSubjectCandidate[],
+): SchoolSubjectCandidate[] {
+  const byKey = new Map<string, SchoolSubjectCandidate>();
+  for (const c of candidates) {
+    const prev = byKey.get(c.subjectKey);
+    if (!prev || prev.weight < c.weight) byKey.set(c.subjectKey, c);
+  }
+  return [...byKey.values()].sort((a, b) => b.weight - a.weight);
+}
+
+function candidatesFromSubjectList(
+  subjects: string[],
+  fullCustomLabel: string,
+  opts?: { genericLeft?: boolean },
+): {
+  subject: string | null;
+  subjectKey: string | null;
+  customLabel: string | null;
+  subjectCandidates: SchoolSubjectCandidate[];
+} {
+  const uniq = [...new Set(subjects.map((s) => cleanSubjectToken(s)))].filter(Boolean);
+  const n = uniq.length;
+  const profile = detectCandidateWeightProfile(uniq, Boolean(opts?.genericLeft));
+  const weights = alternativeWeights(n, profile);
+  const raw: SchoolSubjectCandidate[] = uniq.map((subj, i) => {
+    const key =
+      slugifySubjectKey(subj) ||
+      normalizeNorwegianLetters(subj).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") ||
+      "fag";
+    const weight = weights[i] ?? weights[weights.length - 1] ?? 1;
+    return { subject: subj, subjectKey: key, weight };
+  });
+  const deduped = dedupeSubjectCandidates(raw);
+  const first = deduped[0];
+  return {
+    subject: first?.subject ?? null,
+    subjectKey: first?.subjectKey ?? null,
+    customLabel: normalizeSpace(fullCustomLabel),
+    subjectCandidates: deduped,
+  };
+}
+
+/**
+ * Tolker én programlinje til subject / subjectKey / customLabel og ev. flere kandidater.
+ */
+function parseProgramSchoolFields(line: string | null): {
+  subject: string | null;
+  subjectKey: string | null;
+  customLabel: string | null;
+  subjectCandidates: SchoolSubjectCandidate[];
+} {
+  const empty = {
+    subject: null as string | null,
+    subjectKey: null as string | null,
+    customLabel: null as string | null,
+    subjectCandidates: [] as SchoolSubjectCandidate[],
+  };
+  if (!line) return empty;
+  const t = normalizeSpace(line);
+  const m = /^(.{2,50}?)\s*[–:—-]\s+(.+)$/.exec(t);
+  if (!m) {
+    const alts = splitSubjectAlternatives(t);
+    if (alts.length >= 2 && LANGUAGE_OR_TRACK_HINT_RE.test(t)) {
+      return candidatesFromSubjectList(alts, t, { genericLeft: false });
+    }
+    return { ...empty, customLabel: normalizeSpace(t) };
+  }
+  const left = normalizeSpace(m[1]);
+  const right = normalizeSpace(m[2]);
+  if (left.length < 2 || left.length > 48) {
+    return { ...empty, customLabel: t };
+  }
+
+  if (shouldTreatRightAsSubjectAlternatives(left, right)) {
+    const alts = splitSubjectAlternatives(right);
+    if (alts.length >= 1) {
+      const genericLeft = GENERIC_SUBJECT_BUCKET_RE.test(
+        normalizeNorwegianLetters(left),
+      );
+      return candidatesFromSubjectList(alts, `${left} – ${right}`, {
+        genericLeft,
+      });
+    }
+  }
+
+  const key = slugifySubjectKey(left);
+  const single: SchoolSubjectCandidate[] =
+    key ? [{ subject: cleanSubjectToken(left), subjectKey: key, weight: 1 }] : [];
+  return {
+    subject: cleanSubjectToken(left),
+    subjectKey: key,
+    customLabel: normalizeSpace(`${left} – ${right}`),
+    subjectCandidates: single,
+  };
+}
+
+/** Svake og sterke signaler for spesialdager. Holdes bevisst enkelt i MVP. */
+const OVERRIDE_PATTERNS: Array<{
+  kind: SchoolOverrideKind;
+  mode: SchoolOverrideMode;
+  baseConfidence: number;
+  regex: RegExp;
+}> = [
+  {
+    kind: "exam_day",
+    mode: "replace",
+    baseConfidence: 0.8,
+    regex:
+      /\b(heldagsprøve|heldagsprove|heldags\s*prove|tentamen|eksamensdag|skriftlig\s+eksamen|muntlig\s+eksamen)\b/i,
+  },
+  {
+    kind: "trip_day",
+    mode: "replace",
+    baseConfidence: 0.75,
+    regex:
+      /\b(skoletur|klassetur|ekskursjon|leirskole|leirdag|dagstur|studietur|tur til)\b/i,
+  },
+  {
+    kind: "activity_day",
+    mode: "replace",
+    baseConfidence: 0.7,
+    regex:
+      /\b(aktivitetsdag|idrettsdag|temadag|opplevelsesdag|friluftsdag|karneval|skolefest|forestilling)\b/i,
+  },
+  {
+    kind: "free_day",
+    mode: "replace",
+    baseConfidence: 0.8,
+    regex:
+      /\b(fri|fridag|skolefri|planleggingsdag|studiedag|elevfri|fri\s+dag|ingen\s+undervisning|helligdag)\b/i,
+  },
+  {
+    kind: "delayed_start",
+    mode: "replace",
+    baseConfidence: 0.7,
+    regex:
+      /\b(senere\s+start|sen\s+start|skolen\s+starter\s+(?:kl\.?\s*)?\d{1,2}(?:[.:]\d{2})?|oppmote\s+kl|oppmøte\s+kl|møt\s+(?:kl\.?\s*)?\d)/i,
+  },
+];
+
+function extractEffectiveTimes(text: string): {
+  start: string | null;
+  end: string | null;
+} {
+  const range = /(\d{1,2}[.:]\d{2})\s*[-–—]\s*(\d{1,2}[.:]\d{2})/.exec(text);
+  if (range) {
+    return {
+      start: range[1].replace(".", ":"),
+      end: range[2].replace(".", ":"),
+    };
+  }
+  const single = /(?:kl\.?\s*)?(\d{1,2})[.:](\d{2})\b/i.exec(text);
+  if (single) {
+    const hh = String(Number(single[1])).padStart(2, "0");
+    return { start: `${hh}:${single[2]}`, end: null };
+  }
+  const bareHour = /\bkl\.?\s*(\d{1,2})\b/i.exec(text);
+  if (bareHour) {
+    const hh = String(Number(bareHour[1])).padStart(2, "0");
+    return { start: `${hh}:00`, end: null };
+  }
+  return { start: null, end: null };
+}
+
+function firstSentenceContaining(text: string, re: RegExp): string | null {
+  const parts = text.split(/(?<=[.!?\n])\s+/);
+  for (const p of parts) {
+    if (re.test(p)) return normalizeSpace(p);
+  }
+  return normalizeSpace(text);
+}
+
+function detectSchoolOverride(
+  day: DayScheduleEntry,
+  fallbackTime: string | null,
+): SchoolOverride | null {
+  const haystack = [
+    day.dayLabel ?? "",
+    day.details ?? "",
+    ...day.highlights,
+    ...day.notes,
+  ]
+    .filter((s) => typeof s === "string" && s.length > 0)
+    .join("\n");
+  if (!haystack) return null;
+
+  for (const pat of OVERRIDE_PATTERNS) {
+    if (!pat.regex.test(haystack)) continue;
+
+    const reason = firstSentenceContaining(haystack, pat.regex);
+    const times = extractEffectiveTimes(reason ?? haystack);
+    let effectiveStart = times.start;
+    let effectiveEnd = times.end;
+
+    if (!effectiveStart && !effectiveEnd && fallbackTime) {
+      const fallback = extractStartEnd(fallbackTime);
+      effectiveStart = fallback.start;
+      effectiveEnd = fallback.end;
+    }
+
+    // Litt høyere tillit når vi fant et eksplisitt klokkeslett i samme setning.
+    const timeBoost = times.start ? 0.1 : 0;
+    const confidence = Math.min(1, pat.baseConfidence + timeBoost);
+
+    return {
+      overrideMode: pat.mode,
+      overrideKind: pat.kind,
+      effectiveStart,
+      effectiveEnd,
+      reason,
+      confidence,
+    };
+  }
+
+  return null;
+}
+
+function portalSourceKind(
+  sourceType: string,
+  weekPlanLike: boolean,
+  title: string,
+): string {
+  const n = normalizeNorwegianLetters(title);
+  if (/\b(a-plan|aplan)\b/.test(n)) return "a_plan";
+  if (/\b(ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) return "school_week";
+  if (weekPlanLike) return "school_week";
+  if (sourceType === "docx") return "school_docx";
+  if (sourceType === "pdf") return "school_pdf";
+  return `school_${sourceType || "unknown"}`;
+}
+
+function buildEventSchoolContext(
+  day: DayScheduleEntry,
+  result: AIAnalysisResult,
+  sourceType: string,
+  weekPlanLike: boolean,
+  time: string | null,
+): EventSchoolContext | null {
+  if (!isSchoolPlanBundleContext(result, weekPlanLike)) return null;
+
+  const dayContext = {
+    rememberItems: day.rememberItems,
+    deadlines: day.deadlines,
+    notes: day.notes,
+    highlights: day.highlights,
+    details: day.details ?? undefined,
+  };
+  const hint = extractEventProgramHint(dayContext);
+  let parsed = {
+    subject: null as string | null,
+    subjectKey: null as string | null,
+    customLabel: null as string | null,
+    subjectCandidates: [] as SchoolSubjectCandidate[],
+  };
+
+  if (hint) {
+    parsed = parseProgramSchoolFields(hint);
+  } else if (day.highlights[0]) {
+    const h = day.highlights[0];
+    if (
+      !isStandaloneTaskCandidate(h) &&
+      !isPacklistOrRememberSuppliesOnly(h)
+    ) {
+      parsed = parseProgramSchoolFields(h);
+    }
+  }
+
+  const { start, end } = extractStartEnd(time);
+  const hadProgramHint = Boolean(hint);
+  let itemType: SchoolPortalItemType = "general";
+  if (hadProgramHint || parsed.subjectKey) {
+    itemType = "lesson_note";
+  } else if (day.rememberItems.length > 0) {
+    itemType = "reminder";
+  }
+
+  const multiCandidates =
+    parsed.subjectCandidates.length > 1 ? parsed.subjectCandidates : undefined;
+
+  const override = detectSchoolOverride(day, time);
+
+  return {
+    subject: parsed.subject ? cleanSubjectToken(parsed.subject) : null,
+    subjectKey: parsed.subjectKey,
+    customLabel: parsed.customLabel ? normalizeSpace(parsed.customLabel) : null,
+    ...(multiCandidates ? { subjectCandidates: multiCandidates } : {}),
+    lessonStart: time ? start : null,
+    lessonEnd: time ? end : null,
+    itemType,
+    confidence: result.confidence,
+    sourceKind: portalSourceKind(sourceType, weekPlanLike, result.title),
+    ...(override ? { schoolOverride: override } : {}),
+  };
 }
 
 function buildProposalItems(
@@ -730,6 +1186,7 @@ function buildProposalItems(
       notes: string[];
       highlights: string[];
     },
+    schoolContext?: EventSchoolContext | null,
   ): PortalEventItem => {
     const { start, end } = extractStartEnd(time);
     const item: PortalEventItem = {
@@ -749,6 +1206,9 @@ function buildProposalItems(
     const n = buildStructuredNotes(notes, dayContext);
     if (n) item.event.notes = n;
     if (result.location) item.event.location = result.location;
+    if (schoolContext) {
+      item.event.metadata = { schoolContext };
+    }
     return item;
   };
 
@@ -826,13 +1286,20 @@ function buildProposalItems(
         hasNonTaskNote;
 
       if (hasEventSignal || taskTexts.length === 0) {
+        const schoolCtx = buildEventSchoolContext(
+          day,
+          result,
+          sourceType,
+          weekPlanLike,
+          day.time,
+        );
         items.push(
           buildEventItem(isoDate, day.time, day.dayLabel, day.details, {
             rememberItems: day.rememberItems,
             deadlines: day.deadlines,
             notes: day.notes,
             highlights: day.highlights,
-          }),
+          }, schoolCtx),
         );
       }
 
@@ -850,14 +1317,14 @@ function buildProposalItems(
       if (isStandaloneTaskCandidate(slotSignal) && !isEventLikeText(slotSignal)) {
         items.push(buildTaskItem(isoDate, slot.label, slotSignal));
       } else {
-        items.push(buildEventItem(isoDate, slot.time, slot.label, null));
+        items.push(buildEventItem(isoDate, slot.time, slot.label, null, undefined, null));
       }
     }
   }
 
   if (items.length === 0) {
     const today = new Date().toISOString().slice(0, 10);
-    items.push(buildEventItem(today, null, null, null));
+    items.push(buildEventItem(today, null, null, null, undefined, null));
   }
 
   return items;
