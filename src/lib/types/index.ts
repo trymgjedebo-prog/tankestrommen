@@ -77,11 +77,22 @@ export type SchoolProfileWeekday =
   | SchoolProfileWeekdayLessons;
 
 /**
+ * Trinn-/program-bånd slik Foreldre-App validerer det på `ChildSchoolProfile`.
+ */
+export type SchoolProfileGradeBand =
+  | "1-4"
+  | "5-7"
+  | "8-10"
+  | "vg1"
+  | "vg2"
+  | "vg3";
+
+/**
  * Gjentakende ukesplan (timeplan) – ikke én ukes A-plan.
  * Brukes til ChildSchoolProfile / faste skoleblokker i Foreldre-App.
  */
 export interface SchoolWeeklyProfile {
-  gradeBand: string | null;
+  gradeBand: SchoolProfileGradeBand | null;
   weekdays: Partial<Record<SchoolProfileWeekdayKey, SchoolProfileWeekday>>;
 }
 

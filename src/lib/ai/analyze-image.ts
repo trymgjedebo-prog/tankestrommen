@@ -4,6 +4,7 @@ import type {
   DayScheduleEntry,
   EventCategory,
   ExtractedText,
+  SchoolProfileGradeBand,
   SchoolProfileLesson,
   SchoolProfileWeekday,
   SchoolProfileWeekdayKey,
@@ -83,7 +84,7 @@ Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøyaktig disse nøkle
 - schoolWeeklyProfile: null ELLER et objekt for FAST UKENTLIG TIMEPLAN (samme fag/timer hver uke, typisk «Timeplan», «Ukeskjema», tabell med klokkeslett + fag mandag–fredag). IKKE bruk dette for A-plan, aktivitetsplan for én bestemt uke, invitasjoner eller endagshendelser – da null.
   Når schoolWeeklyProfile er utfylt: sett schedule til [] og scheduleByDay til [] (unngå duplikat kalenderdata).
   Objektet har:
-  - gradeBand: trinn/klasse tekstlig, f.eks. «10. trinn», «8A», «VG2», eller null
+  - gradeBand: trinn/klasse fritekst (f.eks. «10. trinn», «10B», «VG2») eller null – serveren normaliserer til Foreldre-App-koder
   - weekdays: objekt med nøkler kun på engelsk: monday, tuesday, wednesday, thursday, friday, (saturday, sunday kun hvis synlig). Hver verdi er ENTEN:
     - { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" } når bare skolestart/-slutt er oppgitt, ELLER
     - { "useSimpleDay": false, "lessons": [ { "subjectKey": "norsk", "customLabel": null eller tekst, "start": "HH:MM", "end": "HH:MM" }, ... ] }
@@ -249,14 +250,113 @@ function normalizeSchoolProfileWeekday(raw: unknown): SchoolProfileWeekday | nul
   return null;
 }
 
-function normalizeSchoolWeeklyProfileRaw(raw: unknown): SchoolWeeklyProfile | null {
+/**
+ * Foreldre-App: `ChildSchoolProfile.gradeBand` må være nøyaktig én av disse.
+ */
+function normalizeGradeBandForPortal(
+  raw: string | null | undefined,
+  fallbacks: (string | null | undefined)[] = [],
+): SchoolProfileGradeBand | null {
+  const candidates = [raw, ...fallbacks].filter(
+    (x): x is string => typeof x === "string" && x.trim().length > 0,
+  );
+  for (const c of candidates) {
+    const mapped = mapOneGradeBandHint(c.trim());
+    if (mapped) return mapped;
+  }
+  return null;
+}
+
+function trinnNumberToBand(n: number): SchoolProfileGradeBand | null {
+  if (n >= 1 && n <= 4) return "1-4";
+  if (n >= 5 && n <= 7) return "5-7";
+  if (n >= 8 && n <= 10) return "8-10";
+  return null;
+}
+
+/** Tall 1–10 fra klasse/trinn (ikke VG – håndteres for seg). */
+function extractGrunnskoleTrinnNumber(s: string): number | null {
+  const patterns: RegExp[] = [
+    /(\d{1,2})\s*\.\s*trinn\b/i,
+    /\btrinn\s*:?\s*(\d{1,2})\b/i,
+    /(?:^|\b)(?:klasse|kl\.)\s*:?\s*(\d{1,2})\b/i,
+    /\b(\d{1,2})\s*klasse\b/i,
+    /\b(\d{1,2})\s*\.?\s*kl\.\b/i,
+    /\b([1-9]|10)\s*[a-zæøå]\b/i,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(s);
+    if (!m) continue;
+    const n = Number.parseInt(m[1], 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 10) return n;
+  }
+  return null;
+}
+
+function mapOneGradeBandHint(text: string): SchoolProfileGradeBand | null {
+  if (!text) return null;
+  const lower = text.toLowerCase().trim();
+  const collapsed = lower
+    .replace(/\s+/g, "")
+    .replace(/[–—]/g, "-");
+
+  const direct: SchoolProfileGradeBand[] = [
+    "1-4",
+    "5-7",
+    "8-10",
+    "vg1",
+    "vg2",
+    "vg3",
+  ];
+  for (const d of direct) {
+    if (collapsed === d) return d;
+  }
+
+  const vgWord = /\bvg\s*([123])\b/i.exec(lower);
+  if (vgWord) return `vg${vgWord[1]}` as SchoolProfileGradeBand;
+
+  if (/^vg[123]$/.test(collapsed)) {
+    return collapsed as SchoolProfileGradeBand;
+  }
+
+  const range = /\b([1-9]|10)\s*[-–]\s*([1-9]|10)\b/.exec(lower);
+  if (range) {
+    const a = Number.parseInt(range[1], 10);
+    const b = Number.parseInt(range[2], 10);
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    if (lo >= 1 && hi <= 4) return "1-4";
+    if (lo >= 5 && hi <= 7) return "5-7";
+    if (lo >= 8 && hi <= 10) return "8-10";
+  }
+
+  const trinn = extractGrunnskoleTrinnNumber(text);
+  if (trinn !== null) return trinnNumberToBand(trinn);
+
+  return null;
+}
+
+function normalizeSchoolWeeklyProfileRaw(
+  raw: unknown,
+  context?: {
+    title?: string | null;
+    targetGroup?: string | null;
+    description?: string | null;
+  },
+): SchoolWeeklyProfile | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
-  const gradeBand =
+  const rawGrade =
     o.gradeBand === null || o.gradeBand === undefined
       ? null
       : asNonEmptyString(o.gradeBand);
+
+  const gradeBand = normalizeGradeBandForPortal(rawGrade, [
+    context?.title,
+    context?.targetGroup,
+    context?.description,
+  ]);
 
   let weekdays: Partial<Record<SchoolProfileWeekdayKey, SchoolProfileWeekday>> =
     {};
@@ -280,7 +380,7 @@ function normalizeSchoolWeeklyProfileRaw(raw: unknown): SchoolWeeklyProfile | nu
   }
 
   if (Object.keys(weekdays).length === 0) return null;
-  return { gradeBand: gradeBand ?? null, weekdays };
+  return { gradeBand, weekdays };
 }
 
 function detectIsoWeekday(dayLabel: string | null): number | null {
@@ -592,8 +692,30 @@ function normalizeAIAnalysisResult(
     fallbackDescriptionParts.push(`Kontakt: ${contacts.join("; ")}`);
   }
 
+  const titleForGradeContext =
+    typeof o.title === "string" && o.title.trim() ? o.title.trim() : null;
+  const targetGroupForGradeContext =
+    o.targetGroup === null || o.targetGroup === undefined
+      ? null
+      : String(o.targetGroup).trim() || null;
+
+  const descriptionForGradeContext = (() => {
+    if (typeof o.description === "string" && o.description.trim()) {
+      return o.description.trim();
+    }
+    if (fallbackDescriptionParts.length > 0) {
+      return fallbackDescriptionParts.join("\n").trim();
+    }
+    return null;
+  })();
+
   const schoolWeeklyProfile = normalizeSchoolWeeklyProfileRaw(
     o.schoolWeeklyProfile,
+    {
+      title: titleForGradeContext,
+      targetGroup: targetGroupForGradeContext,
+      description: descriptionForGradeContext,
+    },
   );
 
   return {
@@ -708,7 +830,7 @@ Return this JSON shape:
   "generalImportantInfo": string[],
   "contacts": string[],
   "schoolWeeklyProfile": null | {
-    "gradeBand": string | null,
+    "gradeBand": string | null (class/year free text, e.g. "10B", "10. trinn", "VG2"; server maps to 1-4, 5-7, 8-10, vg1, vg2, vg3),
     "weekdays": object whose keys are only monday, tuesday, wednesday, thursday, friday (saturday/sunday only if in source). Each value is either:
       { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" }
       or { "useSimpleDay": false, "lessons": [ { "subjectKey": string, "customLabel": string | null, "start": "HH:MM", "end": "HH:MM" } ] }
