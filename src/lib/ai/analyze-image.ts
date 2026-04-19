@@ -397,6 +397,19 @@ const BREAK_SUBJECT_KEYS = new Set<string>([
 const BREAK_TEXT_RE =
   /\b(lillefri|storefri|friminutt|friminutter|pause|pauser|lunsj|spising|matpause|midttime)\b/i;
 
+/**
+ * Streng celle-bevis for faget «norsk»: modellen setter ofte subjectKey=norsk
+ * uten at timeplan-boksen faktisk sier det. Tillat kun når teksten inneholder
+ * «Norsk», fagkode «NO» (ordgrense), eller «Norsk D1» / «Norsk D2».
+ */
+function cellTextAllowsNorskSubjectEvidence(text: string | null | undefined): boolean {
+  if (!text || !text.trim()) return false;
+  if (/\bnorsk\s*d[12]\b/i.test(text)) return true;
+  if (/\bnorsk\b/i.test(text)) return true;
+  if (/\bNO\b/i.test(text)) return true;
+  return false;
+}
+
 function hhmmToMinutes(t: string): number | null {
   const m = /^(\d{2}):(\d{2})$/.exec(t);
   if (!m) return null;
@@ -456,13 +469,29 @@ function normalizeSchoolProfileLessonCandidate(
   const canonical = canonicalizeSubjectFromStrings([rawKey, subject]);
   // Konservativ fallback: ikke velg et kjent fag hvis vi ikke er sikre.
   const fallbackKey = buildCustomSubjectKey(rawKey || subject);
-  const subjectKey = canonical?.subjectKey ?? fallbackKey;
+  let subjectKey = canonical?.subjectKey ?? fallbackKey;
+  if (subjectKey === "norsk" && !cellTextAllowsNorskSubjectEvidence(subject)) {
+    // `subject` er allerede trimmet ikke-tom (asNonEmptyString); det er celle-beviset.
+    const newKey = buildCustomSubjectKey(rawKey || subject);
+    console.log(
+      "[SUBJECT-ANTI-NORSK]",
+      JSON.stringify({
+        change: `subject_norsk_rejected_without_cell_evidence→${newKey}`,
+        phase: "normalizeSchoolProfileLessonCandidate",
+        subject,
+        rawKey,
+      }),
+    );
+    subjectKey = newKey;
+  }
   if (BREAK_SUBJECT_KEYS.has(subjectKey)) return null;
   const rawWeight = typeof o.weight === "number" ? o.weight : Number(o.weight);
   const weight =
     Number.isFinite(rawWeight) && rawWeight > 0 ? Math.min(2, rawWeight) : 1;
   return {
-    subject: canonical?.displayName ?? subject,
+    subject: subjectKey.startsWith("custom:")
+      ? subject
+      : canonical?.displayName ?? subject,
     subjectKey,
     weight,
   };
@@ -487,7 +516,9 @@ const CANONICAL_SUBJECTS: CanonicalSubject[] = [
   {
     subjectKey: "norsk",
     displayName: "Norsk",
-    aliases: ["norsk", "no", "nor", "norsk-hovedmal", "norsk-sidemal"],
+    // Ikke «no»/«nor» — for ofte falsk positiv (OCR/modell). Celle må vise
+    // «Norsk», «NO», «Norsk D1/D2» via cellTextAllowsNorskSubjectEvidence.
+    aliases: ["norsk", "norsk-hovedmal", "norsk-sidemal"],
   },
   {
     subjectKey: "matematikk",
@@ -819,6 +850,29 @@ function normalizeSchoolProfileLesson(
     }
     changes.push(`subject_fallback_to_custom_label:${rawText}`);
   }
+
+  // Streng norsk: krever celle-bevis (customLabel hvis satt, ellers modellfelt).
+  if (key === "norsk") {
+    const hasLabel = Boolean(customLabel?.trim());
+    const evidenceSource = hasLabel
+      ? customLabel!
+      : `${fromKey} ${fromSubj}`.trim();
+    if (!cellTextAllowsNorskSubjectEvidence(evidenceSource)) {
+      const rawForCustom =
+        (customLabel?.trim() ? customLabel.trim() : "") ||
+        pickRawSubjectText(fromKey, fromSubj, null) ||
+        fromSubj ||
+        fromKey;
+      if (rawForCustom.trim()) {
+        key = buildCustomSubjectKey(rawForCustom);
+        if (!customLabel?.trim()) customLabel = normalizeSpace(rawForCustom);
+        changes.push(
+          `subject_norsk_rejected_without_cell_evidence→${key}`,
+        );
+      }
+    }
+  }
+
   if (BREAK_SUBJECT_KEYS.has(key)) {
     pushSubjectLessonDiag({
       hypothesisId: "H2",
