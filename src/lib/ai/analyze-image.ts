@@ -1252,6 +1252,27 @@ function getOpenAIClient(): OpenAI {
   return new OpenAI({ apiKey });
 }
 
+/**
+ * Nyere OpenAI-modeller (gpt-5.x, o-serien m.fl.) avviser `max_tokens` i
+ * chat.completions og krever `max_completion_tokens`. Eldre modeller bruker
+ * fortsatt `max_tokens`.
+ */
+function chatCompletionOutputTokenParam(
+  model: string,
+  maxOutput: number,
+): { max_tokens: number } | { max_completion_tokens: number } {
+  const m = model.trim().toLowerCase();
+  if (
+    m.includes("gpt-5") ||
+    m.startsWith("o1") ||
+    m.startsWith("o3") ||
+    m.startsWith("o4")
+  ) {
+    return { max_completion_tokens: maxOutput };
+  }
+  return { max_tokens: maxOutput };
+}
+
 function parseAIResponse(content: string | null | undefined): AIAnalysisResult {
   if (!content) {
     throw new Error("Tom respons fra OpenAI");
@@ -1301,7 +1322,7 @@ async function analyzeImageWithModel(
       },
     ],
     response_format: { type: "json_object" },
-    max_tokens: 2800,
+    ...chatCompletionOutputTokenParam(model, 2800),
     temperature: 0.2,
   });
 
@@ -1324,7 +1345,7 @@ async function analyzeTextWithModel(
       },
     ],
     response_format: { type: "json_object" },
-    max_tokens: 4000,
+    ...chatCompletionOutputTokenParam(model, 4000),
     temperature: 0.2,
   });
 
