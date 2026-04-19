@@ -110,6 +110,12 @@ GRID-TIMEPLAN – LES LAYOUTEN FØR DU TOLKER TEKSTEN:
      - «Etter høstferien» / «Fra uke …» → fortsatt ta med (dette er en fast time), men du kan legge teksten i customLabel.
   9) Hvis en time bare dekker PART av en rad og tekst bekrefter kortere varighet, tro på teksten først, raden som fallback.
   10) Når usikker på en spesifikk boks, hopp den over fremfor å gjette feil dag/tid. Hellere en ufullstendig timeplan enn feilplassert fag.
+  11) FAGNAVN INNI BOKSEN:
+     - Kjente kanoniske slugs: norsk, matematikk, engelsk, naturfag, samfunnsfag, krle, kroppsoving, musikk, kunst-og-handverk, mat-og-helse, utdanningsvalg, valgfag, spansk, tysk, fransk, historie, geografi.
+     - IKKE KOPIER fagnavn fra en annen boks på samme dag.
+     - HVIS BOKSEN INNEHOLDER TYDELIG FULLT NAVN: bruk riktig slug + skriv navnet i customLabel (f.eks. subjectKey="kroppsoving", customLabel="Kroppsøving").
+     - HVIS BOKSEN BARE HAR EN FORKORTELSE DU IKKE ER SIKKER PÅ («UTV», «K&H», «K/H», «Språk», «PR», «Sm», etc.): IKKE gjett et kjent fag. Sett subject og subjectKey til forkortelsen akkurat slik den står (f.eks. subject="UTV", subjectKey="UTV"), og customLabel til samme tekst. Serveren vil konvertere det til en trygg fallback-key.
+     - Bedre å beholde rå tekst fra timeplanen enn å gjette feil fag.
 
   Objektet har:
   - gradeBand: trinn/klasse fritekst (f.eks. «10. trinn», «10B», «VG2») eller null – serveren normaliserer til Foreldre-App-koder
@@ -343,14 +349,245 @@ function normalizeSchoolProfileLessonCandidate(
   const o = raw as Record<string, unknown>;
   const subject = asNonEmptyString(o.subject);
   const rawKey = typeof o.subjectKey === "string" ? o.subjectKey.trim() : "";
-  const subjectKey =
+  const slugged =
     slugifySubjectKey(rawKey) || (subject ? slugifySubjectKey(subject) : null);
-  if (!subjectKey || !subject) return null;
+  if (!slugged || !subject) return null;
+  const canonical = canonicalizeSubjectFromStrings([rawKey, subject]);
+  // Konservativ fallback: ikke velg et kjent fag hvis vi ikke er sikre.
+  const fallbackKey = buildCustomSubjectKey(rawKey || subject);
+  const subjectKey = canonical?.subjectKey ?? fallbackKey;
   if (BREAK_SUBJECT_KEYS.has(subjectKey)) return null;
   const rawWeight = typeof o.weight === "number" ? o.weight : Number(o.weight);
   const weight =
     Number.isFinite(rawWeight) && rawWeight > 0 ? Math.min(2, rawWeight) : 1;
-  return { subject, subjectKey, weight };
+  return {
+    subject: canonical?.displayName ?? subject,
+    subjectKey,
+    weight,
+  };
+}
+
+/* ----------------------------------------------------------------- */
+/* Kanonisk fag-tabell + alias-matching (norsk grunnskole/VGS).      */
+/* Brukt for å unngå at små bokser / forkortelser i timeplan får     */
+/* feil subjectKey, og for å kryssjekke mot customLabel.             */
+/* ----------------------------------------------------------------- */
+
+interface CanonicalSubject {
+  /** Intern `subjectKey` (bindestrek-slug), matcher det Foreldre-App bruker. */
+  subjectKey: string;
+  /** Lesbart norsk fagnavn. */
+  displayName: string;
+  /** Alias-tokens (allerede normaliserte: små bokstaver, æ→e, ø→o, å→a, kun bokstaver). */
+  aliases: string[];
+}
+
+const CANONICAL_SUBJECTS: CanonicalSubject[] = [
+  {
+    subjectKey: "norsk",
+    displayName: "Norsk",
+    aliases: ["norsk", "no", "nor", "norsk-hovedmal", "norsk-sidemal"],
+  },
+  {
+    subjectKey: "matematikk",
+    displayName: "Matematikk",
+    aliases: ["matematikk", "matte", "mat", "ma", "mat1p", "mat1t", "matta"],
+  },
+  {
+    subjectKey: "engelsk",
+    displayName: "Engelsk",
+    aliases: ["engelsk", "eng", "english"],
+  },
+  {
+    subjectKey: "naturfag",
+    displayName: "Naturfag",
+    aliases: ["naturfag", "natur", "nat"],
+  },
+  {
+    subjectKey: "samfunnsfag",
+    displayName: "Samfunnsfag",
+    aliases: ["samfunnsfag", "samf", "samfunn"],
+  },
+  {
+    subjectKey: "krle",
+    displayName: "KRLE",
+    aliases: ["krle", "rle", "krl", "kr-le", "krle-livssyn"],
+  },
+  {
+    subjectKey: "kroppsoving",
+    displayName: "Kroppsøving",
+    aliases: ["kroppsoving", "kroppsov", "kropp", "gym", "kroppsovning", "kroppsoeving"],
+  },
+  {
+    subjectKey: "musikk",
+    displayName: "Musikk",
+    aliases: ["musikk", "mus"],
+  },
+  {
+    subjectKey: "kunst-og-handverk",
+    displayName: "Kunst og håndverk",
+    // Kun fulle/entydige varianter. «K&H», «K/H», «KH» holdes rå via fallback
+    // fordi de kan være tvetydige på enkelte skoler.
+    aliases: ["kunstoghandverk", "kunst-og-handverk"],
+  },
+  {
+    subjectKey: "mat-og-helse",
+    displayName: "Mat og helse",
+    aliases: ["matoghelse", "mat-og-helse", "mat-helse"],
+  },
+  {
+    subjectKey: "utdanningsvalg",
+    displayName: "Utdanningsvalg",
+    // Utelatt "utv"/"utd" med vilje – noen skoler bruker UTV med ulik betydning,
+    // og konservativ fallback er tryggere enn feil mapping.
+    aliases: ["utdanningsvalg"],
+  },
+  {
+    subjectKey: "valgfag",
+    displayName: "Valgfag",
+    aliases: ["valgfag", "valg"],
+  },
+  {
+    subjectKey: "spansk",
+    displayName: "Spansk",
+    aliases: ["spansk", "spa"],
+  },
+  {
+    subjectKey: "tysk",
+    displayName: "Tysk",
+    aliases: ["tysk", "ty"],
+  },
+  {
+    subjectKey: "fransk",
+    displayName: "Fransk",
+    aliases: ["fransk", "fra"],
+  },
+  {
+    subjectKey: "historie",
+    displayName: "Historie",
+    aliases: ["historie", "hist"],
+  },
+  {
+    subjectKey: "geografi",
+    displayName: "Geografi",
+    aliases: ["geografi", "geo"],
+  },
+];
+
+/** Normaliser en tekst til et alias-friendly token (a-z0-9 kun, æøå foldet). */
+function subjectAliasKey(raw: string): string {
+  return normalizeNorwegianLetters(raw)
+    .replace(/&/g, " og ")
+    .replace(/\//g, " ")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+/**
+ * Prøv å matche en tekst (eks. «K&H», «KRLE», «Kroppsøving») mot kanoniske fag.
+ * Returner første kanonisk match eller null.
+ */
+function canonicalizeSubjectFromText(
+  text: string | null,
+): CanonicalSubject | null {
+  if (!text) return null;
+  const key = subjectAliasKey(text);
+  if (!key) return null;
+  // Eksakt alias-treff først.
+  for (const s of CANONICAL_SUBJECTS) {
+    if (s.aliases.includes(key)) return s;
+  }
+  // «Kortform + annet» (f.eks. «krle-livssyn», «mat-og-helse-nb»): alias som prefix.
+  for (const s of CANONICAL_SUBJECTS) {
+    for (const a of s.aliases) {
+      if (a.length >= 3 && key.startsWith(a)) return s;
+    }
+  }
+  // Ord-by-ord: hvis noe av inputs ordtokens matcher en alias.
+  const words = normalizeNorwegianLetters(text)
+    .replace(/&/g, " og ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  for (const w of words) {
+    for (const s of CANONICAL_SUBJECTS) {
+      if (s.aliases.includes(w)) return s;
+    }
+  }
+  return null;
+}
+
+/** Prøv flere kilder (f.eks. subjectKey, subject, customLabel) i rekkefølge. */
+function canonicalizeSubjectFromStrings(
+  sources: Array<string | null | undefined>,
+): CanonicalSubject | null {
+  for (const s of sources) {
+    if (!s) continue;
+    const found = canonicalizeSubjectFromText(s);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Prefix som markerer at faget IKKE kunne mappes til et kjent kanonisk fag. */
+const CUSTOM_SUBJECT_PREFIX = "custom:";
+
+/**
+ * Bygg en konservativ `subjectKey` for ukjente/usikre fag. Beholder rå tekst
+ * som differensiator slik at ulike ukjente fag ikke kolliderer i dedup.
+ * Eksempler:
+ *   «UTV»      → "custom:utv"
+ *   «K&H»      → "custom:k-h"   (& → "-")
+ *   «Språk»    → "custom:sprak"
+ */
+function buildCustomSubjectKey(rawText: string): string {
+  const slug =
+    normalizeNorwegianLetters(rawText)
+      .replace(/&/g, "-")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "ukjent";
+  return `${CUSTOM_SUBJECT_PREFIX}${slug}`;
+}
+
+/** Velg beste rå tekst til å vise/lagre som customLabel for ukjente fag. */
+function pickRawSubjectText(
+  fromKey: string,
+  fromSubj: string,
+  customLabel: string | null,
+): string | null {
+  const first = [fromSubj, fromKey, customLabel ?? ""]
+    .map((s) => s.trim())
+    .find((s) => s.length > 0);
+  return first ? normalizeSpace(first) : null;
+}
+
+/**
+ * Let etter "FagA (/|,) FagB"-mønster i customLabel. Brukes for D1/D2-bokser
+ * når modellen har levert én lesson med begge fag i teksten i stedet for
+ * `subjectCandidates`. Returnerer distinkte kanoniske fag i original rekkefølge.
+ */
+function extractDualCanonicalSubjectsFromLabel(
+  label: string | null,
+): CanonicalSubject[] {
+  if (!label) return [];
+  if (!/[\/,]|\b(d1|d2|gruppe|spor)\b/i.test(label)) return [];
+  const parts = label
+    .split(/\s*[\/,]\s*|\s+(?:eller|or)\s+/i)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return [];
+  const matches: CanonicalSubject[] = [];
+  const seen = new Set<string>();
+  for (const p of parts) {
+    const cleaned = p.replace(/\bd1\b|\bd2\b|\bgruppe\b|\bspor\b/gi, "").trim();
+    const hit = canonicalizeSubjectFromText(cleaned);
+    if (hit && !seen.has(hit.subjectKey)) {
+      matches.push(hit);
+      seen.add(hit.subjectKey);
+    }
+  }
+  return matches.length >= 2 ? matches : [];
 }
 
 type LessonNormalizationResult =
@@ -366,15 +603,15 @@ function normalizeSchoolProfileLesson(
   const o = raw as Record<string, unknown>;
   const fromKey = typeof o.subjectKey === "string" ? o.subjectKey.trim() : "";
   const fromSubj = typeof o.subject === "string" ? o.subject.trim() : "";
-  const key = slugifySubjectKey(fromKey) || slugifySubjectKey(fromSubj);
-  if (!key) {
+  const initialSlug = slugifySubjectKey(fromKey) || slugifySubjectKey(fromSubj);
+  if (!initialSlug) {
     return { ok: false, reason: "missing_subject_key" };
   }
 
-  if (BREAK_SUBJECT_KEYS.has(key)) {
-    return { ok: false, reason: `break_subject_key:${key}` };
+  if (BREAK_SUBJECT_KEYS.has(initialSlug)) {
+    return { ok: false, reason: `break_subject_key:${initialSlug}` };
   }
-  const customLabel = asNonEmptyString(o.customLabel);
+  let customLabel = asNonEmptyString(o.customLabel);
   if (
     customLabel &&
     BREAK_TEXT_RE.test(customLabel) &&
@@ -386,6 +623,47 @@ function normalizeSchoolProfileLesson(
   }
 
   const changes: string[] = [];
+
+  // Kanonisk fag-mapping: prøv i rekkefølge subjectKey → subject → customLabel.
+  // Hvis customLabel avslører et annet kanonisk fag enn det subject/subjectKey peker på,
+  // er det som regel modellen som har lagt feil slug – label er mer direkte fra boksen.
+  const canonicalFromKeyOrSubject = canonicalizeSubjectFromStrings([fromKey, fromSubj]);
+  const canonicalFromLabel = canonicalizeSubjectFromText(customLabel);
+  let canonical: CanonicalSubject | null = canonicalFromKeyOrSubject;
+  if (
+    canonicalFromLabel &&
+    canonicalFromKeyOrSubject &&
+    canonicalFromLabel.subjectKey !== canonicalFromKeyOrSubject.subjectKey
+  ) {
+    // Stol på customLabel (boksens originaltekst) over modellens egen slug.
+    canonical = canonicalFromLabel;
+    changes.push(
+      `subject_corrected_from_label:${canonicalFromKeyOrSubject.subjectKey}→${canonicalFromLabel.subjectKey}`,
+    );
+  } else if (!canonicalFromKeyOrSubject && canonicalFromLabel) {
+    canonical = canonicalFromLabel;
+    changes.push(`subject_recovered_from_label:${canonicalFromLabel.subjectKey}`);
+  }
+
+  let key: string;
+  if (canonical) {
+    key = canonical.subjectKey;
+  } else {
+    // Konservativ fallback: behold rå tekst i stedet for å gjette feil fag.
+    const rawText = pickRawSubjectText(fromKey, fromSubj, customLabel);
+    if (!rawText) {
+      return { ok: false, reason: "missing_subject_text_for_fallback" };
+    }
+    key = buildCustomSubjectKey(rawText);
+    if (!customLabel) {
+      // Sørg for at råteksten bevares synlig for bruker.
+      customLabel = rawText;
+    }
+    changes.push(`subject_fallback_to_custom_label:${rawText}`);
+  }
+  if (BREAK_SUBJECT_KEYS.has(key)) {
+    return { ok: false, reason: `break_subject_key_after_canonical:${key}` };
+  }
   const rawStart = asNonEmptyString(o.start);
   const rawEnd = asNonEmptyString(o.end);
   let start = normalizeHHMM(rawStart);
@@ -442,11 +720,25 @@ function normalizeSchoolProfileLesson(
         ) as SchoolProfileLessonCandidate[])
     : [];
   const seen = new Set<string>();
-  const candidates = rawCandidates.filter((c) => {
+  let candidates = rawCandidates.filter((c) => {
     if (seen.has(c.subjectKey)) return false;
     seen.add(c.subjectKey);
     return true;
   });
+
+  // Hvis modellen ikke har rapportert candidates, men customLabel inneholder en
+  // tydelig D1/D2-splitt (f.eks. «Matte D1 / Norsk D2»), bygg candidates selv.
+  if (candidates.length < 2) {
+    const dual = extractDualCanonicalSubjectsFromLabel(customLabel);
+    if (dual.length >= 2) {
+      candidates = dual.map((d, i) => ({
+        subject: d.displayName,
+        subjectKey: d.subjectKey,
+        weight: i === 0 ? 1 : 1,
+      }));
+      changes.push(`subjectCandidates_from_label:${dual.length}`);
+    }
+  }
 
   const lesson: SchoolProfileLesson = {
     subjectKey: key,
