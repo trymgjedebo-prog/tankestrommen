@@ -8,6 +8,7 @@ import {
   parseDocumentKind,
   type AnalysisDocumentKind,
 } from "@/lib/ai/analysis-model-router";
+import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
 import { extractTextFromPdfBuffer } from "@/lib/pdf/extract-pdf-text";
 import { extractTextFromDocxBuffer } from "@/lib/docx/extract-docx-text";
 import type {
@@ -1431,6 +1432,9 @@ function toPortalBundle(
     ? []
     : buildProposalItems(result, sourceType);
   const debugPayload: Record<string, unknown> = {};
+  if (includeDebug) {
+    debugPayload.deploy = getDeployFingerprint();
+  }
   if (includeDebug && result.schoolWeeklyProfileDebug) {
     debugPayload.schoolWeeklyProfile = result.schoolWeeklyProfileDebug;
   }
@@ -1481,7 +1485,10 @@ function wrapResponse(
   }
   // Non-portal: strip debug by default, keep when asked.
   const clean = includeDebug ? result : stripInternalAnalysisDebug(result);
-  return NextResponse.json(extra ? { ...clean, ...extra } : clean);
+  const deployWrap = includeDebug ? { deploy: getDeployFingerprint() } : {};
+  return NextResponse.json(
+    extra ? { ...clean, ...extra, ...deployWrap } : { ...clean, ...deployWrap },
+  );
 }
 
 /** Fjerner interne debug-felter fra AIAnalysisResult når klient ikke ba om debug. */
