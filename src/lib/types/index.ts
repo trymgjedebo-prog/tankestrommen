@@ -131,6 +131,20 @@ export interface AIAnalysisResult {
    * kun når `?debug=1` er satt i portal-modus. Ikke en del av stabil kontrakt.
    */
   schoolWeeklyProfileDebug?: SchoolWeeklyProfileDebug;
+  /**
+   * Valgfri spor av modell-routing (lett/sterk, eskalering). Fjernes fra svar
+   * når debug ikke er aktiv; brukes i `debug.analysisModel` i portal-modus.
+   */
+  analysisModelTrace?: AnalysisModelTrace;
+}
+
+/** Spor av hvilken OpenAI-modell som ble brukt (MVP routing). */
+export interface AnalysisModelTrace {
+  initialTier: "light" | "strong";
+  initialModel: string;
+  finalModel: string;
+  escalated: boolean;
+  reasons: string[];
 }
 
 /** Debug-rapport per dag fra normalisering av skoleprofil. */

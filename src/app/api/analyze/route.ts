@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { analyzeImage, analyzeText } from "@/lib/ai/analyze-image";
+import {
+  analyzeImageWithRouting,
+  analyzeTextWithRouting,
+} from "@/lib/ai/analyze-image";
+import {
+  parseDocumentKind,
+  type AnalysisDocumentKind,
+} from "@/lib/ai/analysis-model-router";
 import { extractTextFromPdfBuffer } from "@/lib/pdf/extract-pdf-text";
 import { extractTextFromDocxBuffer } from "@/lib/docx/extract-docx-text";
 import type {
@@ -102,6 +109,7 @@ async function analyzeFromExtractedText(
   sourceHint: AnalysisSourceHint,
   portalMode: boolean,
   includeDebug: boolean = false,
+  documentKind?: AnalysisDocumentKind,
 ) {
   let textForModel = rawText;
   if (textForModel.length > MAX_DOC_TEXT_FOR_MODEL) {
@@ -112,7 +120,14 @@ async function analyzeFromExtractedText(
 
   let result;
   try {
-    result = await analyzeText(preamble + textForModel);
+    const routing = await analyzeTextWithRouting(preamble + textForModel, {
+      documentKind: documentKind ?? undefined,
+      sourceRoute: sourceHint.type === "pdf" ? "pdf" : "docx",
+    });
+    result = {
+      ...routing.result,
+      analysisModelTrace: routing.modelTrace,
+    };
   } catch (err) {
     const mapped = mapAnalyzeTextError(err);
     console.error("[api/analyze text]", err);
@@ -147,6 +162,8 @@ interface ParsedBody {
   pdf?: string;
   docx?: string;
   fileName?: string;
+  /** Valgfri: timetable | activity_plan | event_doc | text | auto (streng fra JSON/multipart) */
+  documentKind?: unknown;
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
@@ -158,13 +175,14 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
   const form = await request.formData();
   const file = form.get("file") as File | null;
   const textField = form.get("text") as string | null;
+  const documentKind = parseDocumentKind(form.get("documentKind"));
 
   if (textField && typeof textField === "string") {
-    return { text: textField };
+    return { text: textField, ...(documentKind ? { documentKind } : {}) };
   }
 
   if (!file) {
-    return {};
+    return { ...(documentKind ? { documentKind } : {}) };
   }
 
   const name = file.name.toLowerCase();
@@ -172,19 +190,31 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
   const dataUrl = await fileToDataUrl(file);
 
   if (mime === "application/pdf" || name.endsWith(".pdf")) {
-    return { pdf: dataUrl, fileName: file.name };
+    return {
+      pdf: dataUrl,
+      fileName: file.name,
+      ...(documentKind ? { documentKind } : {}),
+    };
   }
   if (
     name.endsWith(".docx") ||
     mime.includes("wordprocessingml.document")
   ) {
-    return { docx: dataUrl, fileName: file.name };
+    return {
+      docx: dataUrl,
+      fileName: file.name,
+      ...(documentKind ? { documentKind } : {}),
+    };
   }
   if (mime.startsWith("image/")) {
-    return { image: dataUrl };
+    return { image: dataUrl, ...(documentKind ? { documentKind } : {}) };
   }
 
-  return { pdf: dataUrl, fileName: file.name };
+  return {
+    pdf: dataUrl,
+    fileName: file.name,
+    ...(documentKind ? { documentKind } : {}),
+  };
 }
 
 function isMultipart(request: NextRequest): boolean {
@@ -1400,6 +1430,13 @@ function toPortalBundle(
   const items = schoolProfileProposal
     ? []
     : buildProposalItems(result, sourceType);
+  const debugPayload: Record<string, unknown> = {};
+  if (includeDebug && result.schoolWeeklyProfileDebug) {
+    debugPayload.schoolWeeklyProfile = result.schoolWeeklyProfileDebug;
+  }
+  if (includeDebug && result.analysisModelTrace) {
+    debugPayload.analysisModel = result.analysisModelTrace;
+  }
   return {
     schemaVersion: "1.0.0",
     provenance: {
@@ -1410,13 +1447,7 @@ function toPortalBundle(
     },
     items,
     ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
-    ...(includeDebug && result.schoolWeeklyProfileDebug
-      ? {
-          debug: {
-            schoolWeeklyProfile: result.schoolWeeklyProfileDebug,
-          },
-        }
-      : {}),
+    ...(Object.keys(debugPayload).length > 0 ? { debug: debugPayload } : {}),
   };
 }
 
@@ -1435,7 +1466,11 @@ function wrapResponse(
   includeDebug: boolean = false,
 ): NextResponse {
   if (portalMode) {
-    const bundle = toPortalBundle(result, sourceType, includeDebug);
+    const bundle = toPortalBundle(
+      includeDebug ? result : stripInternalAnalysisDebug(result),
+      sourceType,
+      includeDebug,
+    );
     console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
       schemaVersion: bundle.schemaVersion,
       itemCount: (bundle.items as unknown[]).length,
@@ -1445,13 +1480,14 @@ function wrapResponse(
     return NextResponse.json(bundle);
   }
   // Non-portal: strip debug by default, keep when asked.
-  const clean = includeDebug ? result : stripWeeklyProfileDebug(result);
+  const clean = includeDebug ? result : stripInternalAnalysisDebug(result);
   return NextResponse.json(extra ? { ...clean, ...extra } : clean);
 }
 
-function stripWeeklyProfileDebug(result: AIAnalysisResult): AIAnalysisResult {
-  if (!result.schoolWeeklyProfileDebug) return result;
-  const { schoolWeeklyProfileDebug: _omit, ...rest } = result;
+/** Fjerner interne debug-felter fra AIAnalysisResult når klient ikke ba om debug. */
+function stripInternalAnalysisDebug(result: AIAnalysisResult): AIAnalysisResult {
+  const { schoolWeeklyProfileDebug: _sw, analysisModelTrace: _am, ...rest } =
+    result;
   return rest as AIAnalysisResult;
 }
 
@@ -1494,9 +1530,11 @@ export async function POST(request: NextRequest) {
       debug,
     });
 
-    const { image, text, pdf, docx, fileName }: ParsedBody = multipart
+    const body: ParsedBody = multipart
       ? await parseMultipartBody(request)
       : await request.json();
+    const { image, text, pdf, docx, fileName } = body;
+    const documentKind = parseDocumentKind(body.documentKind);
 
     if (text && typeof text === "string") {
       const trimmed = text.trim();
@@ -1509,7 +1547,14 @@ export async function POST(request: NextRequest) {
           { status: 413 }
         );
       }
-      const result = await analyzeText(trimmed);
+      const routing = await analyzeTextWithRouting(trimmed, {
+        documentKind: documentKind ?? undefined,
+        sourceRoute: "text",
+      });
+      const result: AIAnalysisResult = {
+        ...routing.result,
+        analysisModelTrace: routing.modelTrace,
+      };
       return wrapResponse(result, portalMode, "text", undefined, debug);
     }
 
@@ -1578,6 +1623,7 @@ export async function POST(request: NextRequest) {
         },
         portalMode,
         debug,
+        documentKind,
       );
     }
 
@@ -1651,6 +1697,7 @@ export async function POST(request: NextRequest) {
         },
         portalMode,
         debug,
+        documentKind,
       );
     }
 
@@ -1667,7 +1714,14 @@ export async function POST(request: NextRequest) {
           { status: 413 }
         );
       }
-      const result = await analyzeImage(image);
+      const routing = await analyzeImageWithRouting(image, {
+        documentKind: documentKind ?? undefined,
+        sourceRoute: "image",
+      });
+      const result: AIAnalysisResult = {
+        ...routing.result,
+        analysisModelTrace: routing.modelTrace,
+      };
       return wrapResponse(result, portalMode, "image", undefined, debug);
     }
 

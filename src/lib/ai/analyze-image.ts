@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type {
   AIAnalysisResult,
+  AnalysisModelTrace,
   DayScheduleEntry,
   EventCategory,
   ExtractedText,
@@ -13,8 +14,13 @@ import type {
   SchoolWeeklyProfileDebug,
   TimeSlot,
 } from "@/lib/types";
-
-const VISION_MODEL = "gpt-4o-mini";
+import {
+  analysisLooksWeakForEscalation,
+  emptyAnalysisModelTrace,
+  getStrongAnalysisModel,
+  selectInitialAnalysisModel,
+  type AnalysisModelRoutingInput,
+} from "@/lib/ai/analysis-model-router";
 
 const EVENT_CATEGORIES: EventCategory[] = [
   "arrangement",
@@ -1275,14 +1281,15 @@ function parseAIResponseWithSource(
   return normalizeAIAnalysisResult(parsed, sourceText);
 }
 
-export async function analyzeImage(
-  imageBase64: string
+async function analyzeImageWithModel(
+  imageBase64: string,
+  model: string,
 ): Promise<AIAnalysisResult> {
   const openai = getOpenAIClient();
   const imageUrl = toDataUrl(imageBase64);
 
   const completion = await openai.chat.completions.create({
-    model: VISION_MODEL,
+    model,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       {
@@ -1301,13 +1308,14 @@ export async function analyzeImage(
   return parseAIResponse(completion.choices[0]?.message?.content);
 }
 
-export async function analyzeText(
-  text: string
+async function analyzeTextWithModel(
+  text: string,
+  model: string,
 ): Promise<AIAnalysisResult> {
   const openai = getOpenAIClient();
 
   const completion = await openai.chat.completions.create({
-    model: VISION_MODEL,
+    model,
     messages: [
       { role: "system", content: TEXT_SYSTEM_PROMPT },
       {
@@ -1321,4 +1329,87 @@ export async function analyzeText(
   });
 
   return parseAIResponse(completion.choices[0]?.message?.content);
+}
+
+function runRoutedImageAnalysis(
+  imageBase64: string,
+  input: AnalysisModelRoutingInput,
+): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
+  const initial = selectInitialAnalysisModel(input);
+  return runRoutedVisionLikeAnalysis(initial, (model) =>
+    analyzeImageWithModel(imageBase64, model),
+  );
+}
+
+function runRoutedTextAnalysis(
+  text: string,
+  input: AnalysisModelRoutingInput,
+): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
+  const initial = selectInitialAnalysisModel(input);
+  return runRoutedVisionLikeAnalysis(initial, (model) =>
+    analyzeTextWithModel(text, model),
+  );
+}
+
+/**
+ * Felles retry: ved lett modell → én eskalering til sterk ved feil eller «svakt» resultat.
+ */
+async function runRoutedVisionLikeAnalysis(
+  initial: ReturnType<typeof selectInitialAnalysisModel>,
+  runWithModel: (model: string) => Promise<AIAnalysisResult>,
+): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
+  const strong = getStrongAnalysisModel();
+  const trace = emptyAnalysisModelTrace(initial);
+
+  console.log("[analysis-model] initial", {
+    model: initial.model,
+    tier: initial.tier,
+    reason: initial.reason,
+  });
+
+  try {
+    let result = await runWithModel(initial.model);
+    if (initial.tier === "light") {
+      const weak = analysisLooksWeakForEscalation(result);
+      if (weak.weak) {
+        trace.reasons.push(`escalate:weak:${weak.reason ?? "unknown"}`);
+        result = await runWithModel(strong);
+        trace.escalated = true;
+        trace.finalModel = strong;
+        console.log("[analysis-model] escalated (weak)", { finalModel: strong });
+      }
+    }
+    return { result, modelTrace: trace };
+  } catch (err) {
+    if (initial.tier === "light") {
+      trace.reasons.push(
+        `escalate:error:${err instanceof Error ? err.message : String(err)}`,
+      );
+      const result = await runWithModel(strong);
+      trace.escalated = true;
+      trace.finalModel = strong;
+      console.warn("[analysis-model] escalated (error)", {
+        finalModel: strong,
+        err,
+      });
+      return { result, modelTrace: trace };
+    }
+    throw err;
+  }
+}
+
+/** Bildeanalyse med modell-routing (lett/sterk + eskalering). */
+export async function analyzeImageWithRouting(
+  imageBase64: string,
+  input: AnalysisModelRoutingInput,
+): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
+  return runRoutedImageAnalysis(imageBase64, input);
+}
+
+/** Tekstanalyse med modell-routing. */
+export async function analyzeTextWithRouting(
+  text: string,
+  input: AnalysisModelRoutingInput,
+): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
+  return runRoutedTextAnalysis(text, input);
 }
