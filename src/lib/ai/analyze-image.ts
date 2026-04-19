@@ -174,6 +174,107 @@ function normalizeSpace(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
+// #region agent log
+/** Samler per-lesson subject-rådata → én aggregert emit ved slutt av ukeprofil-normalisering. */
+const subjectLessonDiagBuffer: Array<Record<string, unknown>> = [];
+const SUBJECT_LESSON_DIAG_CAP = 150;
+
+function clearSubjectLessonDiagBuffer(): void {
+  subjectLessonDiagBuffer.length = 0;
+}
+
+function pushSubjectLessonDiag(entry: Record<string, unknown>): void {
+  if (subjectLessonDiagBuffer.length >= SUBJECT_LESSON_DIAG_CAP) return;
+  subjectLessonDiagBuffer.push({ ...entry, _ts: Date.now() });
+}
+
+function diagSubjectPipeline(payload: {
+  hypothesisId: string;
+  phase: string;
+  location: string;
+  data: Record<string, unknown>;
+  runId?: string;
+}): void {
+  const body = {
+    sessionId: "f55091",
+    timestamp: Date.now(),
+    ...payload,
+  };
+  console.log("[SUBJECT-DIAG]", JSON.stringify(body));
+  fetch("http://127.0.0.1:7371/ingest/a8a2064f-db06-4673-9cf1-7b503a131f2a", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Debug-Session-Id": "f55091",
+    },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+function flushSubjectLessonDiagBuffer(flushReason: string): void {
+  if (subjectLessonDiagBuffer.length === 0) return;
+  diagSubjectPipeline({
+    hypothesisId: "H2",
+    phase: "aggregate_normalizeSchoolProfileLesson",
+    location: "analyze-image.ts:flushSubjectLessonDiagBuffer",
+    data: {
+      flushReason,
+      entryCount: subjectLessonDiagBuffer.length,
+      entries: subjectLessonDiagBuffer,
+    },
+  });
+  subjectLessonDiagBuffer.length = 0;
+}
+
+/** Kompakt rå `schoolWeeklyProfile` fra modell før server-normalisering (hypotese H1). */
+function summarizeRawSchoolProfileForDiag(raw: unknown): unknown {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object") return { error: "not_object" };
+  const o = raw as Record<string, unknown>;
+  const wd = o.weekdays;
+  if (!wd || typeof wd !== "object") return { weekdays: "missing_or_invalid" };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(wd as Record<string, unknown>)) {
+    if (!v || typeof v !== "object") continue;
+    const day = v as Record<string, unknown>;
+    const lessons = Array.isArray(day.lessons) ? day.lessons : [];
+    out[k] = (lessons as unknown[]).slice(0, 50).map((L, i) => {
+      if (!L || typeof L !== "object") return { i, err: "bad_lesson" };
+      const l = L as Record<string, unknown>;
+      return {
+        i,
+        subjectKey: typeof l.subjectKey === "string" ? l.subjectKey : null,
+        subject: typeof l.subject === "string" ? l.subject : null,
+        customLabel:
+          typeof l.customLabel === "string" ? l.customLabel : null,
+        start: typeof l.start === "string" ? l.start : null,
+        end: typeof l.end === "string" ? l.end : null,
+      };
+    });
+  }
+  return { gradeBand: o.gradeBand ?? null, weekdays: out };
+}
+
+/** Normalisert profil etter normalize (hypotese H2 vs H1 + evt. H3). */
+function summarizeNormalizedSchoolProfileForDiag(
+  profile: SchoolWeeklyProfile,
+): unknown {
+  const out: Record<string, unknown> = {};
+  for (const [k, wd] of Object.entries(profile.weekdays ?? {})) {
+    if (!wd || wd.useSimpleDay) continue;
+    out[k] = wd.lessons.slice(0, 50).map((l, i) => ({
+      i,
+      subjectKey: l.subjectKey,
+      customLabel: l.customLabel,
+      start: l.start,
+      end: l.end,
+      candidateCount: l.subjectCandidates?.length ?? 0,
+    }));
+  }
+  return out;
+}
+// #endregion
+
 function normalizeNorwegianLetters(input: string): string {
   return input
     .toLowerCase()
@@ -598,6 +699,12 @@ function normalizeSchoolProfileLesson(
   raw: unknown,
 ): LessonNormalizationResult {
   if (!raw || typeof raw !== "object") {
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLesson_exit",
+      location: "analyze-image.ts:normalizeSchoolProfileLesson",
+      data: { ok: false, reason: "not_object" },
+    });
     return { ok: false, reason: "not_object" };
   }
   const o = raw as Record<string, unknown>;
@@ -605,13 +712,32 @@ function normalizeSchoolProfileLesson(
   const fromSubj = typeof o.subject === "string" ? o.subject.trim() : "";
   const initialSlug = slugifySubjectKey(fromKey) || slugifySubjectKey(fromSubj);
   if (!initialSlug) {
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLesson_exit",
+      location: "analyze-image.ts:normalizeSchoolProfileLesson",
+      data: { ok: false, reason: "missing_subject_key", fromKey, fromSubj },
+    });
     return { ok: false, reason: "missing_subject_key" };
   }
 
   if (BREAK_SUBJECT_KEYS.has(initialSlug)) {
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLesson_exit",
+      location: "analyze-image.ts:normalizeSchoolProfileLesson",
+      data: {
+        ok: false,
+        reason: `break_subject_key:${initialSlug}`,
+        fromKey,
+        fromSubj,
+        initialSlug,
+      },
+    });
     return { ok: false, reason: `break_subject_key:${initialSlug}` };
   }
-  let customLabel = asNonEmptyString(o.customLabel);
+  const customLabelRaw = asNonEmptyString(o.customLabel);
+  let customLabel = customLabelRaw;
   if (
     customLabel &&
     BREAK_TEXT_RE.test(customLabel) &&
@@ -619,10 +745,29 @@ function normalizeSchoolProfileLesson(
       customLabel,
     )
   ) {
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLesson_exit",
+      location: "analyze-image.ts:normalizeSchoolProfileLesson",
+      data: {
+        ok: false,
+        reason: "break_in_custom_label",
+        fromKey,
+        fromSubj,
+        initialSlug,
+        customLabel,
+      },
+    });
     return { ok: false, reason: "break_in_custom_label" };
   }
 
   const changes: string[] = [];
+  const beforeSnap = {
+    fromKey,
+    fromSubj,
+    customLabel: customLabelRaw,
+    initialSlug,
+  };
 
   // Kanonisk fag-mapping: prøv i rekkefølge subjectKey → subject → customLabel.
   // Hvis customLabel avslører et annet kanonisk fag enn det subject/subjectKey peker på,
@@ -652,6 +797,19 @@ function normalizeSchoolProfileLesson(
     // Konservativ fallback: behold rå tekst i stedet for å gjette feil fag.
     const rawText = pickRawSubjectText(fromKey, fromSubj, customLabel);
     if (!rawText) {
+      pushSubjectLessonDiag({
+        hypothesisId: "H2",
+        phase: "normalizeSchoolProfileLesson_exit",
+        location: "analyze-image.ts:normalizeSchoolProfileLesson",
+        data: {
+          ok: false,
+          reason: "missing_subject_text_for_fallback",
+          before: beforeSnap,
+          canonicalFromKeyOrSubject:
+            canonicalFromKeyOrSubject?.subjectKey ?? null,
+          canonicalFromLabel: canonicalFromLabel?.subjectKey ?? null,
+        },
+      });
       return { ok: false, reason: "missing_subject_text_for_fallback" };
     }
     key = buildCustomSubjectKey(rawText);
@@ -662,6 +820,20 @@ function normalizeSchoolProfileLesson(
     changes.push(`subject_fallback_to_custom_label:${rawText}`);
   }
   if (BREAK_SUBJECT_KEYS.has(key)) {
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLesson_exit",
+      location: "analyze-image.ts:normalizeSchoolProfileLesson",
+      data: {
+        ok: false,
+        reason: `break_subject_key_after_canonical:${key}`,
+        before: beforeSnap,
+        provisionalKey: key,
+        canonicalFromKeyOrSubject:
+          canonicalFromKeyOrSubject?.subjectKey ?? null,
+        canonicalFromLabel: canonicalFromLabel?.subjectKey ?? null,
+      },
+    });
     return { ok: false, reason: `break_subject_key_after_canonical:${key}` };
   }
   const rawStart = asNonEmptyString(o.start);
@@ -704,11 +876,39 @@ function normalizeSchoolProfileLesson(
   }
 
   if (!start || !end) {
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLesson_exit",
+      location: "analyze-image.ts:normalizeSchoolProfileLesson",
+      data: {
+        ok: false,
+        reason: "missing_start_or_end",
+        before: beforeSnap,
+        finalSubjectKey: key,
+        finalCustomLabel: customLabel,
+        rawStart,
+        rawEnd,
+      },
+    });
     return { ok: false, reason: "missing_start_or_end" };
   }
   const startMin = hhmmToMinutes(start);
   const endMin = hhmmToMinutes(end);
   if (startMin === null || endMin === null || endMin <= startMin) {
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLesson_exit",
+      location: "analyze-image.ts:normalizeSchoolProfileLesson",
+      data: {
+        ok: false,
+        reason: `non_positive_duration:${start}-${end}`,
+        before: beforeSnap,
+        finalSubjectKey: key,
+        finalCustomLabel: customLabel,
+        start,
+        end,
+      },
+    });
     return { ok: false, reason: `non_positive_duration:${start}-${end}` };
   }
 
@@ -750,6 +950,25 @@ function normalizeSchoolProfileLesson(
     lesson.subjectCandidates = candidates;
     changes.push(`subjectCandidates:${candidates.length}`);
   }
+  pushSubjectLessonDiag({
+    hypothesisId: "H2",
+    phase: "after_normalizeSchoolProfileLesson",
+    location: "analyze-image.ts:normalizeSchoolProfileLesson",
+    data: {
+      ok: true,
+      before: beforeSnap,
+      canonicalFromKeyOrSubject:
+        canonicalFromKeyOrSubject?.subjectKey ?? null,
+      canonicalFromLabel: canonicalFromLabel?.subjectKey ?? null,
+      resolvedCanonicalKey: canonical?.subjectKey ?? null,
+      finalSubjectKey: lesson.subjectKey,
+      finalCustomLabel: lesson.customLabel,
+      changes,
+      start: lesson.start,
+      end: lesson.end,
+      subjectCandidates: candidates.length,
+    },
+  });
   return { ok: true, lesson, changes };
 }
 
@@ -952,14 +1171,21 @@ function normalizeSchoolWeeklyProfileRaw(
     description?: string | null;
   },
 ): { profile: SchoolWeeklyProfile | null; debug: SchoolWeeklyProfileDebug } {
+  clearSubjectLessonDiagBuffer();
   const debug: SchoolWeeklyProfileDebug = {
     rawGradeBand: null,
     resolvedGradeBand: null,
     days: [],
     rawRoot: raw,
   };
-  if (raw === null || raw === undefined) return { profile: null, debug };
-  if (typeof raw !== "object") return { profile: null, debug };
+  if (raw === null || raw === undefined) {
+    flushSubjectLessonDiagBuffer("raw_null");
+    return { profile: null, debug };
+  }
+  if (typeof raw !== "object") {
+    flushSubjectLessonDiagBuffer("raw_not_object");
+    return { profile: null, debug };
+  }
   const o = raw as Record<string, unknown>;
   const rawGrade =
     o.gradeBand === null || o.gradeBand === undefined
@@ -1042,8 +1268,10 @@ function normalizeSchoolWeeklyProfileRaw(
   }
 
   if (Object.keys(weekdays).length === 0) {
+    flushSubjectLessonDiagBuffer("weekdays_empty");
     return { profile: null, debug };
   }
+  flushSubjectLessonDiagBuffer("profile_ok");
   return { profile: { gradeBand, weekdays }, debug };
 }
 
@@ -1384,6 +1612,19 @@ function normalizeAIAnalysisResult(
   const schoolWeeklyProfile = schoolWeeklyProfileResult.profile;
   const schoolWeeklyProfileDebug = schoolWeeklyProfileResult.debug;
 
+  if (schoolWeeklyProfile) {
+    diagSubjectPipeline({
+      hypothesisId: "H2b",
+      phase: "after_normalize_full_schoolWeeklyProfile",
+      location: "analyze-image.ts:normalizeAIAnalysisResult",
+      data: {
+        note: "Sammenlign med H1: samme slot skal ha samme subjectKey med mindre normalisering endret den.",
+        normalizedSchoolWeeklyProfileSummary:
+          summarizeNormalizedSchoolProfileForDiag(schoolWeeklyProfile),
+      },
+    });
+  }
+
   if (schoolWeeklyProfileDebug.rawRoot !== undefined && schoolWeeklyProfileDebug.rawRoot !== null) {
     const summary = {
       rawGradeBand: schoolWeeklyProfileDebug.rawGradeBand,
@@ -1575,6 +1816,19 @@ function parseAIResponse(content: string | null | undefined): AIAnalysisResult {
   } catch {
     throw new Error("Kunne ikke tolke JSON fra modellen");
   }
+  if (parsed && typeof parsed === "object") {
+    const swp = (parsed as Record<string, unknown>).schoolWeeklyProfile;
+    if (swp !== null && swp !== undefined) {
+      diagSubjectPipeline({
+        hypothesisId: "H1",
+        phase: "after_openai_before_normalize",
+        location: "analyze-image.ts:parseAIResponse",
+        data: {
+          rawSchoolWeeklyProfileSummary: summarizeRawSchoolProfileForDiag(swp),
+        },
+      });
+    }
+  }
   return normalizeAIAnalysisResult(parsed);
 }
 
@@ -1590,6 +1844,19 @@ function parseAIResponseWithSource(
     parsed = JSON.parse(content) as unknown;
   } catch {
     throw new Error("Kunne ikke tolke JSON fra modellen");
+  }
+  if (parsed && typeof parsed === "object") {
+    const swp = (parsed as Record<string, unknown>).schoolWeeklyProfile;
+    if (swp !== null && swp !== undefined) {
+      diagSubjectPipeline({
+        hypothesisId: "H1",
+        phase: "after_openai_before_normalize",
+        location: "analyze-image.ts:parseAIResponseWithSource",
+        data: {
+          rawSchoolWeeklyProfileSummary: summarizeRawSchoolProfileForDiag(swp),
+        },
+      });
+    }
   }
   return normalizeAIAnalysisResult(parsed, sourceText);
 }
