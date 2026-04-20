@@ -410,6 +410,19 @@ function cellTextAllowsNorskSubjectEvidence(text: string | null | undefined): bo
   return false;
 }
 
+/**
+ * Tydelig celle-bevis for Kunst og håndverk. Brukes for å overstyre feil
+ * `naturfag` når modellen har valgt naturfag før celle-tekst vurderes.
+ */
+function cellTextIndicatesKunstOgHandverk(text: string | null | undefined): boolean {
+  if (!text || !text.trim()) return false;
+  if (/\bkunst\s+og\s+h[åa]ndverk\b/i.test(text)) return true;
+  if (/\bK\s*&\s*H\b/i.test(text)) return true;
+  if (/\bK\s*\/\s*H\b/i.test(text)) return true;
+  if (/\bK\s+og\s+H\b/i.test(text)) return true;
+  return false;
+}
+
 function hhmmToMinutes(t: string): number | null {
   const m = /^(\d{2}):(\d{2})$/.exec(t);
   if (!m) return null;
@@ -484,14 +497,28 @@ function normalizeSchoolProfileLessonCandidate(
     );
     subjectKey = newKey;
   }
+  if (subjectKey === "naturfag" && cellTextIndicatesKunstOgHandverk(subject)) {
+    subjectKey = "kunst-og-handverk";
+    console.log(
+      "[SUBJECT-KH-VS-NATURFAG]",
+      JSON.stringify({
+        change: "subject_corrected_from_label:naturfag→kunst-og-handverk",
+        phase: "normalizeSchoolProfileLessonCandidate",
+        subject,
+        rawKey,
+      }),
+    );
+  }
   if (BREAK_SUBJECT_KEYS.has(subjectKey)) return null;
   const rawWeight = typeof o.weight === "number" ? o.weight : Number(o.weight);
   const weight =
     Number.isFinite(rawWeight) && rawWeight > 0 ? Math.min(2, rawWeight) : 1;
+  const displayName =
+    CANONICAL_SUBJECTS.find((s) => s.subjectKey === subjectKey)?.displayName ??
+    canonical?.displayName ??
+    subject;
   return {
-    subject: subjectKey.startsWith("custom:")
-      ? subject
-      : canonical?.displayName ?? subject,
+    subject: subjectKey.startsWith("custom:") ? subject : displayName,
     subjectKey,
     weight,
   };
@@ -870,6 +897,17 @@ function normalizeSchoolProfileLesson(
           `subject_norsk_rejected_without_cell_evidence→${key}`,
         );
       }
+    }
+  }
+
+  if (key === "naturfag") {
+    const evidenceKh =
+      (customLabel?.trim() ? customLabel.trim() : "") ||
+      fromSubj ||
+      fromKey;
+    if (cellTextIndicatesKunstOgHandverk(evidenceKh)) {
+      key = "kunst-og-handverk";
+      changes.push("subject_corrected_from_label:naturfag→kunst-og-handverk");
     }
   }
 
