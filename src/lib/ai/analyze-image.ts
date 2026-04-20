@@ -411,6 +411,20 @@ function cellTextAllowsNorskSubjectEvidence(text: string | null | undefined): bo
 }
 
 /**
+ * Streng celle-bevis for faget «matematikk». Holdes konservativ for å unngå
+ * falske matte-treff når modellen gjetter subjectKey=matematikk.
+ */
+function cellTextAllowsMatematikkSubjectEvidence(
+  text: string | null | undefined,
+): boolean {
+  if (!text || !text.trim()) return false;
+  if (/\bmatematikk\s*d[12]\b/i.test(text)) return true;
+  if (/\bmatematikk\b/i.test(text)) return true;
+  if (/\bmatte\b/i.test(text)) return true;
+  return false;
+}
+
+/**
  * Tydelig celle-bevis for Kunst og håndverk. Brukes for å overstyre feil
  * `naturfag` når modellen har valgt naturfag før celle-tekst vurderes.
  */
@@ -490,6 +504,22 @@ function normalizeSchoolProfileLessonCandidate(
       "[SUBJECT-ANTI-NORSK]",
       JSON.stringify({
         change: `subject_norsk_rejected_without_cell_evidence→${newKey}`,
+        phase: "normalizeSchoolProfileLessonCandidate",
+        subject,
+        rawKey,
+      }),
+    );
+    subjectKey = newKey;
+  }
+  if (
+    subjectKey === "matematikk" &&
+    !cellTextAllowsMatematikkSubjectEvidence(subject)
+  ) {
+    const newKey = buildCustomSubjectKey(rawKey || subject);
+    console.log(
+      "[SUBJECT-ANTI-MATEMATIKK]",
+      JSON.stringify({
+        change: `subject_matematikk_rejected_without_cell_evidence→${newKey}`,
         phase: "normalizeSchoolProfileLessonCandidate",
         subject,
         rawKey,
@@ -905,6 +935,27 @@ function normalizeSchoolProfileLesson(
         if (!customLabel?.trim()) customLabel = normalizeSpace(rawForCustom);
         changes.push(
           `subject_norsk_rejected_without_cell_evidence→${key}`,
+        );
+      }
+    }
+  }
+
+  if (key === "matematikk") {
+    const hasLabel = Boolean(customLabel?.trim());
+    const evidenceSource = hasLabel
+      ? customLabel!
+      : `${fromKey} ${fromSubj}`.trim();
+    if (!cellTextAllowsMatematikkSubjectEvidence(evidenceSource)) {
+      const rawForCustom =
+        (customLabel?.trim() ? customLabel.trim() : "") ||
+        pickRawSubjectText(fromKey, fromSubj, null) ||
+        fromSubj ||
+        fromKey;
+      if (rawForCustom.trim()) {
+        key = buildCustomSubjectKey(rawForCustom);
+        if (!customLabel?.trim()) customLabel = normalizeSpace(rawForCustom);
+        changes.push(
+          `subject_matematikk_rejected_without_cell_evidence→${key}`,
         );
       }
     }
