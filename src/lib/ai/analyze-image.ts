@@ -827,18 +827,28 @@ function normalizeSchoolProfileLesson(
     initialSlug,
   };
 
-  // Kanonisk fag-mapping: prøv i rekkefølge subjectKey → subject → customLabel.
-  // Hvis customLabel avslører et annet kanonisk fag enn det subject/subjectKey peker på,
-  // er det som regel modellen som har lagt feil slug – label er mer direkte fra boksen.
+  // Kanonisk fag-mapping: prøv i rekkefølge subjectKey → subject.
+  // Egen konfliktregel under kan overstyre når celle-tekst peker tydelig på annet fag.
   const canonicalFromKeyOrSubject = canonicalizeSubjectFromStrings([fromKey, fromSubj]);
+  const canonicalFromKey = canonicalizeSubjectFromText(fromKey);
   const canonicalFromLabel = canonicalizeSubjectFromText(customLabel);
+  const canonicalFromCellText = canonicalizeSubjectFromStrings([customLabel, fromSubj]);
   let canonical: CanonicalSubject | null = canonicalFromKeyOrSubject;
   if (
+    canonicalFromKey &&
+    canonicalFromCellText &&
+    canonicalFromCellText.subjectKey !== canonicalFromKey.subjectKey
+  ) {
+    // Tydelig konflikt: modellens subjectKey vs celle-tekst. Stol på celle-tekst.
+    canonical = canonicalFromCellText;
+    changes.push(
+      `subject_corrected_from_label:${canonicalFromKey.subjectKey}→${canonicalFromCellText.subjectKey}`,
+    );
+  } else if (
     canonicalFromLabel &&
     canonicalFromKeyOrSubject &&
     canonicalFromLabel.subjectKey !== canonicalFromKeyOrSubject.subjectKey
   ) {
-    // Stol på customLabel (boksens originaltekst) over modellens egen slug.
     canonical = canonicalFromLabel;
     changes.push(
       `subject_corrected_from_label:${canonicalFromKeyOrSubject.subjectKey}→${canonicalFromLabel.subjectKey}`,
@@ -1038,6 +1048,31 @@ function normalizeSchoolProfileLesson(
     start,
     end,
   };
+  if (
+    canonicalFromKey &&
+    canonicalFromCellText &&
+    canonicalFromKey.subjectKey !== canonicalFromCellText.subjectKey
+  ) {
+    const conflictSnapshot = {
+      rawSubjectKey: fromKey || null,
+      rawSubject: fromSubj || null,
+      rawCustomLabel: customLabelRaw,
+      finalSubjectKey: lesson.subjectKey,
+      finalCustomLabel: lesson.customLabel,
+      keyCanonical: canonicalFromKey.subjectKey,
+      cellCanonical: canonicalFromCellText.subjectKey,
+    };
+    console.log(
+      "[SUBJECT-CONFLICT-KEY-VS-LABEL]",
+      JSON.stringify(conflictSnapshot),
+    );
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "subject_conflict_key_vs_label_resolved",
+      location: "analyze-image.ts:normalizeSchoolProfileLesson",
+      data: conflictSnapshot,
+    });
+  }
   if (candidates.length >= 2) {
     lesson.subjectCandidates = candidates;
     changes.push(`subjectCandidates:${candidates.length}`);
