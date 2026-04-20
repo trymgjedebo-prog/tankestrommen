@@ -145,6 +145,7 @@ async function analyzeFromExtractedText(
     result,
     portalMode,
     sourceHint.type,
+    documentKind,
     {
       sourceHint,
       extractedText: {
@@ -1402,6 +1403,84 @@ function isUsableSchoolWeeklyProfile(
   return keys.length > 0;
 }
 
+function schoolWeekdayIndexFromLabel(raw: string | null): "0" | "1" | "2" | "3" | "4" | null {
+  if (!raw) return null;
+  const n = normalizeNorwegianLetters(raw);
+  if (/\b(man(day)?|mandag)\b/i.test(raw) || /\bmandag\b/.test(n)) return "0";
+  if (/\b(tue(s(day)?)?|tirsdag)\b/i.test(raw) || /\btirsdag\b/.test(n)) return "1";
+  if (/\b(wed(nesday)?|onsdag)\b/i.test(raw) || /\bonsdag\b/.test(n)) return "2";
+  if (/\b(thu(rs(day)?)?|torsdag)\b/i.test(raw) || /\btorsdag\b/.test(n)) return "3";
+  if (/\b(fri(day)?|fredag)\b/i.test(raw) || /\bfredag\b/.test(n)) return "4";
+  return null;
+}
+
+function looksLikeRecurringTimetable(result: AIAnalysisResult): {
+  yes: boolean;
+  reasons: string[];
+} {
+  const reasons: string[] = [];
+  const title = normalizeNorwegianLetters(result.title || "");
+  if (/\b(timeplan|ukeskjema|skoletimeplan|timetable)\b/.test(title)) {
+    reasons.push("title_timetable_keyword");
+  }
+  if (result.scheduleByDay.length >= 3) {
+    reasons.push("scheduleByDay_count>=3");
+  }
+  const weekdayRows = result.scheduleByDay.filter((d) =>
+    Boolean(schoolWeekdayIndexFromLabel(d.dayLabel)),
+  ).length;
+  if (weekdayRows >= 2) {
+    reasons.push("scheduleByDay_weekday_rows>=2");
+  }
+  const scheduleWeekdayRows = result.schedule.filter((s) =>
+    Boolean(schoolWeekdayIndexFromLabel(s.label)),
+  ).length;
+  if (scheduleWeekdayRows >= 2) {
+    reasons.push("schedule_weekday_rows>=2");
+  }
+  return { yes: reasons.length > 0, reasons };
+}
+
+function synthesizeSchoolWeeklyProfileFromTimetableSignals(
+  result: AIAnalysisResult,
+): SchoolWeeklyProfile | null {
+  const byDay = new Map<"0" | "1" | "2" | "3" | "4", Array<{ start: string; end: string }>>();
+  const put = (idx: "0" | "1" | "2" | "3" | "4", time: string | null) => {
+    const { start, end } = extractStartEnd(time);
+    const arr = byDay.get(idx) ?? [];
+    arr.push({ start, end });
+    byDay.set(idx, arr);
+  };
+
+  for (const d of result.scheduleByDay) {
+    const idx = schoolWeekdayIndexFromLabel(d.dayLabel);
+    if (!idx) continue;
+    put(idx, d.time);
+  }
+  for (const s of result.schedule) {
+    const idx = schoolWeekdayIndexFromLabel(s.label);
+    if (!idx) continue;
+    put(idx, s.time);
+  }
+
+  const weekdays: Partial<Record<"0" | "1" | "2" | "3" | "4", { useSimpleDay: true; schoolStart: string; schoolEnd: string }>> = {};
+  for (const [idx, slots] of byDay.entries()) {
+    if (slots.length === 0) continue;
+    const starts = slots.map((x) => x.start).sort();
+    const ends = slots.map((x) => x.end).sort();
+    weekdays[idx] = {
+      useSimpleDay: true,
+      schoolStart: starts[0],
+      schoolEnd: ends[ends.length - 1],
+    };
+  }
+  if (Object.keys(weekdays).length < 2) return null;
+  return {
+    gradeBand: null,
+    weekdays,
+  };
+}
+
 /**
  * Egen import-flyt for fast timeplan → Foreldre-App `ChildSchoolProfile`.
  * Toppnivåfelt (ikke `items`) så kalender-import ikke blander inn profile-rader.
@@ -1422,18 +1501,104 @@ function buildSchoolProfileProposal(
   };
 }
 
+function buildSchoolProfileProposalFromProfile(
+  profile: SchoolWeeklyProfile,
+  sourceType: string,
+  sourceTitle: string,
+  confidence: number,
+): Record<string, unknown> {
+  return {
+    proposalId: randomUUID(),
+    kind: "school_profile",
+    schemaVersion: "1.0.0",
+    confidence,
+    profile,
+    sourceTitle,
+    originalSourceType: sourceType,
+  };
+}
+
+function decideSchoolProfileProposal(
+  result: AIAnalysisResult,
+  sourceType: string,
+  documentKind?: AnalysisDocumentKind,
+): { proposal?: Record<string, unknown>; decision: Record<string, unknown> } {
+  const existing = buildSchoolProfileProposal(result, sourceType);
+  if (existing) {
+    return {
+      proposal: existing,
+      decision: {
+        path: "school_profile",
+        reason: "usable_schoolWeeklyProfile_from_analysis",
+      },
+    };
+  }
+
+  const looks = looksLikeRecurringTimetable(result);
+  if (documentKind === "timetable" && looks.yes) {
+    const synthesized = synthesizeSchoolWeeklyProfileFromTimetableSignals(result);
+    if (synthesized) {
+      return {
+        proposal: buildSchoolProfileProposalFromProfile(
+          synthesized,
+          sourceType,
+          result.title,
+          Math.min(result.confidence, 0.55),
+        ),
+        decision: {
+          path: "school_profile",
+          reason: "timetable_documentKind_with_weekly_signals_synthesized_profile",
+          signals: looks.reasons,
+        },
+      };
+    }
+    return {
+      decision: {
+        path: "event_items_fallback",
+        reason: "timetable_documentKind_but_not_enough_weekday_signals_for_profile",
+        signals: looks.reasons,
+      },
+    };
+  }
+
+  return {
+    decision: {
+      path: "event_items_fallback",
+      reason:
+        documentKind === "timetable"
+          ? "timetable_documentKind_without_weekly_signals"
+          : "no_usable_schoolWeeklyProfile",
+      signals: looks.reasons,
+    },
+  };
+}
+
 function toPortalBundle(
   result: AIAnalysisResult,
   sourceType: string,
+  documentKind: AnalysisDocumentKind | undefined,
   includeDebug: boolean,
 ): Record<string, unknown> {
-  const schoolProfileProposal = buildSchoolProfileProposal(result, sourceType);
+  const { proposal: schoolProfileProposal, decision } = decideSchoolProfileProposal(
+    result,
+    sourceType,
+    documentKind,
+  );
   const items = schoolProfileProposal
     ? []
     : buildProposalItems(result, sourceType);
+  console.log("[api/analyze] school-profile-routing", {
+    documentKind: documentKind ?? null,
+    path: decision.path,
+    reason: decision.reason,
+    signals: decision.signals ?? [],
+    hasSchoolProfileProposal: Boolean(schoolProfileProposal),
+    itemCount: items.length,
+  });
   const debugPayload: Record<string, unknown> = {};
   if (includeDebug) {
     debugPayload.deploy = getDeployFingerprint();
+    debugPayload.schoolProfileRouting = decision;
   }
   if (includeDebug && result.schoolWeeklyProfileDebug) {
     debugPayload.schoolWeeklyProfile = result.schoolWeeklyProfileDebug;
@@ -1466,6 +1631,7 @@ function wrapResponse(
   result: AIAnalysisResult,
   portalMode: boolean,
   sourceType: string,
+  documentKind: AnalysisDocumentKind | undefined,
   extra?: Record<string, unknown>,
   includeDebug: boolean = false,
 ): NextResponse {
@@ -1473,12 +1639,15 @@ function wrapResponse(
     const bundle = toPortalBundle(
       includeDebug ? result : stripInternalAnalysisDebug(result),
       sourceType,
+      documentKind,
       includeDebug,
     );
     console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
       schemaVersion: bundle.schemaVersion,
       itemCount: (bundle.items as unknown[]).length,
       hasSchoolProfile: Boolean(bundle.schoolProfileProposal),
+      schoolProfileRouting: (bundle.debug as Record<string, unknown> | undefined)
+        ?.schoolProfileRouting ?? null,
       debug: Boolean(bundle.debug),
     });
     return NextResponse.json(bundle);
@@ -1562,7 +1731,7 @@ export async function POST(request: NextRequest) {
         ...routing.result,
         analysisModelTrace: routing.modelTrace,
       };
-      return wrapResponse(result, portalMode, "text", undefined, debug);
+      return wrapResponse(result, portalMode, "text", documentKind, undefined, debug);
     }
 
     if (pdf && typeof pdf === "string") {
@@ -1729,7 +1898,7 @@ export async function POST(request: NextRequest) {
         ...routing.result,
         analysisModelTrace: routing.modelTrace,
       };
-      return wrapResponse(result, portalMode, "image", undefined, debug);
+      return wrapResponse(result, portalMode, "image", documentKind, undefined, debug);
     }
 
     return NextResponse.json(
