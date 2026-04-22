@@ -34,6 +34,11 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://127.0.0.1:5173",
 ];
 
+function corsAllowAllForAnalyze(): boolean {
+  const v = process.env.CORS_ALLOW_ALL_ORIGINS_ANALYZE?.trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
 function allowedOrigins(): Set<string> {
   const fromEnv =
     process.env.CORS_ORIGINS?.split(",")
@@ -47,10 +52,23 @@ function allowedOrigins(): Set<string> {
   ]);
 }
 
-function applyCorsHeaders(request: NextRequest, response: NextResponse): NextResponse {
+function resolveCorsForRequest(request: NextRequest): {
+  origin: string | null;
+  allowAll: boolean;
+  allowed: boolean;
+  allowOriginValue: string | null;
+} {
   const origin = request.headers.get("origin");
-  if (origin && allowedOrigins().has(origin)) {
-    response.headers.set("Access-Control-Allow-Origin", origin);
+  const allowAll = corsAllowAllForAnalyze();
+  const allowed = origin !== null && (allowAll || allowedOrigins().has(origin));
+  const allowOriginValue = !origin ? null : allowAll ? "*" : allowed ? origin : null;
+  return { origin, allowAll, allowed, allowOriginValue };
+}
+
+function applyCorsHeaders(request: NextRequest, response: NextResponse): NextResponse {
+  const policy = resolveCorsForRequest(request);
+  if (policy.allowOriginValue) {
+    response.headers.set("Access-Control-Allow-Origin", policy.allowOriginValue);
     response.headers.append("Vary", "Origin");
   }
   response.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -1964,7 +1982,25 @@ function detectPortalMode(request: NextRequest): boolean {
 }
 
 export async function POST(request: NextRequest) {
-  const withCors = (res: NextResponse) => applyCorsHeaders(request, res);
+  const corsPolicy = resolveCorsForRequest(request);
+  console.log("[api/analyze] cors", {
+    method: request.method,
+    origin: corsPolicy.origin,
+    allowed: corsPolicy.allowed,
+    allowAll: corsPolicy.allowAll,
+    allowOriginValue: corsPolicy.allowOriginValue,
+  });
+  const withCors = (res: NextResponse, path = "unspecified") => {
+    const wrapped = applyCorsHeaders(request, res);
+    console.log("[api/analyze] response", {
+      path,
+      status: wrapped.status,
+      origin: corsPolicy.origin,
+      corsAllowed: corsPolicy.allowed,
+      allowOriginValue: corsPolicy.allowOriginValue,
+    });
+    return wrapped;
+  };
   try {
     if (!process.env.OPENAI_API_KEY?.trim()) {
       return withCors(NextResponse.json(
@@ -1973,7 +2009,7 @@ export async function POST(request: NextRequest) {
             "Analyse-tjenesten er ikke konfigurert (mangler OPENAI_API_KEY).",
         },
         { status: 503 }
-      ));
+      ), "missing_openai_api_key");
     }
 
     const multipart = isMultipart(request);
@@ -2015,6 +2051,7 @@ export async function POST(request: NextRequest) {
       };
       return withCors(
         wrapResponse(result, portalMode, "text", documentKind, undefined, debug),
+        "text_success",
       );
     }
 
@@ -2084,7 +2121,7 @@ export async function POST(request: NextRequest) {
         portalMode,
         debug,
         documentKind,
-      ));
+      ), "pdf_success");
     }
 
     if (docx && typeof docx === "string") {
@@ -2158,7 +2195,7 @@ export async function POST(request: NextRequest) {
         portalMode,
         debug,
         documentKind,
-      ));
+      ), "docx_success");
     }
 
     if (image && typeof image === "string") {
@@ -2184,22 +2221,31 @@ export async function POST(request: NextRequest) {
       };
       return withCors(
         wrapResponse(result, portalMode, "image", documentKind, undefined, debug),
+        "image_success",
       );
     }
 
     return withCors(NextResponse.json(
       { error: "Mangler bilde, PDF, Word eller tekst i request body." },
       { status: 400 }
-    ));
+    ), "missing_input");
   } catch (err) {
     console.error("[api/analyze]", err);
     return withCors(NextResponse.json(
       { error: "Noe gikk galt under analysen. Prøv igjen." },
       { status: 500 }
-    ));
+    ), "catch_500");
   }
 }
 
 export async function OPTIONS(request: NextRequest) {
+  const policy = resolveCorsForRequest(request);
+  console.log("[api/analyze] preflight", {
+    method: request.method,
+    origin: policy.origin,
+    allowed: policy.allowed,
+    allowAll: policy.allowAll,
+    allowOriginValue: policy.allowOriginValue,
+  });
   return applyCorsHeaders(request, new NextResponse(null, { status: 204 }));
 }
