@@ -15,6 +15,10 @@ import type {
   AnalysisSourceHint,
   AIAnalysisResult,
   DayScheduleEntry,
+  SchoolWeekOverlayDailyAction,
+  SchoolWeekOverlayProposal,
+  SchoolWeekOverlaySections,
+  SchoolWeekOverlaySubjectUpdate,
   SchoolWeeklyProfile,
 } from "@/lib/types";
 
@@ -1573,32 +1577,269 @@ function decideSchoolProfileProposal(
   };
 }
 
+function isLikelyActivityPlanOverlay(
+  result: AIAnalysisResult,
+  documentKind: AnalysisDocumentKind | undefined,
+): { yes: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const titleNorm = normalizeNorwegianLetters(result.title || "");
+  const hasActivityTitleHint =
+    /\b(a-plan|aplan|aktivitetsplan|arbeidsplan|ukeplan)\b/.test(titleNorm);
+  if (documentKind === "activity_plan") reasons.push("document_kind:activity_plan");
+  if (hasActivityTitleHint) reasons.push("title_activity_plan_keyword");
+
+  const weekContext = [
+    result.title,
+    result.description,
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+  ].join(" ");
+  const weekNumber = parseWeekNumber(weekContext);
+  if (weekNumber !== null) reasons.push("week_number_detected");
+
+  const weekdayRows = result.scheduleByDay.filter((d) =>
+    Boolean(schoolWeekdayIndexFromLabel(d.dayLabel)),
+  ).length;
+  if (weekdayRows >= 2) reasons.push("scheduleByDay_weekday_rows>=2");
+  if (result.scheduleByDay.length >= 3) reasons.push("scheduleByDay_count>=3");
+
+  const daySignal = weekdayRows >= 2 || result.scheduleByDay.length >= 3;
+  const activitySignal = documentKind === "activity_plan" || hasActivityTitleHint;
+  const yes = activitySignal && daySignal && weekNumber !== null;
+  return { yes, reasons };
+}
+
+function detectOverlayActionKind(day: DayScheduleEntry): SchoolWeekOverlayDailyAction["action"] {
+  const text = normalizeNorwegianLetters(
+    [day.details ?? "", ...day.highlights, ...day.notes, ...day.rememberItems, ...day.deadlines]
+      .filter(Boolean)
+      .join(" "),
+  );
+  if (/\b(fri|fridag|skolefri|planleggingsdag|elevfri)\b/.test(text)) {
+    return "remove_school_block";
+  }
+  if (
+    /\b(heldagsprøve|heldagsprove|forberedelsesdag|tentamen|turdag|aktivitetsdag)\b/.test(
+      text,
+    )
+  ) {
+    return "replace_school_block";
+  }
+  return "enrich_existing_school_block";
+}
+
+function compactLines(lines: Array<string | null | undefined>, max = 6): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of lines) {
+    const v = normalizeSpace(raw ?? "");
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function buildOverlaySections(day: DayScheduleEntry): SchoolWeekOverlaySections {
+  const noteLines = compactLines(day.notes);
+  const proveFromNotes = noteLines.filter((n) =>
+    /\b(prøve|prove|vurdering|test|tentamen)\b/i.test(n),
+  );
+  const resourceFromNotes = noteLines.filter((n) =>
+    /(https?:\/\/|www\.|campus|skolenmin|itslearning|teams)/i.test(n),
+  );
+  const lekseFromNotes = noteLines.filter(
+    (n) =>
+      /\b(lekse|oppgave|les|skriv|gj[oø]r)\b/i.test(n) &&
+      !proveFromNotes.includes(n) &&
+      !resourceFromNotes.includes(n),
+  );
+  const extraFromNotes = noteLines.filter(
+    (n) =>
+      !proveFromNotes.includes(n) &&
+      !resourceFromNotes.includes(n) &&
+      !lekseFromNotes.includes(n),
+  );
+  return {
+    ...(day.highlights.length > 0
+      ? { iTimen: compactLines(day.highlights) }
+      : {}),
+    ...(lekseFromNotes.length > 0 ? { lekse: lekseFromNotes } : {}),
+    ...(day.rememberItems.length > 0 ? { husk: compactLines(day.rememberItems) } : {}),
+    ...(day.deadlines.length > 0 || proveFromNotes.length > 0
+      ? { proveVurdering: compactLines([...day.deadlines, ...proveFromNotes]) }
+      : {}),
+    ...(resourceFromNotes.length > 0 ? { ressurser: resourceFromNotes } : {}),
+    ...(day.details || extraFromNotes.length > 0
+      ? { ekstraBeskjed: compactLines([day.details, ...extraFromNotes]) }
+      : {}),
+  };
+}
+
+function resolveLanguageTrack(result: AIAnalysisResult): SchoolWeekOverlayProposal["languageTrack"] {
+  const text = normalizeNorwegianLetters(
+    [result.title, result.description, ...result.scheduleByDay.map((d) => d.details ?? "")]
+      .filter(Boolean)
+      .join(" "),
+  );
+  const tracks = [
+    /\btysk\b/.test(text) ? "tysk" : null,
+    /\bspansk\b/.test(text) ? "spansk" : null,
+    /\bfransk\b/.test(text) ? "fransk" : null,
+  ].filter((x): x is string => Boolean(x));
+  if (tracks.length === 1) {
+    return { resolvedTrack: tracks[0], confidence: 0.8, reason: "single_track_detected" };
+  }
+  if (tracks.length > 1) {
+    return { resolvedTrack: null, confidence: 0.45, reason: "multiple_tracks_detected" };
+  }
+  return { resolvedTrack: null, confidence: 0.35, reason: "no_track_detected" };
+}
+
+function buildSchoolWeekOverlayProposal(
+  result: AIAnalysisResult,
+  sourceType: string,
+): SchoolWeekOverlayProposal | undefined {
+  const dailyActions: SchoolWeekOverlayProposal["dailyActions"] = {};
+  for (const day of result.scheduleByDay) {
+    const idx = schoolWeekdayIndexFromLabel(day.dayLabel);
+    if (!idx) continue;
+    const parsed = parseProgramSchoolFields(
+      day.details || day.highlights[0] || day.notes[0] || null,
+    );
+    const sections = buildOverlaySections(day);
+    const hasSectionContent = Object.values(sections).some((v) => Array.isArray(v) && v.length > 0);
+    const subjectUpdates: SchoolWeekOverlaySubjectUpdate[] =
+      hasSectionContent || parsed.subjectKey || parsed.customLabel
+        ? [
+            {
+              subjectKey: parsed.subjectKey,
+              customLabel: parsed.customLabel ?? null,
+              sections,
+            },
+          ]
+        : [];
+    dailyActions[idx] = {
+      action: detectOverlayActionKind(day),
+      reason: day.details ?? null,
+      summary: compactLines([day.details, ...day.highlights], 1)[0] ?? null,
+      subjectUpdates,
+    };
+  }
+  if (Object.keys(dailyActions).length < 2) return undefined;
+
+  const weekContext = [
+    result.title,
+    result.description,
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+  ].join(" ");
+  const weekNumber = parseWeekNumber(weekContext);
+  const weeklySummary = compactLines(
+    [
+      result.description,
+      ...result.scheduleByDay.flatMap((d) => [d.details, ...d.highlights, ...d.deadlines]),
+    ],
+    4,
+  );
+  return {
+    proposalId: randomUUID(),
+    kind: "school_week_overlay",
+    schemaVersion: "1.0.0",
+    confidence: Math.max(0.45, Math.min(result.confidence, 0.8)),
+    sourceTitle: result.title,
+    originalSourceType: sourceType,
+    weekNumber,
+    classLabel: result.targetGroup,
+    weeklySummary,
+    languageTrack: resolveLanguageTrack(result),
+    profileMatch: {
+      confidence: result.targetGroup ? 0.65 : 0.45,
+      reason: result.targetGroup ? "target_group_present" : "target_group_missing",
+    },
+    dailyActions,
+  };
+}
+
+function decideSchoolWeekOverlayProposal(
+  result: AIAnalysisResult,
+  sourceType: string,
+  documentKind: AnalysisDocumentKind | undefined,
+): { proposal?: SchoolWeekOverlayProposal; decision: Record<string, unknown> } {
+  const looks = isLikelyActivityPlanOverlay(result, documentKind);
+  if (!looks.yes) {
+    return {
+      decision: {
+        path: "event_items_fallback",
+        reason: "not_likely_activity_plan_overlay",
+        signals: looks.reasons,
+      },
+    };
+  }
+  const proposal = buildSchoolWeekOverlayProposal(result, sourceType);
+  if (!proposal) {
+    return {
+      decision: {
+        path: "event_items_fallback",
+        reason: "overlay_candidate_but_insufficient_daily_actions",
+        signals: looks.reasons,
+      },
+    };
+  }
+  return {
+    proposal,
+    decision: {
+      path: "school_week_overlay",
+      reason: "activity_plan_overlay_selected",
+      signals: looks.reasons,
+      dailyActions: Object.keys(proposal.dailyActions).length,
+    },
+  };
+}
+
 function toPortalBundle(
   result: AIAnalysisResult,
   sourceType: string,
   documentKind: AnalysisDocumentKind | undefined,
   includeDebug: boolean,
 ): Record<string, unknown> {
-  const { proposal: schoolProfileProposal, decision } = decideSchoolProfileProposal(
+  const { proposal: schoolProfileProposal, decision: schoolProfileDecision } = decideSchoolProfileProposal(
     result,
     sourceType,
     documentKind,
   );
-  const items = schoolProfileProposal
-    ? []
-    : buildProposalItems(result, sourceType);
-  console.log("[api/analyze] school-profile-routing", {
+  const {
+    proposal: schoolWeekOverlayProposal,
+    decision: schoolWeekOverlayDecision,
+  } = schoolProfileProposal
+    ? {
+        proposal: undefined,
+        decision: {
+          path: "overlay_skipped",
+          reason: "school_profile_already_selected",
+        },
+      }
+    : decideSchoolWeekOverlayProposal(result, sourceType, documentKind);
+  const items =
+    schoolProfileProposal || schoolWeekOverlayProposal
+      ? []
+      : buildProposalItems(result, sourceType);
+  console.log("[api/analyze] school-routing", {
     documentKind: documentKind ?? null,
-    path: decision.path,
-    reason: decision.reason,
-    signals: decision.signals ?? [],
+    schoolProfilePath: schoolProfileDecision.path,
+    schoolProfileReason: schoolProfileDecision.reason,
+    schoolProfileSignals: schoolProfileDecision.signals ?? [],
+    schoolWeekOverlayPath: schoolWeekOverlayDecision.path,
+    schoolWeekOverlayReason: schoolWeekOverlayDecision.reason,
+    schoolWeekOverlaySignals: schoolWeekOverlayDecision.signals ?? [],
     hasSchoolProfileProposal: Boolean(schoolProfileProposal),
+    hasSchoolWeekOverlayProposal: Boolean(schoolWeekOverlayProposal),
     itemCount: items.length,
   });
   const debugPayload: Record<string, unknown> = {};
   if (includeDebug) {
     debugPayload.deploy = getDeployFingerprint();
-    debugPayload.schoolProfileRouting = decision;
+    debugPayload.schoolProfileRouting = schoolProfileDecision;
+    debugPayload.schoolWeekOverlayRouting = schoolWeekOverlayDecision;
   }
   if (includeDebug && result.schoolWeeklyProfileDebug) {
     debugPayload.schoolWeeklyProfile = result.schoolWeeklyProfileDebug;
@@ -1616,6 +1857,7 @@ function toPortalBundle(
     },
     items,
     ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
+    ...(schoolWeekOverlayProposal ? { schoolWeekOverlayProposal } : {}),
     ...(Object.keys(debugPayload).length > 0 ? { debug: debugPayload } : {}),
   };
 }
@@ -1646,8 +1888,13 @@ function wrapResponse(
       schemaVersion: bundle.schemaVersion,
       itemCount: (bundle.items as unknown[]).length,
       hasSchoolProfile: Boolean(bundle.schoolProfileProposal),
+      hasSchoolWeekOverlay: Boolean(
+        (bundle as Record<string, unknown>).schoolWeekOverlayProposal,
+      ),
       schoolProfileRouting: (bundle.debug as Record<string, unknown> | undefined)
         ?.schoolProfileRouting ?? null,
+      schoolWeekOverlayRouting: (bundle.debug as Record<string, unknown> | undefined)
+        ?.schoolWeekOverlayRouting ?? null,
       debug: Boolean(bundle.debug),
     });
     return NextResponse.json(bundle);

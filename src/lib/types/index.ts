@@ -105,6 +105,55 @@ export interface SchoolWeeklyProfile {
   weekdays: Partial<Record<SchoolProfileWeekdayIndex, SchoolProfileWeekday>>;
 }
 
+export interface SchoolWeekOverlaySections {
+  iTimen?: string[];
+  lekse?: string[];
+  husk?: string[];
+  proveVurdering?: string[];
+  ressurser?: string[];
+  ekstraBeskjed?: string[];
+}
+
+export interface SchoolWeekOverlaySubjectUpdate {
+  subjectKey: string | null;
+  customLabel?: string | null;
+  sections: SchoolWeekOverlaySections;
+}
+
+export type SchoolWeekOverlayActionKind =
+  | "remove_school_block"
+  | "replace_school_block"
+  | "enrich_existing_school_block";
+
+export interface SchoolWeekOverlayDailyAction {
+  action: SchoolWeekOverlayActionKind;
+  reason?: string | null;
+  summary?: string | null;
+  subjectUpdates: SchoolWeekOverlaySubjectUpdate[];
+}
+
+export interface SchoolWeekOverlayProposal {
+  proposalId: string;
+  kind: "school_week_overlay";
+  schemaVersion: "1.0.0";
+  confidence: number;
+  sourceTitle: string;
+  originalSourceType: string;
+  weekNumber: number | null;
+  classLabel: string | null;
+  weeklySummary: string[];
+  languageTrack: {
+    resolvedTrack: string | null;
+    confidence: number;
+    reason: string;
+  };
+  profileMatch: {
+    confidence: number;
+    reason: string;
+  };
+  dailyActions: Partial<Record<SchoolProfileWeekdayIndex, SchoolWeekOverlayDailyAction>>;
+}
+
 export interface AIAnalysisResult {
   title: string;
   schedule: TimeSlot[];
