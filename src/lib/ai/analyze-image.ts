@@ -431,6 +431,7 @@ function cellTextAllowsMatematikkSubjectEvidence(
 function cellTextIndicatesKunstOgHandverk(text: string | null | undefined): boolean {
   if (!text || !text.trim()) return false;
   if (/\bkunst\s+og\s+h[åa]ndverk\b/i.test(text)) return true;
+  if (/\bkunst\s*&\s*h[åa]ndverk\b/i.test(text)) return true;
   if (/\bK\s*&\s*H\b/i.test(text)) return true;
   if (/\bK\s*\/\s*H\b/i.test(text)) return true;
   if (/\bK\s+og\s+H\b/i.test(text)) return true;
@@ -527,12 +528,16 @@ function normalizeSchoolProfileLessonCandidate(
     );
     subjectKey = newKey;
   }
-  if (subjectKey === "naturfag" && cellTextIndicatesKunstOgHandverk(subject)) {
+  if (
+    subjectKey !== "kunst-og-handverk" &&
+    cellTextIndicatesKunstOgHandverk(subject)
+  ) {
+    const prevKey = subjectKey;
     subjectKey = "kunst-og-handverk";
     console.log(
       "[SUBJECT-KH-VS-NATURFAG]",
       JSON.stringify({
-        change: "subject_corrected_from_label:naturfag→kunst-og-handverk",
+        change: `subject_corrected_from_label:${prevKey}→kunst-og-handverk`,
         phase: "normalizeSchoolProfileLessonCandidate",
         subject,
         rawKey,
@@ -961,14 +966,15 @@ function normalizeSchoolProfileLesson(
     }
   }
 
-  if (key === "naturfag") {
+  if (key !== "kunst-og-handverk") {
     const evidenceKh =
       (customLabel?.trim() ? customLabel.trim() : "") ||
       fromSubj ||
       fromKey;
     if (cellTextIndicatesKunstOgHandverk(evidenceKh)) {
+      const prevKey = key;
       key = "kunst-og-handverk";
-      changes.push("subject_corrected_from_label:naturfag→kunst-og-handverk");
+      changes.push(`subject_corrected_from_label:${prevKey}→kunst-og-handverk`);
     }
   }
 
