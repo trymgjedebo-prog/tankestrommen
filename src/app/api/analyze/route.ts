@@ -29,6 +29,38 @@ const MAX_PDF_BYTES = 12 * 1024 * 1024;
 const MAX_DOCX_BYTES = 12 * 1024 * 1024;
 const MAX_DOC_TEXT_FOR_MODEL = 45_000;
 const MAX_EXTRACTED_RAW_DISPLAY = 80_000;
+const DEFAULT_ALLOWED_ORIGINS = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+];
+
+function allowedOrigins(): Set<string> {
+  const fromEnv =
+    process.env.CORS_ORIGINS?.split(",")
+      .map((s) => s.trim())
+      .filter(Boolean) ?? [];
+  const foreldreAppOrigin = process.env.FORELDRE_APP_ORIGIN?.trim();
+  return new Set([
+    ...DEFAULT_ALLOWED_ORIGINS,
+    ...fromEnv,
+    ...(foreldreAppOrigin ? [foreldreAppOrigin] : []),
+  ]);
+}
+
+function applyCorsHeaders(request: NextRequest, response: NextResponse): NextResponse {
+  const origin = request.headers.get("origin");
+  if (origin && allowedOrigins().has(origin)) {
+    response.headers.set("Access-Control-Allow-Origin", origin);
+    response.headers.append("Vary", "Origin");
+  }
+  response.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  response.headers.set(
+    "Access-Control-Allow-Headers",
+    "Authorization, Content-Type, Accept",
+  );
+  response.headers.set("Access-Control-Max-Age", "86400");
+  return response;
+}
 
 function mapAnalyzeTextError(err: unknown): {
   status: number;
@@ -1932,15 +1964,16 @@ function detectPortalMode(request: NextRequest): boolean {
 }
 
 export async function POST(request: NextRequest) {
+  const withCors = (res: NextResponse) => applyCorsHeaders(request, res);
   try {
     if (!process.env.OPENAI_API_KEY?.trim()) {
-      return NextResponse.json(
+      return withCors(NextResponse.json(
         {
           error:
             "Analyse-tjenesten er ikke konfigurert (mangler OPENAI_API_KEY).",
         },
         { status: 503 }
-      );
+      ));
     }
 
     const multipart = isMultipart(request);
@@ -1962,13 +1995,15 @@ export async function POST(request: NextRequest) {
     if (text && typeof text === "string") {
       const trimmed = text.trim();
       if (trimmed.length === 0) {
-        return NextResponse.json({ error: "Teksten er tom." }, { status: 400 });
+        return withCors(
+          NextResponse.json({ error: "Teksten er tom." }, { status: 400 }),
+        );
       }
       if (trimmed.length > 15_000) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "Teksten er for lang. Maks 15 000 tegn." },
           { status: 413 }
-        );
+        ));
       }
       const routing = await analyzeTextWithRouting(trimmed, {
         documentKind: documentKind ?? undefined,
@@ -1978,30 +2013,32 @@ export async function POST(request: NextRequest) {
         ...routing.result,
         analysisModelTrace: routing.modelTrace,
       };
-      return wrapResponse(result, portalMode, "text", documentKind, undefined, debug);
+      return withCors(
+        wrapResponse(result, portalMode, "text", documentKind, undefined, debug),
+      );
     }
 
     if (pdf && typeof pdf === "string") {
       if (pdf.length > 18_000_000) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "PDF-filen er for stor. Maks ca. 12 MB." },
           { status: 413 }
-        );
+        ));
       }
       let buffer: Buffer;
       try {
         buffer = pdfDataUrlToBuffer(pdf);
       } catch {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "Ugyldig PDF-data. Last opp filen på nytt." },
           { status: 400 }
-        );
+        ));
       }
       if (buffer.length > MAX_PDF_BYTES) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "PDF-filen er for stor. Maks 12 MB." },
           { status: 413 }
-        );
+        ));
       }
 
       let extracted: { text: string; numpages: number };
@@ -2009,24 +2046,24 @@ export async function POST(request: NextRequest) {
         extracted = await extractTextFromPdfBuffer(buffer);
       } catch (e) {
         console.error("[api/analyze pdf-parse]", e);
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           {
             error:
               "Kunne ikke lese PDF-filen. Filen kan være skadet, passordbeskyttet eller bare bilder uten tekstlag.",
           },
           { status: 422 }
-        );
+        ));
       }
 
       const rawText = extracted.text;
       if (!rawText || rawText.length < 3) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           {
             error:
               "Fant ingen lesbar tekst i PDF-en. Prøv «Tekst»-fanen, eller et dokument med tekst (ikke skannet bilde uten OCR).",
           },
           { status: 422 }
-        );
+        ));
       }
 
       const safeName = sanitizeFileName(
@@ -2036,7 +2073,7 @@ export async function POST(request: NextRequest) {
 
       const preamble = `Dette er tekst uttrekk fra PDF-filen «${safeName}» (${extracted.numpages || "?"} sider). Tolke og strukturer innholdet som beskrevet.\n\n`;
 
-      return analyzeFromExtractedText(
+      return withCors(await analyzeFromExtractedText(
         rawText,
         preamble,
         {
@@ -2047,15 +2084,15 @@ export async function POST(request: NextRequest) {
         portalMode,
         debug,
         documentKind,
-      );
+      ));
     }
 
     if (docx && typeof docx === "string") {
       if (docx.length > 18_000_000) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "Word-filen er for stor. Maks ca. 12 MB." },
           { status: 413 }
-        );
+        ));
       }
       let buffer: Buffer;
       try {
@@ -2063,21 +2100,21 @@ export async function POST(request: NextRequest) {
       } catch (e) {
         const msg = e instanceof Error ? e.message : "";
         if (msg.startsWith("DOC_LEGACY:")) {
-          return NextResponse.json(
+          return withCors(NextResponse.json(
             { error: msg.replace("DOC_LEGACY: ", "") },
             { status: 400 }
-          );
+          ));
         }
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "Ugyldig Word-data. Last opp en .docx-fil." },
           { status: 400 }
-        );
+        ));
       }
       if (buffer.length > MAX_DOCX_BYTES) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "Word-filen er for stor. Maks 12 MB." },
           { status: 413 }
-        );
+        ));
       }
 
       let rawText: string;
@@ -2085,23 +2122,23 @@ export async function POST(request: NextRequest) {
         rawText = await extractTextFromDocxBuffer(buffer);
       } catch (e) {
         console.error("[api/analyze mammoth]", e);
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           {
             error:
               "Kunne ikke lese Word-filen. Filen kan være skadet eller ikke være i .docx-format.",
           },
           { status: 422 }
-        );
+        ));
       }
 
       if (!rawText || rawText.length < 3) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           {
             error:
               "Fant ingen lesbar tekst i dokumentet. Sjekk at filen er .docx med faktisk innhold.",
           },
           { status: 422 }
-        );
+        ));
       }
 
       const safeName = sanitizeFileName(
@@ -2111,7 +2148,7 @@ export async function POST(request: NextRequest) {
 
       const preamble = `Dette er tekst uttrekk fra Word-filen «${safeName}» (.docx). Tolke og strukturer innholdet som beskrevet (ukeplan, datoer, kontakt osv. når det finnes).\n\n`;
 
-      return analyzeFromExtractedText(
+      return withCors(await analyzeFromExtractedText(
         rawText,
         preamble,
         {
@@ -2121,21 +2158,21 @@ export async function POST(request: NextRequest) {
         portalMode,
         debug,
         documentKind,
-      );
+      ));
     }
 
     if (image && typeof image === "string") {
       if (!image.startsWith("data:image/")) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "Ugyldig bildeformat. Last opp en gyldig bildefil." },
           { status: 400 }
-        );
+        ));
       }
       if (image.length > 11_000_000) {
-        return NextResponse.json(
+        return withCors(NextResponse.json(
           { error: "Bildet er for stort. Maks filstørrelse er 8 MB." },
           { status: 413 }
-        );
+        ));
       }
       const routing = await analyzeImageWithRouting(image, {
         documentKind: documentKind ?? undefined,
@@ -2145,18 +2182,24 @@ export async function POST(request: NextRequest) {
         ...routing.result,
         analysisModelTrace: routing.modelTrace,
       };
-      return wrapResponse(result, portalMode, "image", documentKind, undefined, debug);
+      return withCors(
+        wrapResponse(result, portalMode, "image", documentKind, undefined, debug),
+      );
     }
 
-    return NextResponse.json(
+    return withCors(NextResponse.json(
       { error: "Mangler bilde, PDF, Word eller tekst i request body." },
       { status: 400 }
-    );
+    ));
   } catch (err) {
     console.error("[api/analyze]", err);
-    return NextResponse.json(
+    return withCors(NextResponse.json(
       { error: "Noe gikk galt under analysen. Prøv igjen." },
       { status: 500 }
-    );
+    ));
   }
+}
+
+export async function OPTIONS(request: NextRequest) {
+  return applyCorsHeaders(request, new NextResponse(null, { status: 204 }));
 }
