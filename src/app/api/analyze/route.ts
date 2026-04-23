@@ -1702,6 +1702,32 @@ function inferDailyActionsFromRawText(
   return out;
 }
 
+function segmentRawTextByWeekday(
+  rawText: string,
+): Partial<Record<"0" | "1" | "2" | "3" | "4", string[]>> {
+  const out: Partial<Record<"0" | "1" | "2" | "3" | "4", string[]>> = {};
+  const lines = rawText
+    .split(/\n+/)
+    .map((l) => normalizeSpace(l))
+    .filter(Boolean)
+    .slice(0, 700);
+  let currentIdx: "0" | "1" | "2" | "3" | "4" | null = null;
+  for (const line of lines) {
+    const idx = schoolWeekdayIndexFromLabel(line);
+    if (idx) {
+      currentIdx = idx;
+      if (!out[idx]) out[idx] = [];
+      continue;
+    }
+    if (!currentIdx) continue;
+    // Stopp lekkasje: ikke legg en linje som tydelig peker til en annen ukedag i aktiv dag.
+    const maybeOther = schoolWeekdayIndexFromLabel(line);
+    if (maybeOther && maybeOther !== currentIdx) continue;
+    out[currentIdx]!.push(line);
+  }
+  return out;
+}
+
 function detectOverlayActionKind(day: DayScheduleEntry): SchoolWeekOverlayDailyAction["action"] {
   const text = normalizeNorwegianLetters(
     [day.details ?? "", ...day.highlights, ...day.notes, ...day.rememberItems, ...day.deadlines]
@@ -1745,6 +1771,56 @@ function sectionValues(sections: SchoolWeekOverlaySections): string[] {
   ];
 }
 
+function mergeSectionLists(a: string[] = [], b: string[] = []): string[] {
+  return compactLines([...a, ...b], 12);
+}
+
+function sectionsFromLabeledBlob(text: string | null | undefined): SchoolWeekOverlaySections {
+  if (!text || !text.trim()) return {};
+  const out: SchoolWeekOverlaySections = {};
+  const lines = text
+    .split(/\n+|;\s*/g)
+    .map((l) => normalizeSpace(l))
+    .filter(Boolean)
+    .slice(0, 120);
+  let current: keyof SchoolWeekOverlaySections | null = null;
+  const push = (k: keyof SchoolWeekOverlaySections, v: string) => {
+    const arr = out[k] ?? [];
+    out[k] = compactLines([...arr, v], 12);
+  };
+  for (const line of lines) {
+    const n = normalizeNorwegianLetters(line);
+    if (/^(i timen)\s*:?\s*$/i.test(n)) {
+      current = "iTimen";
+      continue;
+    }
+    if (/^(lekse|lekser)\s*:?\s*$/i.test(n)) {
+      current = "lekse";
+      continue;
+    }
+    if (/^(husk|ta med)\s*:?\s*$/i.test(n)) {
+      current = "husk";
+      continue;
+    }
+    if (/^(prove|prover|vurdering|test)\s*:?\s*$/i.test(n)) {
+      current = "proveVurdering";
+      continue;
+    }
+    if (/^(ressurser|ressurs|lenker)\s*:?\s*$/i.test(n)) {
+      current = "ressurser";
+      continue;
+    }
+    if (/^(notater|ekstra beskjed|beskjed)\s*:?\s*$/i.test(n)) {
+      current = "ekstraBeskjed";
+      continue;
+    }
+    if (current) {
+      push(current, line);
+    }
+  }
+  return out;
+}
+
 function isLikelySectionLabelLine(text: string): boolean {
   return /^(hoydepunkter|husk|notater|frister|i timen|lekse|ressurser|ekstra beskjed)\s*:?$/i.test(
     normalizeNorwegianLetters(text),
@@ -1771,7 +1847,7 @@ function buildOverlaySections(day: DayScheduleEntry): SchoolWeekOverlaySections 
       !resourceFromNotes.includes(n) &&
       !lekseFromNotes.includes(n),
   );
-  return {
+  const base: SchoolWeekOverlaySections = {
     ...(day.highlights.length > 0
       ? { iTimen: compactLines(day.highlights) }
       : {}),
@@ -1784,6 +1860,15 @@ function buildOverlaySections(day: DayScheduleEntry): SchoolWeekOverlaySections 
     ...(day.details || extraFromNotes.length > 0
       ? { ekstraBeskjed: compactLines([day.details, ...extraFromNotes]) }
       : {}),
+  };
+  const fromBlob = sectionsFromLabeledBlob(day.details);
+  return {
+    iTimen: mergeSectionLists(base.iTimen, fromBlob.iTimen),
+    lekse: mergeSectionLists(base.lekse, fromBlob.lekse),
+    husk: mergeSectionLists(base.husk, fromBlob.husk),
+    proveVurdering: mergeSectionLists(base.proveVurdering, fromBlob.proveVurdering),
+    ressurser: mergeSectionLists(base.ressurser, fromBlob.ressurser),
+    ekstraBeskjed: mergeSectionLists(base.ekstraBeskjed, fromBlob.ekstraBeskjed),
   };
 }
 
@@ -1820,6 +1905,13 @@ function buildSchoolWeekOverlayProposal(
     );
     const sections = buildOverlaySections(day);
     const sectionSet = new Set(sectionValues(sections).map((x) => normalizeSpace(x)));
+    const strongSections =
+      Number(Boolean(sections.iTimen?.length)) +
+        Number(Boolean(sections.lekse?.length)) +
+        Number(Boolean(sections.husk?.length)) +
+        Number(Boolean(sections.proveVurdering?.length)) +
+        Number(Boolean(sections.ressurser?.length)) >=
+      2;
     const hasSectionContent = Object.values(sections).some((v) => Array.isArray(v) && v.length > 0);
     const subjectUpdates: SchoolWeekOverlaySubjectUpdate[] =
       hasSectionContent || parsed.subjectKey || parsed.customLabel
@@ -1845,7 +1937,7 @@ function buildSchoolWeekOverlayProposal(
     dailyActions[idx] = {
       action,
       reason,
-      summary: summaryCandidate,
+      summary: strongSections ? null : summaryCandidate,
       subjectUpdates,
     };
   }
@@ -1867,8 +1959,8 @@ function buildSchoolWeekOverlayProposal(
   ].join(" ");
   const weekNumber = parseWeekNumber(weekContext);
   const weeklySummary = compactLines(
-    [result.description],
-    4,
+    [(result.description || "").split(/\n+/)[0]],
+    2,
   ).filter((line) => {
     const n = normalizeSpace(line);
     if (!n) return false;
@@ -1985,6 +2077,38 @@ function toPortalBundle(
     debugPayload.schoolProfileRouting = schoolProfileDecision;
     debugPayload.schoolWeekOverlayRouting = schoolWeekOverlayDecision;
     debugPayload.pipelineSnapshot = pipelineSnapshot;
+    debugPayload.overlayRawDaySegments = segmentRawTextByWeekday(
+      result.extractedText?.raw ?? "",
+    );
+    if (schoolWeekOverlayProposal) {
+      debugPayload.overlayDayDerivation = Object.entries(
+        schoolWeekOverlayProposal.dailyActions,
+      ).map(([day, action]) => ({
+        day,
+        action: action?.action ?? null,
+        summary: action?.summary ?? null,
+        reason: action?.reason ?? null,
+        summarySuppressedByStrongSections:
+          action?.summary === null &&
+          Boolean(
+            action?.subjectUpdates?.some(
+              (u) =>
+                (u.sections.iTimen?.length ?? 0) +
+                  (u.sections.lekse?.length ?? 0) +
+                  (u.sections.husk?.length ?? 0) +
+                  (u.sections.proveVurdering?.length ?? 0) +
+                  (u.sections.ressurser?.length ?? 0) >=
+                  2,
+            ),
+          ),
+        sectionKeys:
+          action?.subjectUpdates?.flatMap((u) =>
+            Object.entries(u.sections)
+              .filter(([, v]) => Array.isArray(v) && v.length > 0)
+              .map(([k]) => k),
+          ) ?? [],
+      }));
+    }
   }
   if (includeDebug && result.schoolWeeklyProfileDebug) {
     debugPayload.schoolWeeklyProfile = result.schoolWeeklyProfileDebug;
