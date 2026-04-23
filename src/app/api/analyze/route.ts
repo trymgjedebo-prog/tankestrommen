@@ -1810,6 +1810,10 @@ function sectionsFromLabeledBlob(text: string | null | undefined): SchoolWeekOve
       current = "husk";
       continue;
     }
+    if (/^(frister?)\s*:?\s*$/i.test(n)) {
+      current = "proveVurdering";
+      continue;
+    }
     if (/^(prove|prover|vurdering|test)\s*:?\s*$/i.test(n)) {
       current = "proveVurdering";
       continue;
@@ -1829,8 +1833,64 @@ function sectionsFromLabeledBlob(text: string | null | undefined): SchoolWeekOve
   return out;
 }
 
+/** Flere etiketter i én streng / inline — splitter til sections (replace-/blob-dager). */
+const INLINE_SECTION_LABEL_CAPTURE =
+  /\b(høydepunkter|hoydepunkter|husk|notater?|frister?|ta\s+med|prøve|prove|vurdering|i\s+timen|lekse\w?|ressurser|ekstra\s+beskjed)\s*:/gi;
+
+function mapCapturedLabelToSectionKey(rawLabel: string): keyof SchoolWeekOverlaySections | null {
+  const raw = rawLabel.replace(/\s+/g, " ").trim();
+  const n = normalizeNorwegianLetters(raw);
+  if (n === "hoydepunkter" || n === "i timen") return "iTimen";
+  if (n.startsWith("lekse")) return "lekse";
+  if (n === "husk" || n === "ta med") return "husk";
+  if (n === "frister" || n === "frist") return "proveVurdering";
+  if (n.startsWith("prove") || n === "vurdering") return "proveVurdering";
+  if (n.startsWith("ressurser")) return "ressurser";
+  if (n.startsWith("notater") || n.startsWith("ekstra beskjed")) return "ekstraBeskjed";
+  return null;
+}
+
+function countInlineSectionLabels(text: string | null | undefined): number {
+  if (!text) return 0;
+  return (text.match(new RegExp(INLINE_SECTION_LABEL_CAPTURE.source, "gi")) ?? []).length;
+}
+
+function sectionsFromInlineLabeledBlob(text: string | null | undefined): SchoolWeekOverlaySections {
+  if (!text || !text.trim()) return {};
+  const out: SchoolWeekOverlaySections = {};
+  const push = (k: keyof SchoolWeekOverlaySections, v: string) => {
+    const arr = out[k] ?? [];
+    out[k] = compactLines([...arr, v], 12);
+  };
+  const re = new RegExp(INLINE_SECTION_LABEL_CAPTURE.source, "gi");
+  const matches: {
+    absStart: number;
+    labelEnd: number;
+    key: keyof SchoolWeekOverlaySections;
+  }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const key = mapCapturedLabelToSectionKey(m[1]);
+    if (key) {
+      matches.push({
+        absStart: m.index,
+        labelEnd: m.index + m[0].length,
+        key,
+      });
+    }
+  }
+  if (matches.length === 0) return {};
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].labelEnd;
+    const end = i + 1 < matches.length ? matches[i + 1].absStart : text.length;
+    const content = normalizeSpace(text.slice(start, end).replace(/^[;,:.\s]+/, ""));
+    if (content) push(matches[i].key, content);
+  }
+  return out;
+}
+
 function isLikelySectionLabelLine(text: string): boolean {
-  return /^(hoydepunkter|husk|notater|frister|i timen|lekse|lekser|ressurser|ekstra beskjed)\s*:?$/i.test(
+  return /^(hoydepunkter|husk|notater|frister|ta med|i timen|lekse|lekser|ressurser|ekstra beskjed)\s*:?$/i.test(
     normalizeNorwegianLetters(text),
   );
 }
@@ -1860,7 +1920,26 @@ function isCompoundLabeledBlob(text: string): boolean {
   return /\bhoydepunkter\s*:\s*.+\bhusk\s*:/i.test(text) || /\bhusk\s*:\s*.+\bnotater\s*:/i.test(text);
 }
 
+/** Én linje som bare er fagforkortelse / fagnavn (K&H, KRLE, «Spansk») uten faglig innhold. */
+function isWeakSubjectTokenLine(text: string): boolean {
+  let t = normalizeSpace(text).replace(/^[-*•·]\s*/, "");
+  if (t.length > 64) return false;
+  const norm = normalizeNorwegianLetters(t);
+  if (/\b(lekse|pr[oø]ve|ta med|m[aå]l|kapittel|les\s|skriv|arbeider|tema)\b/.test(norm))
+    return false;
+  if (/\b(kap\.|side\s+\d|s\.\s*\d)/i.test(t)) return false;
+  if (/^(k\s*[&\/]\s*h|k\s+og\s+h\b|kunst\s+og\s+h)/i.test(t)) return true;
+  if (
+    /^(krle|rle|spansk|tysk|fransk|norsk|engelsk|matte|musikk|kunst|naturfag|samfunnsfag|historie|geografi)$/i.test(
+      norm,
+    )
+  )
+    return true;
+  return false;
+}
+
 function isWeakSubjectListLine(text: string): boolean {
+  if (isWeakSubjectTokenLine(text)) return true;
   const n = normalizeSpace(text);
   const norm = normalizeNorwegianLetters(n);
   if (norm.length > 160) return false;
@@ -1909,7 +1988,28 @@ type OverlayNoiseClass =
   | "multi_language_curriculum"
   | "section_label_only"
   | "weekday_line"
-  | "duplicate_of_section";
+  | "duplicate_of_section"
+  | "contact_or_metadata";
+
+function isLikelyContactOrMetadataLine(text: string): boolean {
+  const n = normalizeNorwegianLetters(text);
+  const raw = normalizeSpace(text);
+  if (/^(a-plan|aplan|aktivitetsplan|ukeplan|arbeidsplan)\b/i.test(n) && /\buke\s*\d{1,2}\b/i.test(n))
+    return true;
+  if (/\bkontakt\s*:/i.test(raw)) return true;
+  if (/\b(tlf\.?|telefon|e-?post|epost)\b/i.test(n)) return true;
+  if (/@\S+\.\S+/.test(raw)) return true;
+  if (/\b(laerer|lærer|kontaktl|kontaktlaer)\b/i.test(n) && /\b(kontakt|tlf|telefon)\b/i.test(n))
+    return true;
+  return false;
+}
+
+const WEEK_DEVIATION_HINT_RE =
+  /\b(fri\b|fridag|skolefri|heldagspr[oø]ve|heldags\s*prove|forberedelsesdag|tentamen|turdag|skoletur|klassetur|planleggingsdag|elevfri|skriftlig\s+eksamen|muntlig\s+eksamen|temadag|eksamensdag)\b/i;
+
+function lineHasWeekDeviationSignal(text: string): boolean {
+  return WEEK_DEVIATION_HINT_RE.test(normalizeNorwegianLetters(text));
+}
 
 function classifyOverlayLine(
   line: string,
@@ -1917,6 +2017,7 @@ function classifyOverlayLine(
 ): OverlayNoiseClass {
   const n = normalizeSpace(line);
   if (!n) return "section_label_only";
+  if (ctx.forWeekly && isLikelyContactOrMetadataLine(n)) return "contact_or_metadata";
   if (ctx.sectionSet.has(n)) return "duplicate_of_section";
   if (isLikelySectionLabelLine(n)) return "section_label_only";
   if (!ctx.forWeekly && schoolWeekdayIndexFromLabel(n)) return "weekday_line";
@@ -1940,39 +2041,63 @@ function normalizeSummaryCandidateLine(raw: string): { text: string | null; step
   return { text: n, steps };
 }
 
-function suggestTitleWeeklyLine(title: string | null | undefined): string | null {
-  if (!title) return null;
-  const t = normalizeSpace(title);
-  if (t.length > 100) return null;
-  if (!/\b(uke|week|v\.?)\s*\d{1,2}\b/i.test(normalizeNorwegianLetters(t))) return null;
-  if (isLikelyAdminOrRoutineText(t)) return null;
-  return t;
+function collectWeekDeviationCandidates(result: AIAnalysisResult): string[] {
+  const out: string[] = [];
+  for (const line of (result.description || "")
+    .split(/\n+/)
+    .map((l) => normalizeSpace(l))
+    .filter(Boolean)) {
+    if (!lineHasWeekDeviationSignal(line)) continue;
+    if (isLikelyContactOrMetadataLine(line)) continue;
+    out.push(line);
+  }
+  for (const d of result.scheduleByDay) {
+    const blob = normalizeSpace(
+      [d.dayLabel, d.details, ...d.highlights].filter(Boolean).join(" "),
+    );
+    if (blob.length < 10 || !lineHasWeekDeviationSignal(blob)) continue;
+    const short = blob.length > 130 ? `${blob.slice(0, 127)}…` : blob;
+    if (isLikelyContactOrMetadataLine(short)) continue;
+    out.push(short);
+  }
+  return compactLines(out, 8);
 }
 
-function pickWeeklySummaryLines(
-  title: string | null,
-  description: string,
-): { lines: string[]; trace: Array<{ candidate: string; kept: boolean; reason: string }> } {
+function pickWeeklySummaryLines(result: AIAnalysisResult): {
+  lines: string[];
+  trace: Array<{ candidate: string; kept: boolean; reason: string }>;
+} {
   const trace: Array<{ candidate: string; kept: boolean; reason: string }> = [];
   const picked: string[] = [];
-  const titleCand = suggestTitleWeeklyLine(title);
-  if (titleCand) {
-    const { text, steps } = normalizeSummaryCandidateLine(titleCand);
-    const cls = text ? classifyOverlayLine(text, { sectionSet: new Set(), forWeekly: true }) : "section_label_only";
+
+  for (const line of collectWeekDeviationCandidates(result)) {
+    const { text, steps } = normalizeSummaryCandidateLine(line);
+    if (!text) {
+      trace.push({ candidate: line, kept: false, reason: `priority_empty:${steps.join(",")}` });
+      continue;
+    }
+    const cls = classifyOverlayLine(text, { sectionSet: new Set(), forWeekly: true });
     const ok = cls === "ok";
+    const canAdd = ok && picked.length < 2;
     trace.push({
-      candidate: titleCand,
-      kept: ok,
-      reason: ok ? `title_ok:${steps.join(",")}` : `title_rejected:${cls}`,
+      candidate: line,
+      kept: canAdd,
+      reason: ok
+        ? canAdd
+          ? `priority_week_event:${steps.join(",")}`
+          : "priority_ok_but_weekly_cap_reached"
+        : `priority_rejected:${cls}`,
     });
-    if (ok) picked.push(text!);
+    if (canAdd) picked.push(text);
   }
-  const candidates = (description || "")
+
+  const candidates = (result.description || "")
     .split(/\n+/)
     .map((l) => normalizeSpace(l))
     .filter(Boolean)
-    .slice(0, 8);
+    .slice(0, 12);
   for (const line of candidates) {
+    if (picked.length >= 2) break;
     const { text, steps } = normalizeSummaryCandidateLine(line);
     if (!text) {
       trace.push({ candidate: line, kept: false, reason: `empty:${steps.join(",")}` });
@@ -2010,12 +2135,61 @@ function shortenReplaceReason(raw: string | null | undefined): string | null {
   return t;
 }
 
+/** Kort, lesbar årsak for replace/remove uten label-blob. */
+function shortReplaceReasonFromDaySignals(day: DayScheduleEntry): string | null {
+  const text = normalizeNorwegianLetters(
+    [day.details ?? "", ...day.highlights, ...day.notes, ...day.rememberItems].filter(Boolean).join(" "),
+  );
+  if (/\b(heldagspr[oø]ve|heldags\s*prove)\b/.test(text)) return "Heldagsprøve";
+  if (/\bforberedelsesdag\b/.test(text)) return "Forberedelsesdag";
+  if (/\btentamen\b/.test(text)) return "Tentamen";
+  if (/\b(skoletur|klassetur|turdag|ekskursjon)\b/.test(text)) return "Turdag / utflukt";
+  if (/\b(idrettsdag|aktivitetsdag|temadag)\b/.test(text)) return "Aktivitetsdag";
+  if (/\b(fri|fridag|skolefri|elevfri|planleggingsdag)\b/.test(text)) return "Fridag / avvikende skoledag";
+  if (/\bsenere\s+start|sen\s+start\b/.test(text)) return "Senere oppstart";
+  if (/\btidlig\s+slutt|tidligere\s+slutt\b/.test(text)) return "Tidligere slutt";
+  return null;
+}
+
+function dayHasMultipleLanguageSubjects(day: DayScheduleEntry): boolean {
+  const blob = normalizeNorwegianLetters(
+    [day.details ?? "", ...day.highlights, ...day.notes].filter(Boolean).join(" "),
+  );
+  const langs = ["tysk", "spansk", "fransk"].filter((l) => new RegExp(`\\b${l}\\b`).test(blob));
+  return langs.length >= 2;
+}
+
+function filterWeakSubjectLinesFromSections(sections: SchoolWeekOverlaySections): {
+  sections: SchoolWeekOverlaySections;
+  stripped: number;
+} {
+  let stripped = 0;
+  const keys: (keyof SchoolWeekOverlaySections)[] = ["iTimen", "lekse", "husk"];
+  const out: SchoolWeekOverlaySections = { ...sections };
+  for (const k of keys) {
+    const arr = out[k];
+    if (!arr?.length) continue;
+    const next = arr.filter((line) => {
+      const n = normalizeSpace(line);
+      if (isWeakSubjectTokenLine(n) || isWeakSubjectListLine(n)) {
+        stripped += 1;
+        return false;
+      }
+      return true;
+    });
+    if (next.length) out[k] = compactLines(next, 12);
+    else delete out[k];
+  }
+  return { sections: out, stripped };
+}
+
 function demoteLanguageTaggedLinesInSections(
   sections: SchoolWeekOverlaySections,
-  multiTrack: boolean,
+  demote: boolean,
 ): { sections: SchoolWeekOverlaySections; demoted: number } {
-  if (!multiTrack) return { sections, demoted: 0 };
+  if (!demote) return { sections, demoted: 0 };
   const langLead = /^\s*[-*•]?\s*(tysk|spansk|fransk)\s*[:\-–]/i;
+  const langOnlyLine = /^\s*[-*•]?\s*(tysk|spansk|fransk)\s*\.?\s*$/i;
   let demoted = 0;
   const keys: (keyof SchoolWeekOverlaySections)[] = ["iTimen", "lekse", "husk"];
   const out: SchoolWeekOverlaySections = { ...sections };
@@ -2025,7 +2199,7 @@ function demoteLanguageTaggedLinesInSections(
     if (!arr?.length) continue;
     const keep: string[] = [];
     for (const line of arr) {
-      if (langLead.test(line)) {
+      if (langLead.test(line) || langOnlyLine.test(line)) {
         extraPool.push(line);
         demoted += 1;
       } else {
@@ -2061,6 +2235,23 @@ function buildOverlaySections(day: DayScheduleEntry): SchoolWeekOverlaySections 
       !resourceFromNotes.includes(n) &&
       !lekseFromNotes.includes(n),
   );
+  const fromLineBlob = sectionsFromLabeledBlob(day.details);
+  const fromInlineBlob = sectionsFromInlineLabeledBlob(day.details);
+  const fromBlob = {
+    iTimen: mergeSectionLists(fromLineBlob.iTimen, fromInlineBlob.iTimen),
+    lekse: mergeSectionLists(fromLineBlob.lekse, fromInlineBlob.lekse),
+    husk: mergeSectionLists(fromLineBlob.husk, fromInlineBlob.husk),
+    proveVurdering: mergeSectionLists(fromLineBlob.proveVurdering, fromInlineBlob.proveVurdering),
+    ressurser: mergeSectionLists(fromLineBlob.ressurser, fromInlineBlob.ressurser),
+    ekstraBeskjed: mergeSectionLists(fromLineBlob.ekstraBeskjed, fromInlineBlob.ekstraBeskjed),
+  };
+  const inlineLabels = countInlineSectionLabels(day.details);
+  const omitRawDetailsInExtra =
+    isCompoundLabeledBlob(day.details ?? "") ||
+    inlineLabels >= 2 ||
+    (inlineLabels >= 1 && normalizeSpace(day.details ?? "").length > 100);
+  const detailsForExtra = omitRawDetailsInExtra ? null : day.details;
+
   const base: SchoolWeekOverlaySections = {
     ...(day.highlights.length > 0
       ? { iTimen: compactLines(day.highlights) }
@@ -2071,11 +2262,10 @@ function buildOverlaySections(day: DayScheduleEntry): SchoolWeekOverlaySections 
       ? { proveVurdering: compactLines([...day.deadlines, ...proveFromNotes]) }
       : {}),
     ...(resourceFromNotes.length > 0 ? { ressurser: resourceFromNotes } : {}),
-    ...(day.details || extraFromNotes.length > 0
-      ? { ekstraBeskjed: compactLines([day.details, ...extraFromNotes]) }
+    ...(detailsForExtra || extraFromNotes.length > 0
+      ? { ekstraBeskjed: compactLines([detailsForExtra, ...extraFromNotes]) }
       : {}),
   };
-  const fromBlob = sectionsFromLabeledBlob(day.details);
   return {
     iTimen: mergeSectionLists(base.iTimen, fromBlob.iTimen),
     lekse: mergeSectionLists(base.lekse, fromBlob.lekse),
@@ -2114,8 +2304,12 @@ type OverlayNoiseFilterDebug = {
       {
         summaryTrace: Array<{ candidate: string; kept: boolean; reason: string }>;
         languageDemotedLines?: number;
+        languageDemoteScope?: "week_multi_track" | "day_multi_language";
         replaceReasonShortened?: boolean;
         replaceReasonDropped?: boolean;
+        weakSubjectLinesStripped?: number;
+        inlineSectionLabelsDetected?: number;
+        replacePreferredStructuredBlob?: boolean;
       }
     >
   >;
@@ -2165,8 +2359,23 @@ function buildSchoolWeekOverlayProposal(
       day.details || day.highlights[0] || day.notes[0] || null,
     );
     const sectionsRaw = buildOverlaySections(day);
-    const { sections, demoted } = demoteLanguageTaggedLinesInSections(sectionsRaw, multiTrack);
+    const inlineLabels = countInlineSectionLabels(day.details);
+    dayMeta.inlineSectionLabelsDetected = inlineLabels;
+
+    const dayMultiLang = dayHasMultipleLanguageSubjects(day);
+    const demoteLang = multiTrack || dayMultiLang;
+    if (demoteLang) {
+      dayMeta.languageDemoteScope = multiTrack ? "week_multi_track" : "day_multi_language";
+    }
+    const { sections: sDemoted, demoted } = demoteLanguageTaggedLinesInSections(
+      sectionsRaw,
+      demoteLang,
+    );
     if (demoted) dayMeta.languageDemotedLines = demoted;
+
+    const { sections: sectionsFiltered, stripped } = filterWeakSubjectLinesFromSections(sDemoted);
+    if (stripped) dayMeta.weakSubjectLinesStripped = stripped;
+    const sections = sectionsFiltered;
 
     const sectionSet = new Set(sectionValues(sections).map((x) => normalizeSpace(x)));
     const strongSections =
@@ -2188,16 +2397,27 @@ function buildSchoolWeekOverlayProposal(
           ]
         : [];
 
-    const summaryCandidate = pickDayOverlaySummary(day, sectionSet, dayMeta.summaryTrace);
     const action = detectOverlayActionKind(day);
+    const summaryCandidate = pickDayOverlaySummary(day, sectionSet, dayMeta.summaryTrace);
+    const shortSignal =
+      action === "replace_school_block" || action === "remove_school_block"
+        ? shortReplaceReasonFromDaySignals(day)
+        : null;
     const rawReason =
       action === "replace_school_block" || action === "remove_school_block"
-        ? summaryCandidate || normalizeSpace(day.details ?? "") || null
+        ? (shortSignal ?? (summaryCandidate || normalizeSpace(day.details ?? "") || null))
         : null;
     const reason = shortenReplaceReason(rawReason);
     if (action === "replace_school_block" || action === "remove_school_block") {
       if (rawReason && !reason) dayMeta.replaceReasonDropped = true;
       else if (rawReason && reason && reason !== rawReason) dayMeta.replaceReasonShortened = true;
+      if (
+        action === "replace_school_block" &&
+        strongSections &&
+        (inlineLabels >= 2 || isCompoundLabeledBlob(day.details ?? ""))
+      ) {
+        dayMeta.replacePreferredStructuredBlob = true;
+      }
     }
 
     dailyActions[idx] = {
@@ -2226,10 +2446,7 @@ function buildSchoolWeekOverlayProposal(
     ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
   ].join(" ");
   const weekNumber = parseWeekNumber(weekContext);
-  const { lines: weeklySummary, trace: weeklyTrace } = pickWeeklySummaryLines(
-    result.title,
-    result.description || "",
-  );
+  const { lines: weeklySummary, trace: weeklyTrace } = pickWeeklySummaryLines(result);
   noiseDebug.weeklySummaryTrace = weeklyTrace;
 
   return {
