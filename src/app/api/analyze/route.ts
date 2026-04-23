@@ -1192,6 +1192,47 @@ function buildEventSchoolContext(
   };
 }
 
+function createPortalWeekDateResolver(result: AIAnalysisResult): (
+  rawDate: string | null,
+  rawLabel: string | null,
+) => string | null {
+  const weekContext = [
+    result.title,
+    result.description,
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+    ...result.schedule.map((s) => `${s.label ?? ""} ${s.date ?? ""}`),
+  ].join(" ");
+  const weekNumber = parseWeekNumber(weekContext);
+  const resolvedYear = inferRealisticYear(collectYearCandidates(result), weekNumber);
+  const weekPlanLike =
+    /\b(a-plan|aplan|ukeplan|aktivitetsplan)\b/i.test(result.title) &&
+    weekNumber !== null;
+
+  return (rawDate: string | null, rawLabel: string | null): string | null => {
+    const direct = parseDateWithFallbackYear(rawDate, resolvedYear);
+    if (direct) {
+      const explicitYearMatch = rawDate ? /\b(20\d{2})\b/.exec(rawDate) : null;
+      const explicitYear = explicitYearMatch ? Number(explicitYearMatch[1]) : null;
+      const weekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
+      if (
+        weekPlanLike &&
+        weekNumber &&
+        explicitYear &&
+        Math.abs(explicitYear - resolvedYear) >= 2 &&
+        weekday
+      ) {
+        const byWeek = parseIsoWeekDate(resolvedYear, weekNumber, weekday);
+        if (byWeek) return byWeek;
+      }
+      return direct;
+    }
+    if (!weekNumber) return null;
+    const weekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
+    if (!weekday) return null;
+    return parseIsoWeekDate(resolvedYear, weekNumber, weekday);
+  };
+}
+
 function buildProposalItems(
   result: AIAnalysisResult,
   sourceType: string,
@@ -1211,32 +1252,7 @@ function buildProposalItems(
     /\b(a-plan|aplan|ukeplan|aktivitetsplan)\b/i.test(result.title) &&
     weekNumber !== null;
 
-  const resolveDate = (rawDate: string | null, rawLabel: string | null): string | null => {
-    // Preserve existing explicit date parsing first.
-    const direct = parseDateWithFallbackYear(rawDate, resolvedYear);
-    if (direct) {
-      const explicitYearMatch = rawDate ? /\b(20\d{2})\b/.exec(rawDate) : null;
-      const explicitYear = explicitYearMatch ? Number(explicitYearMatch[1]) : null;
-      const weekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
-      // Merge-safe guard: for week plans, ignore stale AI years (e.g. 2023) if
-      // we can calculate date from current week/year context and weekday.
-      if (
-        weekPlanLike &&
-        weekNumber &&
-        explicitYear &&
-        Math.abs(explicitYear - resolvedYear) >= 2 &&
-        weekday
-      ) {
-        const byWeek = parseIsoWeekDate(resolvedYear, weekNumber, weekday);
-        if (byWeek) return byWeek;
-      }
-      return direct;
-    }
-    if (!weekNumber) return null;
-    const weekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
-    if (!weekday) return null;
-    return parseIsoWeekDate(resolvedYear, weekNumber, weekday);
-  };
+  const resolveDate = createPortalWeekDateResolver(result);
 
   const asListSection = (heading: string, values: string[]): string | null => {
     const clean = values
@@ -1779,6 +1795,104 @@ function mergeSectionLists(a: string[] = [], b: string[] = []): string[] {
   return compactLines([...a, ...b], 12);
 }
 
+/** Generelle mål / kompetanse uten konkret hjemmeoppgave — ikke task. */
+function looksLikeGenericPeriodGoal(text: string): boolean {
+  const n = normalizeNorwegianLetters(text);
+  if (/\b(lekse|oppgave|frist|innlever|les\s+side|les\s+kap|skriv|gjør\s+\d|øv\s+til)\b/i.test(text))
+    return false;
+  if (/\b(kompetansemal|kompetansemål|mal\s+for\s+perioden|leringsmal|grunnleggende\s+føringer)\b/.test(n))
+    return true;
+  if (/\b(vi\s+skal\s+lære|overordnede\s+mål)\b/.test(n)) return true;
+  return false;
+}
+
+function splitSemicolonListConservative(line: string): string[] {
+  const t = normalizeSpace(line);
+  if (!t.includes(";")) return [t];
+  const chunks = t.split(/\s*;\s+/).map(normalizeSpace).filter(Boolean);
+  if (chunks.length < 2) return [t];
+  if (chunks.some((c) => /^\d{1,2}[.:]\d{2}$/.test(c))) return [t];
+  return chunks;
+}
+
+function stripInlineSectionLabelForLine(line: string): {
+  text: string;
+  hadPrefix: boolean;
+  prefix?: string;
+} {
+  const m =
+    /^(høydepunkter|hoydepunkter|husk|notater?|frister?|i\s+timen|lekse\w?|ta\s+med|prøve|prove|vurdering)\s*:\s*(.*)$/i.exec(
+      line.trim(),
+    );
+  if (!m) return { text: normalizeSpace(line), hadPrefix: false };
+  const inner = normalizeSpace(m[2]);
+  if (!inner) return { text: "", hadPrefix: true, prefix: m[1] };
+  return { text: inner, hadPrefix: true, prefix: m[1] };
+}
+
+function normalizeLineDedupeKeyForSectionLine(line: string): string {
+  const { text } = stripInlineSectionLabelForLine(line);
+  return normalizeNorwegianLetters(text).replace(/\s+/g, " ").trim();
+}
+
+function dedupeLinesByNormalizedKey(lines: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of lines) {
+    const k = normalizeLineDedupeKeyForSectionLine(line);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(normalizeSpace(line));
+  }
+  return out;
+}
+
+function finalizeOverlaySectionContent(
+  sections: SchoolWeekOverlaySections,
+  trace?: {
+    semicolonSplits?: string[];
+    prefixStrips?: Array<{ from: string; to: string }>;
+  },
+): SchoolWeekOverlaySections {
+  const processList = (arr: string[] | undefined): string[] | undefined => {
+    if (!arr?.length) return arr;
+    const expanded: string[] = [];
+    for (const line of arr) {
+      const parts = splitSemicolonListConservative(line);
+      if (parts.length > 1 && trace) {
+        trace.semicolonSplits = trace.semicolonSplits ?? [];
+        trace.semicolonSplits.push(line);
+      }
+      expanded.push(...parts);
+    }
+    const stripped: string[] = [];
+    for (const line of expanded) {
+      const st = stripInlineSectionLabelForLine(line);
+      if (st.hadPrefix && st.prefix && trace && st.text && line !== st.text) {
+        trace.prefixStrips = trace.prefixStrips ?? [];
+        trace.prefixStrips.push({ from: line, to: st.text });
+      }
+      if (st.text) stripped.push(st.text);
+    }
+    const deduped = dedupeLinesByNormalizedKey(stripped);
+    return deduped.length ? deduped : undefined;
+  };
+  const out: SchoolWeekOverlaySections = {};
+  const keys: (keyof SchoolWeekOverlaySections)[] = [
+    "iTimen",
+    "lekse",
+    "husk",
+    "proveVurdering",
+    "ressurser",
+    "ekstraBeskjed",
+  ];
+  for (const k of keys) {
+    const v = processList(sections[k]);
+    if (v?.length) out[k] = v;
+  }
+  return out;
+}
+
 function sectionsFromLabeledBlob(text: string | null | undefined): SchoolWeekOverlaySections {
   if (!text || !text.trim()) return {};
   const out: SchoolWeekOverlaySections = {};
@@ -1936,6 +2050,17 @@ function isWeakSubjectTokenLine(text: string): boolean {
   )
     return true;
   return false;
+}
+
+/** «K&H i timen», «KRLE i timen» uten faglig substans. */
+function isWeakIntimenSubjectLine(text: string): boolean {
+  const norm = normalizeNorwegianLetters(normalizeSpace(text));
+  if (!/\bi\s+timen\b/.test(norm)) return false;
+  const rest = norm.replace(/\bi\s+timen\b/g, " ").replace(/\s+/g, " ").trim();
+  if (rest.length > 28) return false;
+  if (/\b(les|skriv|oppg|kap\.?|side|m[aå]l|arbeid|gjør|gjennom|se\s+på)\b/.test(rest))
+    return false;
+  return true;
 }
 
 function isWeakSubjectListLine(text: string): boolean {
@@ -2171,7 +2296,11 @@ function filterWeakSubjectLinesFromSections(sections: SchoolWeekOverlaySections)
     if (!arr?.length) continue;
     const next = arr.filter((line) => {
       const n = normalizeSpace(line);
-      if (isWeakSubjectTokenLine(n) || isWeakSubjectListLine(n)) {
+      if (
+        isWeakSubjectTokenLine(n) ||
+        isWeakSubjectListLine(n) ||
+        isWeakIntimenSubjectLine(n)
+      ) {
         stripped += 1;
         return false;
       }
@@ -2183,13 +2312,29 @@ function filterWeakSubjectLinesFromSections(sections: SchoolWeekOverlaySections)
   return { sections: out, stripped };
 }
 
-function demoteLanguageTaggedLinesInSections(
-  sections: SchoolWeekOverlaySections,
-  demote: boolean,
-): { sections: SchoolWeekOverlaySections; demoted: number } {
-  if (!demote) return { sections, demoted: 0 };
+function linePrimaryLanguageToken(line: string): string | null {
+  const m = line.match(/\b(tysk|spansk|fransk)\b/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function shouldDemoteLanguageLine(
+  line: string,
+  opts: { active: boolean; resolvedTrack: string | null },
+): boolean {
+  if (!opts.active) return false;
   const langLead = /^\s*[-*•]?\s*(tysk|spansk|fransk)\s*[:\-–]/i;
   const langOnlyLine = /^\s*[-*•]?\s*(tysk|spansk|fransk)\s*\.?\s*$/i;
+  if (!langLead.test(line) && !langOnlyLine.test(line)) return false;
+  if (isStandaloneTaskCandidate(line)) return false;
+  const primary = linePrimaryLanguageToken(line);
+  if (opts.resolvedTrack && primary === opts.resolvedTrack) return false;
+  return true;
+}
+
+function demoteLanguageTaggedLinesInSections(
+  sections: SchoolWeekOverlaySections,
+  opts: { active: boolean; resolvedTrack: string | null },
+): { sections: SchoolWeekOverlaySections; demoted: number } {
   let demoted = 0;
   const keys: (keyof SchoolWeekOverlaySections)[] = ["iTimen", "lekse", "husk"];
   const out: SchoolWeekOverlaySections = { ...sections };
@@ -2199,7 +2344,7 @@ function demoteLanguageTaggedLinesInSections(
     if (!arr?.length) continue;
     const keep: string[] = [];
     for (const line of arr) {
-      if (langLead.test(line) || langOnlyLine.test(line)) {
+      if (shouldDemoteLanguageLine(line, opts)) {
         extraPool.push(line);
         demoted += 1;
       } else {
@@ -2310,9 +2455,16 @@ type OverlayNoiseFilterDebug = {
         weakSubjectLinesStripped?: number;
         inlineSectionLabelsDetected?: number;
         replacePreferredStructuredBlob?: boolean;
+        semicolonSplits?: string[];
+        prefixStrips?: Array<{ from: string; to: string }>;
       }
     >
   >;
+};
+
+type OverlayHomeworkTasksDebug = {
+  accepted: Array<{ dayIndex: string; title: string; reason: string }>;
+  rejected: Array<{ dayIndex: string; line: string; reason: string }>;
 };
 
 function pickDayOverlaySummary(
@@ -2358,19 +2510,25 @@ function buildSchoolWeekOverlayProposal(
     const parsed = parseProgramSchoolFields(
       day.details || day.highlights[0] || day.notes[0] || null,
     );
-    const sectionsRaw = buildOverlaySections(day);
+    let sectionsRaw = buildOverlaySections(day);
     const inlineLabels = countInlineSectionLabels(day.details);
     dayMeta.inlineSectionLabelsDetected = inlineLabels;
 
+    const finalizeTrace: { semicolonSplits?: string[]; prefixStrips?: Array<{ from: string; to: string }> } =
+      {};
+    sectionsRaw = finalizeOverlaySectionContent(sectionsRaw, finalizeTrace);
+    if (finalizeTrace.semicolonSplits?.length) dayMeta.semicolonSplits = finalizeTrace.semicolonSplits;
+    if (finalizeTrace.prefixStrips?.length) dayMeta.prefixStrips = finalizeTrace.prefixStrips;
+
     const dayMultiLang = dayHasMultipleLanguageSubjects(day);
-    const demoteLang = multiTrack || dayMultiLang;
-    if (demoteLang) {
+    const demoteLangActive = multiTrack || dayMultiLang;
+    if (demoteLangActive) {
       dayMeta.languageDemoteScope = multiTrack ? "week_multi_track" : "day_multi_language";
     }
-    const { sections: sDemoted, demoted } = demoteLanguageTaggedLinesInSections(
-      sectionsRaw,
-      demoteLang,
-    );
+    const { sections: sDemoted, demoted } = demoteLanguageTaggedLinesInSections(sectionsRaw, {
+      active: demoteLangActive,
+      resolvedTrack: languageTrack.resolvedTrack,
+    });
     if (demoted) dayMeta.languageDemotedLines = demoted;
 
     const { sections: sectionsFiltered, stripped } = filterWeakSubjectLinesFromSections(sDemoted);
@@ -2471,6 +2629,127 @@ function buildSchoolWeekOverlayProposal(
   };
 }
 
+function collectHomeworkCandidateLinesFromSections(sections: SchoolWeekOverlaySections): string[] {
+  const out: string[] = [];
+  const push = (arr: string[] | undefined) => {
+    if (!arr) return;
+    out.push(...arr);
+  };
+  push(sections.lekse);
+  push(sections.proveVurdering);
+  if (sections.husk) {
+    for (const h of sections.husk) {
+      if (!isPacklistOrRememberSuppliesOnly(h) && isStandaloneTaskCandidate(h)) out.push(h);
+    }
+  }
+  for (const x of sections.iTimen ?? []) {
+    if (isStandaloneTaskCandidate(x) && !isPacklistOrRememberSuppliesOnly(x)) out.push(x);
+  }
+  for (const x of sections.ekstraBeskjed ?? []) {
+    if (isStandaloneTaskCandidate(x) && !isPacklistOrRememberSuppliesOnly(x)) out.push(x);
+  }
+  return out;
+}
+
+/**
+ * Lekser fra overlay-sections som egne portal-task items (additive med schoolWeekOverlayProposal).
+ */
+function buildHomeworkTaskItemsFromOverlay(
+  result: AIAnalysisResult,
+  sourceType: string,
+  overlay: SchoolWeekOverlayProposal,
+  resolveDate: (rawDate: string | null, rawLabel: string | null) => string | null,
+  debug?: OverlayHomeworkTasksDebug,
+): PortalTaskItem[] {
+  const sourceId = randomUUID();
+  const items: PortalTaskItem[] = [];
+  const seenKeys = new Set<string>();
+
+  const pushTask = (isoDate: string, dayLabel: string | null, taskText: string, reason: string, dayIndex: string) => {
+    const cleanTask = normalizeTaskTitle(taskText);
+    const day = normalizeSpace(dayLabel || "");
+    const title = day ? `${day} – ${cleanTask}` : cleanTask;
+    const dedupeKey = `${isoDate}|${normalizeNorwegianLetters(cleanTask).toLowerCase()}`;
+    if (seenKeys.has(dedupeKey)) {
+      debug?.rejected.push({ dayIndex, line: taskText, reason: "duplicate_normalized_title" });
+      return;
+    }
+    seenKeys.add(dedupeKey);
+    debug?.accepted.push({ dayIndex, title: title || "Oppgave", reason });
+    items.push({
+      proposalId: randomUUID(),
+      kind: "task",
+      sourceId,
+      originalSourceType: sourceType,
+      confidence: Math.min(result.confidence, 0.85),
+      task: {
+        date: isoDate,
+        personId: "pending",
+        title: title || "Oppgave",
+        notes: result.title ? `Fra: ${result.title}` : undefined,
+      },
+    });
+  };
+
+  for (const [dayIndex, action] of Object.entries(overlay.dailyActions)) {
+    if (!action) continue;
+    const dayEntry = result.scheduleByDay.find(
+      (d) => schoolWeekdayIndexFromLabel(d.dayLabel) === dayIndex,
+    );
+    if (!dayEntry) {
+      for (const su of action.subjectUpdates) {
+        for (const line of collectHomeworkCandidateLinesFromSections(su.sections)) {
+          debug?.rejected.push({ dayIndex, line, reason: "no_schedule_day_for_index" });
+        }
+      }
+      continue;
+    }
+    const iso = resolveDate(dayEntry.date, dayEntry.dayLabel);
+    if (!iso) {
+      for (const su of action.subjectUpdates) {
+        for (const line of collectHomeworkCandidateLinesFromSections(su.sections)) {
+          debug?.rejected.push({ dayIndex, line, reason: "could_not_resolve_date" });
+        }
+      }
+      continue;
+    }
+    for (const su of action.subjectUpdates) {
+      for (const rawLine of collectHomeworkCandidateLinesFromSections(su.sections)) {
+        const line = normalizeSpace(rawLine);
+        if (!line) continue;
+        if (looksLikeGenericPeriodGoal(line)) {
+          debug?.rejected.push({ dayIndex, line, reason: "generic_period_goal" });
+          continue;
+        }
+        if (!isStandaloneTaskCandidate(line)) {
+          debug?.rejected.push({ dayIndex, line, reason: "not_actionable_homework_pattern" });
+          continue;
+        }
+        if (isPacklistOrRememberSuppliesOnly(line)) {
+          debug?.rejected.push({ dayIndex, line, reason: "packlist_or_supplies" });
+          continue;
+        }
+        const inSec = (arr: string[] | undefined) =>
+          arr?.some((x) => normalizeSpace(x) === line) ?? false;
+        const fromSection = inSec(su.sections.lekse)
+          ? "lekse"
+          : inSec(su.sections.proveVurdering)
+            ? "proveVurdering"
+            : inSec(su.sections.husk)
+              ? "husk_tasklike"
+              : inSec(su.sections.iTimen)
+                ? "iTimen_actionable"
+                : inSec(su.sections.ekstraBeskjed)
+                  ? "ekstraBeskjed_actionable"
+                  : "overlay_section";
+        pushTask(iso, dayEntry.dayLabel, line, `from_section:${fromSection}`, dayIndex);
+      }
+    }
+  }
+
+  return items;
+}
+
 function decideSchoolWeekOverlayProposal(
   result: AIAnalysisResult,
   sourceType: string,
@@ -2538,9 +2817,24 @@ function toPortalBundle(
         noiseDebug: undefined,
       }
     : decideSchoolWeekOverlayProposal(result, sourceType, documentKind);
-  const items =
-    schoolProfileProposal || schoolWeekOverlayProposal
-      ? []
+  const resolveDate = createPortalWeekDateResolver(result);
+  const overlayHomeworkDebug: OverlayHomeworkTasksDebug | undefined = includeDebug
+    ? { accepted: [], rejected: [] }
+    : undefined;
+  const overlayHomeworkItems =
+    schoolWeekOverlayProposal && !schoolProfileProposal
+      ? buildHomeworkTaskItemsFromOverlay(
+          result,
+          sourceType,
+          schoolWeekOverlayProposal,
+          resolveDate,
+          overlayHomeworkDebug,
+        )
+      : [];
+  const items = schoolProfileProposal
+    ? []
+    : schoolWeekOverlayProposal
+      ? overlayHomeworkItems
       : buildProposalItems(result, sourceType);
   const pipelineSnapshot = {
     extractedTextLength: result.extractedText?.raw?.length ?? 0,
@@ -2574,6 +2868,9 @@ function toPortalBundle(
     );
     if (schoolWeekOverlayNoiseDebug) {
       debugPayload.overlayNoiseFilter = schoolWeekOverlayNoiseDebug;
+    }
+    if (schoolWeekOverlayProposal && overlayHomeworkDebug) {
+      debugPayload.overlayHomeworkTasks = overlayHomeworkDebug;
     }
     if (schoolWeekOverlayProposal) {
       debugPayload.overlayDayDerivation = Object.entries(
