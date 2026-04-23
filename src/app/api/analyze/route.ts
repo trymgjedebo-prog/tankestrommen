@@ -1641,6 +1641,7 @@ function isLikelyActivityPlanOverlay(
   const weekContext = [
     result.title,
     result.description,
+    result.extractedText?.raw ?? "",
     ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
   ].join(" ");
   const weekNumber = parseWeekNumber(weekContext);
@@ -1651,11 +1652,43 @@ function isLikelyActivityPlanOverlay(
   ).length;
   if (weekdayRows >= 2) reasons.push("scheduleByDay_weekday_rows>=2");
   if (result.scheduleByDay.length >= 3) reasons.push("scheduleByDay_count>=3");
+  const weekdayMentionsFromRaw = Array.from(
+    new Set(
+      (result.extractedText?.raw ?? "")
+        .split(/\n+/)
+        .map((line) => schoolWeekdayIndexFromLabel(line))
+        .filter((x): x is "0" | "1" | "2" | "3" | "4" => Boolean(x)),
+    ),
+  ).length;
+  if (weekdayMentionsFromRaw >= 2) reasons.push("raw_weekday_mentions>=2");
 
-  const daySignal = weekdayRows >= 2 || result.scheduleByDay.length >= 3;
+  const daySignal =
+    weekdayRows >= 2 || result.scheduleByDay.length >= 3 || weekdayMentionsFromRaw >= 2;
   const activitySignal = documentKind === "activity_plan" || hasActivityTitleHint;
   const yes = activitySignal && daySignal && weekNumber !== null;
   return { yes, reasons };
+}
+
+function inferDailyActionsFromRawText(
+  rawText: string,
+): SchoolWeekOverlayProposal["dailyActions"] {
+  const out: SchoolWeekOverlayProposal["dailyActions"] = {};
+  const lines = rawText
+    .split(/\n+/)
+    .map((l) => normalizeSpace(l))
+    .filter(Boolean)
+    .slice(0, 500);
+  for (const line of lines) {
+    const idx = schoolWeekdayIndexFromLabel(line);
+    if (!idx || out[idx]) continue;
+    out[idx] = {
+      action: "enrich_existing_school_block",
+      reason: "inferred_from_raw_text_weekday_signal",
+      summary: line,
+      subjectUpdates: [],
+    };
+  }
+  return out;
 }
 
 function detectOverlayActionKind(day: DayScheduleEntry): SchoolWeekOverlayDailyAction["action"] {
@@ -1776,11 +1809,20 @@ function buildSchoolWeekOverlayProposal(
       subjectUpdates,
     };
   }
+  if (Object.keys(dailyActions).length < 2) {
+    const inferred = inferDailyActionsFromRawText(result.extractedText?.raw ?? "");
+    for (const [k, v] of Object.entries(inferred)) {
+      if (!dailyActions[k as keyof typeof dailyActions]) {
+        dailyActions[k as keyof typeof dailyActions] = v;
+      }
+    }
+  }
   if (Object.keys(dailyActions).length < 2) return undefined;
 
   const weekContext = [
     result.title,
     result.description,
+    result.extractedText?.raw ?? "",
     ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
   ].join(" ");
   const weekNumber = parseWeekNumber(weekContext);
@@ -1873,8 +1915,17 @@ function toPortalBundle(
     schoolProfileProposal || schoolWeekOverlayProposal
       ? []
       : buildProposalItems(result, sourceType);
-  console.log("[api/analyze] school-routing", {
+  const pipelineSnapshot = {
+    extractedTextLength: result.extractedText?.raw?.length ?? 0,
     documentKind: documentKind ?? null,
+    hasSchoolWeeklyProfile: Boolean(result.schoolWeeklyProfile),
+    schoolWeekOverlayBuilt: Boolean(schoolWeekOverlayProposal),
+    itemsLength: items.length,
+    schoolProfileDecision: schoolProfileDecision.reason,
+    schoolWeekOverlayDecision: schoolWeekOverlayDecision.reason,
+  };
+  console.log("[api/analyze] school-routing", {
+    ...pipelineSnapshot,
     schoolProfilePath: schoolProfileDecision.path,
     schoolProfileReason: schoolProfileDecision.reason,
     schoolProfileSignals: schoolProfileDecision.signals ?? [],
@@ -1890,6 +1941,7 @@ function toPortalBundle(
     debugPayload.deploy = getDeployFingerprint();
     debugPayload.schoolProfileRouting = schoolProfileDecision;
     debugPayload.schoolWeekOverlayRouting = schoolWeekOverlayDecision;
+    debugPayload.pipelineSnapshot = pipelineSnapshot;
   }
   if (includeDebug && result.schoolWeeklyProfileDebug) {
     debugPayload.schoolWeeklyProfile = result.schoolWeeklyProfileDebug;
