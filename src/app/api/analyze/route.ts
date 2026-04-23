@@ -1678,15 +1678,26 @@ function inferDailyActionsFromRawText(
     .map((l) => normalizeSpace(l))
     .filter(Boolean)
     .slice(0, 500);
+  let currentIdx: "0" | "1" | "2" | "3" | "4" | null = null;
   for (const line of lines) {
     const idx = schoolWeekdayIndexFromLabel(line);
-    if (!idx || out[idx]) continue;
-    out[idx] = {
-      action: "enrich_existing_school_block",
-      reason: "inferred_from_raw_text_weekday_signal",
-      summary: line,
-      subjectUpdates: [],
-    };
+    if (idx) {
+      currentIdx = idx;
+      if (!out[idx]) {
+        out[idx] = {
+          action: "enrich_existing_school_block",
+          reason: "inferred_from_raw_text_weekday_signal",
+          summary: null,
+          subjectUpdates: [],
+        };
+      }
+      continue;
+    }
+    if (!currentIdx) continue;
+    // Bind første meningsfulle linje til aktiv dag; unngå global lekkasje.
+    if (!out[currentIdx]!.summary && line.length >= 4 && line.length <= 140) {
+      out[currentIdx]!.summary = line;
+    }
   }
   return out;
 }
@@ -1721,6 +1732,23 @@ function compactLines(lines: Array<string | null | undefined>, max = 6): string[
     if (out.length >= max) break;
   }
   return out;
+}
+
+function sectionValues(sections: SchoolWeekOverlaySections): string[] {
+  return [
+    ...(sections.iTimen ?? []),
+    ...(sections.lekse ?? []),
+    ...(sections.husk ?? []),
+    ...(sections.proveVurdering ?? []),
+    ...(sections.ressurser ?? []),
+    ...(sections.ekstraBeskjed ?? []),
+  ];
+}
+
+function isLikelySectionLabelLine(text: string): boolean {
+  return /^(hoydepunkter|husk|notater|frister|i timen|lekse|ressurser|ekstra beskjed)\s*:?$/i.test(
+    normalizeNorwegianLetters(text),
+  );
 }
 
 function buildOverlaySections(day: DayScheduleEntry): SchoolWeekOverlaySections {
@@ -1791,6 +1819,7 @@ function buildSchoolWeekOverlayProposal(
       day.details || day.highlights[0] || day.notes[0] || null,
     );
     const sections = buildOverlaySections(day);
+    const sectionSet = new Set(sectionValues(sections).map((x) => normalizeSpace(x)));
     const hasSectionContent = Object.values(sections).some((v) => Array.isArray(v) && v.length > 0);
     const subjectUpdates: SchoolWeekOverlaySubjectUpdate[] =
       hasSectionContent || parsed.subjectKey || parsed.customLabel
@@ -1802,10 +1831,21 @@ function buildSchoolWeekOverlayProposal(
             },
           ]
         : [];
+    const summaryCandidate = compactLines([day.details, ...day.highlights], 2).find((line) => {
+      const n = normalizeSpace(line);
+      if (!n) return false;
+      if (isLikelySectionLabelLine(n)) return false;
+      return !sectionSet.has(n);
+    }) ?? null;
+    const action = detectOverlayActionKind(day);
+    const reason =
+      action === "replace_school_block" || action === "remove_school_block"
+        ? summaryCandidate ?? day.details ?? null
+        : null;
     dailyActions[idx] = {
-      action: detectOverlayActionKind(day),
-      reason: day.details ?? null,
-      summary: compactLines([day.details, ...day.highlights], 1)[0] ?? null,
+      action,
+      reason,
+      summary: summaryCandidate,
       subjectUpdates,
     };
   }
@@ -1827,12 +1867,15 @@ function buildSchoolWeekOverlayProposal(
   ].join(" ");
   const weekNumber = parseWeekNumber(weekContext);
   const weeklySummary = compactLines(
-    [
-      result.description,
-      ...result.scheduleByDay.flatMap((d) => [d.details, ...d.highlights, ...d.deadlines]),
-    ],
+    [result.description],
     4,
-  );
+  ).filter((line) => {
+    const n = normalizeSpace(line);
+    if (!n) return false;
+    if (isLikelySectionLabelLine(n)) return false;
+    // Hold weeklySummary overordnet; ikke dagspesifikke linjer.
+    return !Boolean(schoolWeekdayIndexFromLabel(n));
+  });
   return {
     proposalId: randomUUID(),
     kind: "school_week_overlay",
