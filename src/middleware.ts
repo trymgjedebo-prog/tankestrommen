@@ -30,6 +30,14 @@ function applyCors(request: NextRequest, response: NextResponse): NextResponse {
 }
 
 export function middleware(request: NextRequest) {
+  if (request.nextUrl.pathname === "/api/analyze") {
+    console.log("[middleware] /api/analyze pass-through", {
+      method: request.method,
+      origin: request.headers.get("origin"),
+    });
+    // La analyze-route håndtere CORS selv (OPTIONS + POST).
+    return NextResponse.next();
+  }
   if (request.method === "OPTIONS") {
     const res = new NextResponse(null, { status: 204 });
     return applyCors(request, res);
