@@ -2629,26 +2629,132 @@ function buildSchoolWeekOverlayProposal(
   };
 }
 
-function collectHomeworkCandidateLinesFromSections(sections: SchoolWeekOverlaySections): string[] {
-  const out: string[] = [];
-  const push = (arr: string[] | undefined) => {
-    if (!arr) return;
-    out.push(...arr);
-  };
-  push(sections.lekse);
-  push(sections.proveVurdering);
-  if (sections.husk) {
-    for (const h of sections.husk) {
-      if (!isPacklistOrRememberSuppliesOnly(h) && isStandaloneTaskCandidate(h)) out.push(h);
-    }
+type HomeworkSectionSource = "lekse" | "proveVurdering" | "husk";
+
+type HomeworkCandidate = {
+  text: string;
+  section: HomeworkSectionSource;
+};
+
+function collectHomeworkCandidateLinesFromSections(
+  sections: SchoolWeekOverlaySections,
+): HomeworkCandidate[] {
+  const out: HomeworkCandidate[] = [];
+  for (const line of sections.lekse ?? []) {
+    out.push({ text: line, section: "lekse" });
   }
-  for (const x of sections.iTimen ?? []) {
-    if (isStandaloneTaskCandidate(x) && !isPacklistOrRememberSuppliesOnly(x)) out.push(x);
+  for (const line of sections.proveVurdering ?? []) {
+    out.push({ text: line, section: "proveVurdering" });
   }
-  for (const x of sections.ekstraBeskjed ?? []) {
-    if (isStandaloneTaskCandidate(x) && !isPacklistOrRememberSuppliesOnly(x)) out.push(x);
+  for (const line of sections.husk ?? []) {
+    out.push({ text: line, section: "husk" });
   }
   return out;
+}
+
+function inferHomeworkSubjectLabel(
+  candidate: HomeworkCandidate,
+  subjectLabel: string | null | undefined,
+): string | null {
+  const base = normalizeSpace(subjectLabel ?? "");
+  if (base) return base;
+  const t = normalizeNorwegianLetters(candidate.text);
+  if (/\b(matte|matematikk)\b/.test(t)) return "Matematikk";
+  if (/\bfransk\b/.test(t)) return "Fransk";
+  if (/\bspansk\b/.test(t)) return "Spansk";
+  if (/\btysk\b/.test(t)) return "Tysk";
+  if (/\bnorsk\b/.test(t)) return "Norsk";
+  if (/\bengelsk\b/.test(t)) return "Engelsk";
+  return null;
+}
+
+type HomeworkTaskKind =
+  | "lekse"
+  | "innlevering"
+  | "heldagsprove"
+  | "prove_vurdering"
+  | "hjemmeoppgave";
+
+function inferHomeworkTaskKind(line: string, section: HomeworkSectionSource): HomeworkTaskKind {
+  const n = normalizeNorwegianLetters(line);
+  if (/\bheldagspr[oø]ve|heldagsprove\b/.test(n)) return "heldagsprove";
+  if (/\b(innlevering|innlever|lever inn)\b/.test(n)) return "innlevering";
+  if (/\b(pr[oø]ve|tentamen|vurdering|test)\b/.test(n)) return "prove_vurdering";
+  if (/\blekse\b/.test(n) || section === "lekse") return "lekse";
+  return "hjemmeoppgave";
+}
+
+function shortHomeworkTypeLabel(kind: HomeworkTaskKind): string {
+  if (kind === "lekse") return "lekse";
+  if (kind === "innlevering") return "innlevering";
+  if (kind === "heldagsprove") return "heldagsprøve";
+  if (kind === "prove_vurdering") return "prøve";
+  return "oppgave";
+}
+
+function buildHomeworkTaskTitle(
+  candidate: HomeworkCandidate,
+  subjectLabel: string | null | undefined,
+): string {
+  const subj = inferHomeworkSubjectLabel(candidate, subjectLabel);
+  const kind = inferHomeworkTaskKind(candidate.text, candidate.section);
+  if (subj && kind === "lekse" && /\b(matte|matematikk)\b/i.test(subj)) return "Mattelekse";
+  if (subj && kind === "heldagsprove" && /\b(matte|matematikk)\b/i.test(subj)) {
+    return "Heldagsprøve i matte";
+  }
+  if (subj && kind === "lekse") return `${subj} lekse`;
+  if (subj) return `${subj} ${shortHomeworkTypeLabel(kind)}`;
+  const fallback = normalizeTaskTitle(candidate.text);
+  return trimSentence(fallback, 34);
+}
+
+function buildHomeworkTaskNotes(
+  sourceTitle: string | null | undefined,
+  candidate: HomeworkCandidate,
+  subjectLabel: string | null | undefined,
+): string {
+  const lines: string[] = [];
+  if (sourceTitle) lines.push(`Fra: ${sourceTitle}`);
+  const subj = inferHomeworkSubjectLabel(candidate, subjectLabel);
+  if (subj) lines.push(`Fag: ${subj}`);
+  const raw = normalizeSpace(candidate.text);
+  const parts = raw
+    .split(/(?<=[.!?])\s+/)
+    .map((x) => normalizeSpace(x))
+    .filter(Boolean);
+  if (parts.length > 0) lines.push(`Oppgave: ${parts[0]}`);
+  if (parts.length > 1) lines.push(`Detaljer: ${parts.slice(1).join(" ")}`);
+  return lines.join("\n");
+}
+
+function isResourceOnlyLine(line: string): boolean {
+  const n = normalizeNorwegianLetters(line);
+  if (/\b(aunivers|campus|kikora|teams|itslearning|lenke|ressurs)\b/.test(n)) {
+    return !ACTIONABLE_TASK_RE.test(n);
+  }
+  return false;
+}
+
+function isValidOverlayHomeworkCandidate(candidate: HomeworkCandidate): {
+  ok: boolean;
+  reason: string;
+} {
+  const line = normalizeSpace(candidate.text);
+  if (!line) return { ok: false, reason: "empty_line" };
+  if (looksLikeGenericPeriodGoal(line)) return { ok: false, reason: "generic_period_goal" };
+  if (isPacklistOrRememberSuppliesOnly(line)) return { ok: false, reason: "packlist_or_supplies" };
+  if (isWeakSubjectTokenLine(line) || isWeakIntimenSubjectLine(line)) {
+    return { ok: false, reason: "weak_subject_line" };
+  }
+  if (/\bi\s+timen\b/i.test(line)) return { ok: false, reason: "classroom_only_line" };
+  if (isResourceOnlyLine(line)) return { ok: false, reason: "resource_only_line" };
+  if (candidate.section === "husk" && !isStandaloneTaskCandidate(line)) {
+    return { ok: false, reason: "husk_not_actionable_homework" };
+  }
+  if (!isStandaloneTaskCandidate(line) && candidate.section !== "proveVurdering") {
+    return { ok: false, reason: "not_actionable_homework_pattern" };
+  }
+  return { ok: true, reason: "accepted" };
 }
 
 /**
@@ -2665,13 +2771,21 @@ function buildHomeworkTaskItemsFromOverlay(
   const items: PortalTaskItem[] = [];
   const seenKeys = new Set<string>();
 
-  const pushTask = (isoDate: string, dayLabel: string | null, taskText: string, reason: string, dayIndex: string) => {
-    const cleanTask = normalizeTaskTitle(taskText);
-    const day = normalizeSpace(dayLabel || "");
-    const title = day ? `${day} – ${cleanTask}` : cleanTask;
-    const dedupeKey = `${isoDate}|${normalizeNorwegianLetters(cleanTask).toLowerCase()}`;
+  const pushTask = (
+    isoDate: string,
+    candidate: HomeworkCandidate,
+    subjectLabel: string | null | undefined,
+    reason: string,
+    dayIndex: string,
+  ) => {
+    const title = buildHomeworkTaskTitle(candidate, subjectLabel);
+    const dedupeKey = `${isoDate}|${normalizeNorwegianLetters(title).toLowerCase()}`;
     if (seenKeys.has(dedupeKey)) {
-      debug?.rejected.push({ dayIndex, line: taskText, reason: "duplicate_normalized_title" });
+      debug?.rejected.push({
+        dayIndex,
+        line: candidate.text,
+        reason: "duplicate_normalized_title",
+      });
       return;
     }
     seenKeys.add(dedupeKey);
@@ -2686,7 +2800,7 @@ function buildHomeworkTaskItemsFromOverlay(
         date: isoDate,
         personId: "pending",
         title: title || "Oppgave",
-        notes: result.title ? `Fra: ${result.title}` : undefined,
+        notes: buildHomeworkTaskNotes(result.title, candidate, subjectLabel),
       },
     });
   };
@@ -2698,8 +2812,8 @@ function buildHomeworkTaskItemsFromOverlay(
     );
     if (!dayEntry) {
       for (const su of action.subjectUpdates) {
-        for (const line of collectHomeworkCandidateLinesFromSections(su.sections)) {
-          debug?.rejected.push({ dayIndex, line, reason: "no_schedule_day_for_index" });
+        for (const c of collectHomeworkCandidateLinesFromSections(su.sections)) {
+          debug?.rejected.push({ dayIndex, line: c.text, reason: "no_schedule_day_for_index" });
         }
       }
       continue;
@@ -2707,42 +2821,26 @@ function buildHomeworkTaskItemsFromOverlay(
     const iso = resolveDate(dayEntry.date, dayEntry.dayLabel);
     if (!iso) {
       for (const su of action.subjectUpdates) {
-        for (const line of collectHomeworkCandidateLinesFromSections(su.sections)) {
-          debug?.rejected.push({ dayIndex, line, reason: "could_not_resolve_date" });
+        for (const c of collectHomeworkCandidateLinesFromSections(su.sections)) {
+          debug?.rejected.push({ dayIndex, line: c.text, reason: "could_not_resolve_date" });
         }
       }
       continue;
     }
     for (const su of action.subjectUpdates) {
-      for (const rawLine of collectHomeworkCandidateLinesFromSections(su.sections)) {
-        const line = normalizeSpace(rawLine);
-        if (!line) continue;
-        if (looksLikeGenericPeriodGoal(line)) {
-          debug?.rejected.push({ dayIndex, line, reason: "generic_period_goal" });
+      for (const candidate of collectHomeworkCandidateLinesFromSections(su.sections)) {
+        const verdict = isValidOverlayHomeworkCandidate(candidate);
+        if (!verdict.ok) {
+          debug?.rejected.push({ dayIndex, line: candidate.text, reason: verdict.reason });
           continue;
         }
-        if (!isStandaloneTaskCandidate(line)) {
-          debug?.rejected.push({ dayIndex, line, reason: "not_actionable_homework_pattern" });
-          continue;
-        }
-        if (isPacklistOrRememberSuppliesOnly(line)) {
-          debug?.rejected.push({ dayIndex, line, reason: "packlist_or_supplies" });
-          continue;
-        }
-        const inSec = (arr: string[] | undefined) =>
-          arr?.some((x) => normalizeSpace(x) === line) ?? false;
-        const fromSection = inSec(su.sections.lekse)
-          ? "lekse"
-          : inSec(su.sections.proveVurdering)
-            ? "proveVurdering"
-            : inSec(su.sections.husk)
-              ? "husk_tasklike"
-              : inSec(su.sections.iTimen)
-                ? "iTimen_actionable"
-                : inSec(su.sections.ekstraBeskjed)
-                  ? "ekstraBeskjed_actionable"
-                  : "overlay_section";
-        pushTask(iso, dayEntry.dayLabel, line, `from_section:${fromSection}`, dayIndex);
+        pushTask(
+          iso,
+          candidate,
+          su.customLabel,
+          `from_section:${candidate.section}`,
+          dayIndex,
+        );
       }
     }
   }
