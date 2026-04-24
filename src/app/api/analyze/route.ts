@@ -2280,7 +2280,9 @@ function dayHasMultipleLanguageSubjects(day: DayScheduleEntry): boolean {
   const blob = normalizeNorwegianLetters(
     [day.details ?? "", ...day.highlights, ...day.notes].filter(Boolean).join(" "),
   );
-  const langs = ["tysk", "spansk", "fransk"].filter((l) => new RegExp(`\\b${l}\\b`).test(blob));
+  const langs = ["tysk", "spansk", "fransk", "engelsk"].filter((l) =>
+    new RegExp(`\\b${l}\\b`).test(blob),
+  );
   return langs.length >= 2;
 }
 
@@ -2313,8 +2315,13 @@ function filterWeakSubjectLinesFromSections(sections: SchoolWeekOverlaySections)
 }
 
 function linePrimaryLanguageToken(line: string): string | null {
-  const m = line.match(/\b(tysk|spansk|fransk)\b/i);
-  return m ? m[1].toLowerCase() : null;
+  const n = normalizeNorwegianLetters(line);
+  if (/\btysk\b/.test(n)) return "tysk";
+  if (/\bspansk\b/.test(n)) return "spansk";
+  if (/\bfransk\b/.test(n)) return "fransk";
+  if (/\bengelsk\b/.test(n)) return "engelsk";
+  if (/\bnorsk\s+fordypning\b/.test(n)) return "norsk_fordypning";
+  return null;
 }
 
 function shouldDemoteLanguageLine(
@@ -2322,13 +2329,59 @@ function shouldDemoteLanguageLine(
   opts: { active: boolean; resolvedTrack: string | null },
 ): boolean {
   if (!opts.active) return false;
-  const langLead = /^\s*[-*•]?\s*(tysk|spansk|fransk)\s*[:\-–]/i;
-  const langOnlyLine = /^\s*[-*•]?\s*(tysk|spansk|fransk)\s*\.?\s*$/i;
+  const langLead =
+    /^\s*[-*•]?\s*(tysk|spansk|fransk|engelsk|norsk\s+fordypning)\s*[:\-–]/i;
+  const langOnlyLine =
+    /^\s*[-*•]?\s*(tysk|spansk|fransk|engelsk|norsk\s+fordypning)\s*\.?\s*$/i;
   if (!langLead.test(line) && !langOnlyLine.test(line)) return false;
   if (isStandaloneTaskCandidate(line)) return false;
   const primary = linePrimaryLanguageToken(line);
   if (opts.resolvedTrack && primary === opts.resolvedTrack) return false;
   return true;
+}
+
+function languageMentionCountInLine(line: string): number {
+  const n = normalizeNorwegianLetters(line);
+  let c = 0;
+  for (const t of ["tysk", "spansk", "fransk", "engelsk"]) {
+    if (new RegExp(`\\b${t}\\b`).test(n)) c += 1;
+  }
+  if (/\bnorsk\s+fordypning\b/.test(n)) c += 1;
+  return c;
+}
+
+/** Flere språk i én linje uten konkret hjemmeoppgave → ned i ekstra (overlay). */
+function demoteMultiLanguageBlobLinesInSections(
+  sections: SchoolWeekOverlaySections,
+  active: boolean,
+): { sections: SchoolWeekOverlaySections; demoted: number } {
+  if (!active) return { sections, demoted: 0 };
+  let demoted = 0;
+  const keys: (keyof SchoolWeekOverlaySections)[] = ["iTimen", "lekse", "husk"];
+  const out: SchoolWeekOverlaySections = { ...sections };
+  const extraPool: string[] = [...(sections.ekstraBeskjed ?? [])];
+  for (const key of keys) {
+    const arr = out[key];
+    if (!arr?.length) continue;
+    const keep: string[] = [];
+    for (const line of arr) {
+      if (
+        languageMentionCountInLine(line) >= 2 &&
+        !isStandaloneTaskCandidate(line)
+      ) {
+        extraPool.push(line);
+        demoted += 1;
+      } else {
+        keep.push(line);
+      }
+    }
+    if (keep.length) out[key] = compactLines(keep, 12);
+    else delete out[key];
+  }
+  if (extraPool.length) {
+    out.ekstraBeskjed = compactLines(extraPool, 24);
+  }
+  return { sections: out, demoted };
 }
 
 function demoteLanguageTaggedLinesInSections(
@@ -2457,6 +2510,7 @@ type OverlayNoiseFilterDebug = {
         replacePreferredStructuredBlob?: boolean;
         semicolonSplits?: string[];
         prefixStrips?: Array<{ from: string; to: string }>;
+        multiLanguageBlobsDemoted?: number;
       }
     >
   >;
@@ -2521,11 +2575,18 @@ function buildSchoolWeekOverlayProposal(
     if (finalizeTrace.prefixStrips?.length) dayMeta.prefixStrips = finalizeTrace.prefixStrips;
 
     const dayMultiLang = dayHasMultipleLanguageSubjects(day);
+    const multiLangOverlayNoise = multiTrack || dayMultiLang;
+    const { sections: afterMultiBlob, demoted: blobDemoted } = demoteMultiLanguageBlobLinesInSections(
+      sectionsRaw,
+      multiLangOverlayNoise,
+    );
+    if (blobDemoted) dayMeta.multiLanguageBlobsDemoted = blobDemoted;
+
     const demoteLangActive = multiTrack || dayMultiLang;
     if (demoteLangActive) {
       dayMeta.languageDemoteScope = multiTrack ? "week_multi_track" : "day_multi_language";
     }
-    const { sections: sDemoted, demoted } = demoteLanguageTaggedLinesInSections(sectionsRaw, {
+    const { sections: sDemoted, demoted } = demoteLanguageTaggedLinesInSections(afterMultiBlob, {
       active: demoteLangActive,
       resolvedTrack: languageTrack.resolvedTrack,
     });
@@ -2629,7 +2690,7 @@ function buildSchoolWeekOverlayProposal(
   };
 }
 
-type HomeworkSectionSource = "lekse" | "proveVurdering" | "husk";
+type HomeworkSectionSource = "lekse" | "husk";
 
 type HomeworkCandidate = {
   text: string;
@@ -2643,13 +2704,17 @@ function collectHomeworkCandidateLinesFromSections(
   for (const line of sections.lekse ?? []) {
     out.push({ text: line, section: "lekse" });
   }
-  for (const line of sections.proveVurdering ?? []) {
-    out.push({ text: line, section: "proveVurdering" });
-  }
   for (const line of sections.husk ?? []) {
     out.push({ text: line, section: "husk" });
   }
   return out;
+}
+
+function isBlobOrSectionLabelForSubject(raw: string): boolean {
+  const n = normalizeNorwegianLetters(raw);
+  return /^(hoydepunkter|husk|notater|frister|i\s+timen|lekse|aktivitet|uke|a-plan|aplan|arbeidsplan)\b/.test(
+    n,
+  );
 }
 
 function inferHomeworkSubjectLabel(
@@ -2662,7 +2727,7 @@ function inferHomeworkSubjectLabel(
     .split(/[;|]/)[0]
     .split(/\s+[–—-]\s+/)[0]
     .trim();
-  if (base) {
+  if (base && !isBlobOrSectionLabelForSubject(base)) {
     const n = normalizeNorwegianLetters(base);
     if (/\b(matte|matematikk)\b/.test(n)) return "Matematikk";
     if (/\bfransk\b/.test(n)) return "Fransk";
@@ -2684,18 +2749,11 @@ function inferHomeworkSubjectLabel(
   return null;
 }
 
-type HomeworkTaskKind =
-  | "lekse"
-  | "innlevering"
-  | "heldagsprove"
-  | "prove_vurdering"
-  | "hjemmeoppgave";
+type HomeworkTaskKind = "lekse" | "innlevering" | "hjemmeoppgave";
 
 function inferHomeworkTaskKind(line: string, section: HomeworkSectionSource): HomeworkTaskKind {
   const n = normalizeNorwegianLetters(line);
-  if (/\bheldagspr[oø]ve|heldagsprove\b/.test(n)) return "heldagsprove";
-  if (/\b(innlevering|innlever|lever inn)\b/.test(n)) return "innlevering";
-  if (/\b(pr[oø]ve|tentamen|vurdering|test)\b/.test(n)) return "prove_vurdering";
+  if (/\b(innlevering|innlever|lever\s*inn)\b/.test(n)) return "innlevering";
   if (/\blekse\b/.test(n) || section === "lekse") return "lekse";
   return "hjemmeoppgave";
 }
@@ -2703,44 +2761,79 @@ function inferHomeworkTaskKind(line: string, section: HomeworkSectionSource): Ho
 function shortHomeworkTypeLabel(kind: HomeworkTaskKind): string {
   if (kind === "lekse") return "lekse";
   if (kind === "innlevering") return "innlevering";
-  if (kind === "heldagsprove") return "heldagsprøve";
-  if (kind === "prove_vurdering") return "prøve";
   return "oppgave";
+}
+
+function homeworkShortActionCore(line: string): string | null {
+  const raw = stripInlineSectionLabelForLine(normalizeSpace(line)).text;
+  const m =
+    /\b(skriv|les|gjør|gjor|øv|ov|forbered|lag|besvar)\b[^.!?]{0,40}/i.exec(raw);
+  if (m) return trimSentence(normalizeSpace(m[0]), 28);
+  if (/\b(side|kap|s\.\s*\d)/i.test(raw)) return trimSentence(raw, 28);
+  return null;
 }
 
 function buildHomeworkTaskTitle(
   candidate: HomeworkCandidate,
   subjectLabel: string | null | undefined,
-): string {
+): { title: string; rule: string } {
   const subj = inferHomeworkSubjectLabel(candidate, subjectLabel);
   const kind = inferHomeworkTaskKind(candidate.text, candidate.section);
-  if (subj && kind === "lekse" && /\b(matte|matematikk)\b/i.test(subj)) return "Mattelekse";
-  if (subj && kind === "heldagsprove" && /\b(matte|matematikk)\b/i.test(subj)) {
-    return "Heldagsprøve i matte";
+  if (subj && kind === "lekse" && /\b(matte|matematikk)\b/i.test(subj)) {
+    return { title: "Mattelekse", rule: "matte_lekse_compact" };
   }
-  if (subj && kind === "lekse") return `${subj} lekse`;
-  if (subj) return `${subj} ${shortHomeworkTypeLabel(kind)}`;
-  const fallback = normalizeTaskTitle(candidate.text);
-  return trimSentence(fallback, 34);
+  if (subj && kind === "lekse") return { title: `${subj} lekse`, rule: "subject_lekse" };
+  if (subj && kind === "innlevering") {
+    return { title: `${subj} innlevering`, rule: "subject_innlevering" };
+  }
+  const core = homeworkShortActionCore(candidate.text);
+  if (subj && core) return { title: `${subj} – ${core}`, rule: "subject_action_core" };
+  if (subj) return { title: `${subj} ${shortHomeworkTypeLabel(kind)}`, rule: "subject_type_fallback" };
+  const fallback = trimSentence(normalizeTaskTitle(candidate.text), 32);
+  return { title: fallback, rule: "trimmed_raw_fallback" };
+}
+
+function resolveHumanHomeworkSourceLabel(result: AIAnalysisResult, sourceType: string): string | null {
+  const hint = result.sourceHint;
+  if (hint?.type === "docx" && hint.fileName?.trim()) {
+    return normalizeSpace(hint.fileName.replace(/\.docx$/i, ""));
+  }
+  if (hint?.type === "pdf" && hint.fileName?.trim()) {
+    return normalizeSpace(hint.fileName.replace(/\.pdf$/i, ""));
+  }
+  if (hint?.type === "image" && hint.fileName?.trim()) {
+    return normalizeSpace(hint.fileName);
+  }
+  const title = normalizeSpace(result.title ?? "");
+  if (title && !/^(docx|pdf|png|jpe?g|webp)$/i.test(title)) return title;
+  return null;
 }
 
 function buildHomeworkTaskNotes(
-  sourceTitle: string | null | undefined,
+  result: AIAnalysisResult,
+  sourceType: string,
   candidate: HomeworkCandidate,
   subjectLabel: string | null | undefined,
-): string {
+): { notes: string; sourceUsed: string } {
   const lines: string[] = [];
-  if (sourceTitle) lines.push(`Fra: ${sourceTitle}`);
+  const src =
+    resolveHumanHomeworkSourceLabel(result, sourceType) ??
+    (normalizeSpace(result.title || "") || null);
+  const sourceUsed = src ?? sourceType;
+  if (src) lines.push(`Fra: ${src}`);
+  else if (sourceType) lines.push(`Fra: ${sourceType}`);
   const subj = inferHomeworkSubjectLabel(candidate, subjectLabel);
   if (subj) lines.push(`Fag: ${subj}`);
   const raw = normalizeSpace(candidate.text);
-  const parts = raw
+  const stripped = stripInlineSectionLabelForLine(raw);
+  const body = stripped.text || raw;
+  const parts = body
     .split(/(?<=[.!?])\s+/)
     .map((x) => normalizeSpace(x))
     .filter(Boolean);
   if (parts.length > 0) lines.push(`Oppgave: ${parts[0]}`);
   if (parts.length > 1) lines.push(`Detaljer: ${parts.slice(1).join(" ")}`);
-  return lines.join("\n");
+  return { notes: lines.join("\n"), sourceUsed };
 }
 
 function isResourceOnlyLine(line: string): boolean {
@@ -2758,11 +2851,31 @@ function languageTokensInText(line: string): string[] {
   );
 }
 
-function hasExplicitHomeworkAction(line: string): boolean {
+function isLekseInnleveringOrConcreteHomework(line: string): boolean {
   const n = normalizeNorwegianLetters(line);
-  if (/\b(lekse|innlevering|lever inn|hjemmeoppgave|oppgave)\b/.test(n)) return true;
-  if (/\b(les|skriv|gjor|gjør|ov|øv|forbered)\b/.test(n)) return true;
+  if (/\b(lekse|innlevering|innlever|lever\s*inn|hjemmeoppgave)\b/.test(n)) return true;
+  if (
+    /\b(les\s+(side|kap|s\.|\d)|skriv\b|gjør\s|gjor\s|øv\s+til|forbered\s+til|fullf(o|ø)r)\b/.test(n)
+  )
+    return true;
+  if (/\bjobb\s+med\b/.test(n) && /\b(oppgav|matte|matematikk)\b/.test(n)) return true;
   return false;
+}
+
+function isResourceDiscoveryNotHomeworkTask(line: string): boolean {
+  const n = normalizeNorwegianLetters(line);
+  if (!/\b(aunivers|campus|kikora)\b/.test(n)) return false;
+  return /\b(finn|finnes|se\s+oppg|oppgav(?:er)?\s+på|logg\s+inn)\b/.test(n);
+}
+
+function isAssessmentOrExamPrimaryLine(line: string): boolean {
+  const n = normalizeNorwegianLetters(line);
+  if (/\b(lekse|innlevering|lever\s*inn)\b/.test(n)) return false;
+  if (/\b(les\s+|skriv\b|gjør\s|gjor\s|oppgave\s*\d|hjemme|øv\s+til|forbered)\b/.test(n))
+    return false;
+  return /\b(pr[oø]ve|tentamen|vurdering|heldagspr[oø]ve|heldagsprove|muntlig\s+eksamen|skriftlig\s+eksamen|kartlegging|standpunkt)\b/.test(
+    n,
+  );
 }
 
 function isValidOverlayHomeworkCandidate(candidate: HomeworkCandidate): {
@@ -2778,15 +2891,18 @@ function isValidOverlayHomeworkCandidate(candidate: HomeworkCandidate): {
   }
   if (/\bi\s+timen\b/i.test(line)) return { ok: false, reason: "classroom_only_line" };
   if (isResourceOnlyLine(line)) return { ok: false, reason: "resource_only_line" };
+  if (isResourceDiscoveryNotHomeworkTask(line)) {
+    return { ok: false, reason: "resource_discovery_not_task" };
+  }
+  if (isAssessmentOrExamPrimaryLine(line)) {
+    return { ok: false, reason: "exam_or_assessment_not_homework_task" };
+  }
   const langs = languageTokensInText(line);
-  if (langs.length >= 2 && !hasExplicitHomeworkAction(line)) {
+  if (langs.length >= 2) {
     return { ok: false, reason: "language_noise_multi_track" };
   }
-  if (
-    (candidate.section === "husk" || candidate.section === "proveVurdering") &&
-    !hasExplicitHomeworkAction(line)
-  ) {
-    return { ok: false, reason: "not_explicit_homework_action" };
+  if (!isLekseInnleveringOrConcreteHomework(line)) {
+    return { ok: false, reason: "not_lekse_or_innlevering_or_concrete_homework" };
   }
   if (candidate.section === "husk" && !isStandaloneTaskCandidate(line)) {
     return { ok: false, reason: "husk_not_actionable_homework" };
@@ -2794,7 +2910,7 @@ function isValidOverlayHomeworkCandidate(candidate: HomeworkCandidate): {
   if (!isStandaloneTaskCandidate(line)) {
     return { ok: false, reason: "not_actionable_homework_pattern" };
   }
-  return { ok: true, reason: "accepted" };
+  return { ok: true, reason: "accepted_lekse_or_innlevering" };
 }
 
 /**
@@ -2818,8 +2934,13 @@ function buildHomeworkTaskItemsFromOverlay(
     reason: string,
     dayIndex: string,
   ) => {
-    const title = buildHomeworkTaskTitle(candidate, subjectLabel);
-    const notes = buildHomeworkTaskNotes(result.title, candidate, subjectLabel);
+    const { title, rule } = buildHomeworkTaskTitle(candidate, subjectLabel);
+    const { notes, sourceUsed } = buildHomeworkTaskNotes(
+      result,
+      sourceType,
+      candidate,
+      subjectLabel,
+    );
     const dedupeKey = `${isoDate}|${normalizeNorwegianLetters(title).toLowerCase()}`;
     if (seenKeys.has(dedupeKey)) {
       debug?.rejected.push({
@@ -2833,7 +2954,7 @@ function buildHomeworkTaskItemsFromOverlay(
     debug?.accepted.push({
       dayIndex,
       title: title || "Oppgave",
-      reason: `${reason};title=derived_subject_kind;notes=${notes.includes("Detaljer:") ? "with_details" : "basic"}`,
+      reason: `${reason};titleRule=${rule};source=${sourceUsed};langMentions=${languageMentionCountInLine(candidate.text)};notes=${notes.includes("Detaljer:") ? "with_details" : "basic"}`,
     });
     items.push({
       proposalId: randomUUID(),
