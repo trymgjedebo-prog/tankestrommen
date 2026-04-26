@@ -787,9 +787,17 @@ function isPacklistOrRememberSuppliesOnly(raw: string | null): boolean {
 
 function isStandaloneTaskCandidate(text: string): boolean {
   const t = normalizeSpace(text);
-  if (!t || isEventLikeText(t)) return false;
+  if (!t) return false;
   if (isPacklistOrRememberSuppliesOnly(t)) return false;
-  return ACTIONABLE_TASK_RE.test(normalizeNorwegianLetters(t));
+  const n = normalizeNorwegianLetters(t);
+  if (
+    isAssessmentOrExamPrimaryLine(t) &&
+    lineHasConcreteAssessmentAnchorForStandalone(n, t)
+  ) {
+    return true;
+  }
+  if (isEventLikeText(t)) return false;
+  return ACTIONABLE_TASK_RE.test(n);
 }
 
 function isEventLikeText(raw: string | null): boolean {
@@ -826,6 +834,24 @@ const LANGUAGE_OR_TRACK_HINT_RE =
 /** Vanlige programfag (korte token – brukes til vekt-profil, ikke hard krav). */
 const PROGRAM_SUBJECT_TOKEN_RE =
   /\b(matematikk|naturfag|samfunnsfag|norsk|engelsk|krle|rle|kunst|musikk|kor|korps|kroppsoving|kroppsøving|matte|natur|samf|historie|geografi|biologi|fysikk|kjemi|informasjon|programmering)\b/i;
+
+function lineHasConcreteAssessmentAnchorForStandalone(norm: string, raw: string): boolean {
+  if (
+    /\b(mandag|tirsdag|onsdag|torsdag|fredag|lordag|lørdag|sondag|søndag)\b/.test(norm)
+  ) {
+    return true;
+  }
+  if (/\b(i\s* dag|i\s+morgen)\b/.test(norm)) return true;
+  if (/\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?/.test(raw)) return true;
+  if (/\b\d{4}-\d{2}-\d{2}\b/.test(raw)) return true;
+  if (PROGRAM_SUBJECT_TOKEN_RE.test(norm)) return true;
+  if (/\b(tysk|spansk|fransk|engelsk|italiensk|nynorsk|bokmal|bokmål)\b/.test(norm)) {
+    return true;
+  }
+  if (/\bnorsk\b/.test(norm)) return true;
+  if (/\bnorsk\s+fordypning\b/.test(norm)) return true;
+  return false;
+}
 
 type CandidateWeightProfile = "language_alternatives" | "elective_list" | "default";
 
@@ -1994,6 +2020,16 @@ function sectionsFromInlineLabeledBlob(text: string | null | undefined): SchoolW
     }
   }
   if (matches.length === 0) return {};
+  if (matches[0].absStart > 0) {
+    const lead = normalizeSpace(text.slice(0, matches[0].absStart).replace(/^[;,:.\s]+/, ""));
+    if (
+      lead.length >= 8 &&
+      sentenceLooksLikeScheduleReturnOrTiming(lead) &&
+      !isLikelySectionLabelLine(lead)
+    ) {
+      push("ekstraBeskjed", lead);
+    }
+  }
   for (let i = 0; i < matches.length; i++) {
     const start = matches[i].labelEnd;
     const end = i + 1 < matches.length ? matches[i + 1].absStart : text.length;
@@ -2286,6 +2322,110 @@ function dayHasMultipleLanguageSubjects(day: DayScheduleEntry): boolean {
   return langs.length >= 2;
 }
 
+/**
+ * Avvik i timen / praktisk «ta med» (svøm, bad, klokkeslett, tilbakemøte) — skal ikke stripes som tom faglinje
+ * eller demoteres som språkstøy når linjen er kort.
+ */
+function sentenceLooksLikeScheduleReturnOrTiming(line: string): boolean {
+  const n = normalizeNorwegianLetters(line);
+  const t = normalizeSpace(line);
+  if (/\bvi\s+skal\b/.test(n)) {
+    if (
+      /\bvi\s+skal\s+(?:l[aæ]re|laere|jobbe\s+med|arbeide\s+med|g[aå]\s+igjennom|lese\s+kap|lese\s+side)\b/.test(
+        n,
+      )
+    ) {
+      return false;
+    }
+    return true;
+  }
+  if (/\btilbake\s+(?:til\s+)?/.test(n)) return true;
+  if (/\b(m[aå]\s+gjerne\s+)?(?:være\s+)?tilbake\b/.test(n)) return true;
+  if (/\b(møtes|samles|hentes)\b/.test(n)) return true;
+  if (/\b\d{1,2}[.:]\d{2}\b/.test(t)) {
+    if (/\b(side|kap|s\.|oppg(?:ave)?)\s+\d{1,2}[.:]\d{2}\b/i.test(t)) return false;
+    return true;
+  }
+  if (/\b(?:spr[aå]ktime|kropps[oø]vingstime|undervisningstimen)\b/.test(n)) return true;
+  return false;
+}
+
+function isLikelyInClassDeviationOrBringAvvikLine(line: string): boolean {
+  const n = normalizeNorwegianLetters(line);
+  const raw = normalizeSpace(line);
+  if (sentenceLooksLikeScheduleReturnOrTiming(raw)) return true;
+  if (
+    /\b(mars-?bad|mars\s+bad|sv[oø]m(?:ming|medrakt)?|bade(t[oø]y|bus|dag)?|h[aå]ndkle|idrettssal|klatresenter)\b/.test(
+      n,
+    )
+  ) {
+    return true;
+  }
+  if (/\b(bade|badet|sv[oø]m)\b/.test(n) && raw.length <= 96) return true;
+  if (/\b(ta\s+med|pakke(?:liste)?)\b/.test(n) && raw.length <= 140) return true;
+  if (/\b(avvik|bytte\s+rom|annet\s+sted|møtes\s+(?:i|p[aå]))\b/.test(n)) return true;
+  return false;
+}
+
+function splitOverlayLineSeparateScheduleTails(line: string): { kept: string[]; ekstra: string[] } {
+  const raw = normalizeSpace(line);
+  if (!raw) return { kept: [], ekstra: [] };
+  const chunks = raw.split(/\s*(?<=[.!?])\s+/).map(normalizeSpace).filter(Boolean);
+  if (chunks.length < 2) return { kept: [raw], ekstra: [] };
+  const ekstra: string[] = [];
+  const kept: string[] = [];
+  for (const c of chunks) {
+    if (sentenceLooksLikeScheduleReturnOrTiming(c)) ekstra.push(c);
+    else kept.push(c);
+  }
+  if (ekstra.length === 0) return { kept: [raw], ekstra: [] };
+  if (kept.length === 0) return { kept: [chunks[0]], ekstra: chunks.slice(1) };
+  return { kept, ekstra };
+}
+
+function applyDeviationTailSplitToSections(
+  sections: SchoolWeekOverlaySections,
+  dayDebug?: {
+    overlayDeviationSectionAssigned?: Array<{ fragment: string; section: string; from: string }>;
+    overlayDeviationLineAccepted?: string[];
+    overlayDeviationLineDropped?: Array<{ line: string; reason: string }>;
+  },
+): SchoolWeekOverlaySections {
+  const out: SchoolWeekOverlaySections = { ...sections };
+  const extraIn: string[] = [...(out.ekstraBeskjed ?? [])];
+  const keys: (keyof SchoolWeekOverlaySections)[] = ["iTimen", "husk"];
+  for (const key of keys) {
+    const arr = out[key];
+    if (!arr?.length) continue;
+    const next: string[] = [];
+    for (const line of arr) {
+      const { kept, ekstra } = splitOverlayLineSeparateScheduleTails(line);
+      for (const k of kept) {
+        if (k) next.push(k);
+      }
+      for (const e of ekstra) {
+        if (!e) continue;
+        extraIn.push(e);
+        if (dayDebug) {
+          if (!dayDebug.overlayDeviationSectionAssigned) dayDebug.overlayDeviationSectionAssigned = [];
+          if (!dayDebug.overlayDeviationLineAccepted) dayDebug.overlayDeviationLineAccepted = [];
+          dayDebug.overlayDeviationSectionAssigned.push({
+            fragment: e,
+            section: "ekstraBeskjed",
+            from: key,
+          });
+          dayDebug.overlayDeviationLineAccepted.push(e);
+        }
+      }
+    }
+    if (next.length) out[key] = compactLines(next, 12);
+    else delete out[key];
+  }
+  if (extraIn.length) out.ekstraBeskjed = compactLines(extraIn, 24);
+  else delete out.ekstraBeskjed;
+  return out;
+}
+
 function filterWeakSubjectLinesFromSections(sections: SchoolWeekOverlaySections): {
   sections: SchoolWeekOverlaySections;
   stripped: number;
@@ -2298,6 +2438,7 @@ function filterWeakSubjectLinesFromSections(sections: SchoolWeekOverlaySections)
     if (!arr?.length) continue;
     const next = arr.filter((line) => {
       const n = normalizeSpace(line);
+      if (isLikelyInClassDeviationOrBringAvvikLine(n)) return true;
       if (
         isWeakSubjectTokenLine(n) ||
         isWeakSubjectListLine(n) ||
@@ -2329,6 +2470,7 @@ function shouldDemoteLanguageLine(
   opts: { active: boolean; resolvedTrack: string | null },
 ): boolean {
   if (!opts.active) return false;
+  if (isLikelyInClassDeviationOrBringAvvikLine(line)) return false;
   const langLead =
     /^\s*[-*•]?\s*(tysk|spansk|fransk|engelsk|norsk\s+fordypning)\s*[:\-–]/i;
   const langOnlyLine =
@@ -2367,7 +2509,8 @@ function demoteMultiLanguageBlobLinesInSections(
     for (const line of arr) {
       if (
         languageMentionCountInLine(line) >= 2 &&
-        !isStandaloneTaskCandidate(line)
+        !isStandaloneTaskCandidate(line) &&
+        !isLikelyInClassDeviationOrBringAvvikLine(line)
       ) {
         extraPool.push(line);
         demoted += 1;
@@ -2511,14 +2654,33 @@ type OverlayNoiseFilterDebug = {
         semicolonSplits?: string[];
         prefixStrips?: Array<{ from: string; to: string }>;
         multiLanguageBlobsDemoted?: number;
+        overlayDeviationLineAccepted?: string[];
+        overlayDeviationLineDropped?: Array<{ line: string; reason: string }>;
+        overlayDeviationSectionAssigned?: Array<{
+          fragment: string;
+          section: string;
+          from: string;
+        }>;
       }
     >
   >;
 };
 
 type OverlayHomeworkTasksDebug = {
-  accepted: Array<{ dayIndex: string; title: string; reason: string }>;
-  rejected: Array<{ dayIndex: string; line: string; reason: string }>;
+  accepted: Array<{
+    dayIndex: string;
+    title: string;
+    reason: string;
+    assessmentTaskAccepted?: boolean;
+    assessmentTaskReason?: string;
+  }>;
+  rejected: Array<{
+    dayIndex: string;
+    line: string;
+    reason: string;
+    assessmentTaskRejected?: boolean;
+    assessmentTaskReason?: string;
+  }>;
 };
 
 function pickDayOverlaySummary(
@@ -2573,6 +2735,8 @@ function buildSchoolWeekOverlayProposal(
     sectionsRaw = finalizeOverlaySectionContent(sectionsRaw, finalizeTrace);
     if (finalizeTrace.semicolonSplits?.length) dayMeta.semicolonSplits = finalizeTrace.semicolonSplits;
     if (finalizeTrace.prefixStrips?.length) dayMeta.prefixStrips = finalizeTrace.prefixStrips;
+
+    sectionsRaw = applyDeviationTailSplitToSections(sectionsRaw, dayMeta);
 
     const dayMultiLang = dayHasMultipleLanguageSubjects(day);
     const multiLangOverlayNoise = multiTrack || dayMultiLang;
@@ -2690,7 +2854,7 @@ function buildSchoolWeekOverlayProposal(
   };
 }
 
-type HomeworkSectionSource = "lekse" | "husk";
+type HomeworkSectionSource = "lekse" | "husk" | "proveVurdering";
 
 type HomeworkCandidate = {
   text: string;
@@ -2706,6 +2870,9 @@ function collectHomeworkCandidateLinesFromSections(
   }
   for (const line of sections.husk ?? []) {
     out.push({ text: line, section: "husk" });
+  }
+  for (const line of sections.proveVurdering ?? []) {
+    out.push({ text: line, section: "proveVurdering" });
   }
   return out;
 }
@@ -2755,6 +2922,7 @@ function inferHomeworkTaskKind(line: string, section: HomeworkSectionSource): Ho
   const n = normalizeNorwegianLetters(line);
   if (/\b(innlevering|innlever|lever\s*inn)\b/.test(n)) return "innlevering";
   if (/\blekse\b/.test(n) || section === "lekse") return "lekse";
+  if (section === "proveVurdering") return "hjemmeoppgave";
   return "hjemmeoppgave";
 }
 
@@ -2777,6 +2945,8 @@ function buildHomeworkTaskTitle(
   candidate: HomeworkCandidate,
   subjectLabel: string | null | undefined,
 ): { title: string; rule: string } {
+  const assessTitle = tryBuildAssessmentTaskTitle(candidate, subjectLabel);
+  if (assessTitle) return assessTitle;
   const subj = inferHomeworkSubjectLabel(candidate, subjectLabel);
   const kind = inferHomeworkTaskKind(candidate.text, candidate.section);
   if (subj && kind === "lekse" && /\b(matte|matematikk)\b/i.test(subj)) {
@@ -2873,12 +3043,58 @@ function isAssessmentOrExamPrimaryLine(line: string): boolean {
   if (/\b(lekse|innlevering|lever\s*inn)\b/.test(n)) return false;
   if (/\b(les\s+|skriv\b|gjør\s|gjor\s|oppgave\s*\d|hjemme|øv\s+til|forbered)\b/.test(n))
     return false;
-  return /\b(pr[oø]ve|tentamen|vurdering|heldagspr[oø]ve|heldagsprove|muntlig\s+eksamen|skriftlig\s+eksamen|kartlegging|standpunkt)\b/.test(
+  return /\b(pr[oø]ve|fagpr[oø]ve|tentamen|vurdering|heldagspr[oø]ve|heldagsprove|eksamen|muntlig\s+eksamen|skriftlig\s+eksamen|kartlegging|standpunkt)\b/.test(
     n,
   );
 }
 
-function isValidOverlayHomeworkCandidate(candidate: HomeworkCandidate): {
+function isOverlayAssessmentTaskAnchored(
+  candidate: HomeworkCandidate,
+  subjectLabel: string | null | undefined,
+): boolean {
+  if (candidate.section === "proveVurdering") return true;
+  const raw = normalizeSpace(candidate.text);
+  const norm = normalizeNorwegianLetters(raw);
+  if (lineHasConcreteAssessmentAnchorForStandalone(norm, raw)) return true;
+  return Boolean(inferHomeworkSubjectLabel(candidate, subjectLabel));
+}
+
+function tryBuildAssessmentTaskTitle(
+  candidate: HomeworkCandidate,
+  subjectLabel: string | null | undefined,
+): { title: string; rule: string } | null {
+  if (!isAssessmentOrExamPrimaryLine(candidate.text)) return null;
+  const subj = inferHomeworkSubjectLabel(candidate, subjectLabel);
+  if (!subj) return null;
+  const n = normalizeNorwegianLetters(candidate.text);
+  if (/\bheldagspr[oø]ve\b/.test(n)) {
+    return { title: `${subj} heldagsprøve`, rule: "assessment_heldagsprove" };
+  }
+  if (/\bvurdering\b/.test(n)) {
+    return { title: `${subj} vurdering`, rule: "assessment_vurdering" };
+  }
+  if (/\b(muntlig\s+eksamen|skriftlig\s+eksamen)\b/.test(n)) {
+    return { title: `${subj} eksamen`, rule: "assessment_eksamen" };
+  }
+  if (/\beksamen\b/.test(n)) {
+    return { title: `${subj} eksamen`, rule: "assessment_eksamen" };
+  }
+  if (/\bkartlegging\b/.test(n)) {
+    return { title: `${subj} kartlegging`, rule: "assessment_kartlegging" };
+  }
+  if (/\bstandpunkt\b/.test(n)) {
+    return { title: `${subj} standpunkt`, rule: "assessment_standpunkt" };
+  }
+  if (/\b(pr[oø]ve|fagpr[oø]ve|tentamen)\b/.test(n)) {
+    return { title: `${subj} prøve`, rule: "assessment_prove" };
+  }
+  return { title: `${subj} prøve`, rule: "assessment_fallback" };
+}
+
+function isValidOverlayHomeworkCandidate(
+  candidate: HomeworkCandidate,
+  subjectLabel: string | null | undefined,
+): {
   ok: boolean;
   reason: string;
 } {
@@ -2894,12 +3110,27 @@ function isValidOverlayHomeworkCandidate(candidate: HomeworkCandidate): {
   if (isResourceDiscoveryNotHomeworkTask(line)) {
     return { ok: false, reason: "resource_discovery_not_task" };
   }
-  if (isAssessmentOrExamPrimaryLine(line)) {
-    return { ok: false, reason: "exam_or_assessment_not_homework_task" };
-  }
   const langs = languageTokensInText(line);
   if (langs.length >= 2) {
     return { ok: false, reason: "language_noise_multi_track" };
+  }
+  if (isAssessmentOrExamPrimaryLine(line)) {
+    if (!isOverlayAssessmentTaskAnchored(candidate, subjectLabel)) {
+      return { ok: false, reason: "assessment_not_anchored" };
+    }
+    if (!tryBuildAssessmentTaskTitle(candidate, subjectLabel)) {
+      return { ok: false, reason: "assessment_missing_subject_for_title" };
+    }
+    if (candidate.section === "proveVurdering") {
+      return { ok: true, reason: "accepted_concrete_assessment_task" };
+    }
+    if (candidate.section === "husk" && !isStandaloneTaskCandidate(line)) {
+      return { ok: false, reason: "husk_not_actionable_homework" };
+    }
+    if (!isStandaloneTaskCandidate(line)) {
+      return { ok: false, reason: "not_actionable_homework_pattern" };
+    }
+    return { ok: true, reason: "accepted_concrete_assessment_task" };
   }
   if (!isLekseInnleveringOrConcreteHomework(line)) {
     return { ok: false, reason: "not_lekse_or_innlevering_or_concrete_homework" };
@@ -2933,6 +3164,7 @@ function buildHomeworkTaskItemsFromOverlay(
     subjectLabel: string | null | undefined,
     reason: string,
     dayIndex: string,
+    validationReason?: string,
   ) => {
     const { title, rule } = buildHomeworkTaskTitle(candidate, subjectLabel);
     const { notes, sourceUsed } = buildHomeworkTaskNotes(
@@ -2955,6 +3187,12 @@ function buildHomeworkTaskItemsFromOverlay(
       dayIndex,
       title: title || "Oppgave",
       reason: `${reason};titleRule=${rule};source=${sourceUsed};langMentions=${languageMentionCountInLine(candidate.text)};notes=${notes.includes("Detaljer:") ? "with_details" : "basic"}`,
+      ...(validationReason === "accepted_concrete_assessment_task"
+        ? {
+            assessmentTaskAccepted: true,
+            assessmentTaskReason: validationReason,
+          }
+        : {}),
     });
     items.push({
       proposalId: randomUUID(),
@@ -2995,9 +3233,19 @@ function buildHomeworkTaskItemsFromOverlay(
     }
     for (const su of action.subjectUpdates) {
       for (const candidate of collectHomeworkCandidateLinesFromSections(su.sections)) {
-        const verdict = isValidOverlayHomeworkCandidate(candidate);
+        const verdict = isValidOverlayHomeworkCandidate(candidate, su.customLabel);
         if (!verdict.ok) {
-          debug?.rejected.push({ dayIndex, line: candidate.text, reason: verdict.reason });
+          if (isAssessmentOrExamPrimaryLine(candidate.text)) {
+            debug?.rejected.push({
+              dayIndex,
+              line: candidate.text,
+              reason: verdict.reason,
+              assessmentTaskRejected: true,
+              assessmentTaskReason: verdict.reason,
+            });
+          } else {
+            debug?.rejected.push({ dayIndex, line: candidate.text, reason: verdict.reason });
+          }
           continue;
         }
         pushTask(
@@ -3006,6 +3254,7 @@ function buildHomeworkTaskItemsFromOverlay(
           su.customLabel,
           `from_section:${candidate.section}`,
           dayIndex,
+          verdict.reason,
         );
       }
     }
