@@ -32,6 +32,82 @@ function isLikelyOverlaySectionLeftLabel(raw: string): boolean {
   );
 }
 
+/** Flere kjernefag i én linje → ikke én fagoverskrift (typisk «Naturfag, norsk og samfunnsfag er også i timen»). */
+function distinctCoreSubjectTokenCount(text: string): number {
+  const norm = normalizeNorwegianLetters(normalizeSpace(text));
+  const keys = [
+    "matematikk",
+    "matte",
+    "naturfag",
+    "samfunnsfag",
+    "norsk",
+    "engelsk",
+    "tysk",
+    "spansk",
+    "fransk",
+    "historie",
+    "geografi",
+    "biologi",
+    "rle",
+    "krle",
+    "fysikk",
+    "kjemi",
+    "programmering",
+    "musikk",
+    "kunst",
+  ] as const;
+  let n = 0;
+  for (const k of keys) {
+    if (new RegExp(`\\b${k}\\b`).test(norm)) n++;
+  }
+  return n;
+}
+
+function looksLikeMultiSubjectProseLine(cand: string): boolean {
+  if (distinctCoreSubjectTokenCount(cand) < 2) return false;
+  if (cand.includes(",")) return true;
+  if (/\bog\b/i.test(cand) && distinctCoreSubjectTokenCount(cand) >= 3) return true;
+  return false;
+}
+
+/** Preamble som skal bort fra «første fag»-lim — ikke lim inn i fagrad. */
+function isLikelyFravaerOrAdminPreambleLine(line: string): boolean {
+  const n = normalizeNorwegianLetters(normalizeSpace(line));
+  return (
+    /\b(fravaer|fravær|melde\s+fravær|meldes\s+til|kontaktlærer|kontaktlaerer)\b/.test(n) ||
+    /\b(foresatte|foreldre)\s+(skal|m[aå])\b/.test(n) ||
+    /\b(skolerutin|reglement|itslearning)\b/.test(n)
+  );
+}
+
+/**
+ * Linjer før første fagoverskrift som egentlig hører til en fagkolonne (DOCX-rekkefølge),
+ * f.eks. «I timen: mars-bad» før første «- Naturfag:». Legges inn i relevant rad i stedet for preamble.
+ */
+/** @returns true hvis ikke-admin preamble-linjer ble flyttet inn i rader (da skal de ikke telle som orphan preamble). */
+function mergeOrphanPreambleIntoSubjectRows(
+  preamble: string[],
+  rows: Array<{ label: string; body: string }>,
+): boolean {
+  if (!preamble.length || !rows.length) return false;
+  const usable = preamble
+    .map((l) => normalizeSpace(l))
+    .filter((l) => l && !isLikelyFravaerOrAdminPreambleLine(l));
+  if (!usable.length) return false;
+
+  const n = (s: string) => normalizeNorwegianLetters(s);
+  const swimOrSprakContext = usable.some((l) =>
+    /\b(mars|bad|bade|sv[oø]m|spr[aå]k|h[aå]ndkle|badet[oø]y)\b/.test(n(l)),
+  );
+  const samIdx = rows.findIndex((r) => /\bsamfunnsfag\b/.test(n(r.label)));
+  const target =
+    swimOrSprakContext && samIdx >= 0 ? rows[samIdx] : rows[0];
+  const prefix = usable.join("\n").trim();
+  const rest = target.body.trim();
+  target.body = rest ? `${prefix}\n${rest}` : prefix;
+  return true;
+}
+
 function isWeakSubjectTokenLine(text: string): boolean {
   let t = normalizeSpace(text).replace(/^[-*•·]\s*/, "");
   if (t.length > 64) return false;
@@ -85,18 +161,19 @@ export function tryParseTableSubjectHeaderLine(
     return { label: cand, inlineBody: null };
   }
 
-  if (!trimmed.includes(":")) {
-    const noBullet = trimmed.replace(/^\s*[-*•·]\s*/, "").trim();
-    if (noBullet.length >= 2 && noBullet.length <= 48 && !isLikelyOverlaySectionLeftLabel(noBullet)) {
-      const cand = cleanSubjectToken(noBullet);
-      if (!GENERIC_SUBJECT_BUCKET_RE.test(cand)) {
-        const norm = normalizeNorwegianLetters(cand);
-        if (PROGRAM_SUBJECT_TOKEN_RE.test(norm) || isWeakSubjectTokenLine(cand)) {
-          return { label: cand, inlineBody: null };
+    if (!trimmed.includes(":")) {
+      const noBullet = trimmed.replace(/^\s*[-*•·]\s*/, "").trim();
+      if (noBullet.length >= 2 && noBullet.length <= 48 && !isLikelyOverlaySectionLeftLabel(noBullet)) {
+        const cand = cleanSubjectToken(noBullet);
+        if (looksLikeMultiSubjectProseLine(cand)) return null;
+        if (!GENERIC_SUBJECT_BUCKET_RE.test(cand)) {
+          const norm = normalizeNorwegianLetters(cand);
+          if (PROGRAM_SUBJECT_TOKEN_RE.test(norm) || isWeakSubjectTokenLine(cand)) {
+            return { label: cand, inlineBody: null };
+          }
         }
       }
     }
-  }
 
   const withBody = /^\s*[-*•·]?\s*(.{2,48}?)\s*:\s+(.+)$/.exec(t);
   if (withBody) {
@@ -104,6 +181,7 @@ export function tryParseTableSubjectHeaderLine(
     if (left.length < 2 || left.length > 48) return null;
     if (isLikelyOverlaySectionLeftLabel(left)) return null;
     if (GENERIC_SUBJECT_BUCKET_RE.test(normalizeNorwegianLetters(left))) return null;
+    if (looksLikeMultiSubjectProseLine(left)) return null;
     const normL = normalizeNorwegianLetters(left);
     if (!PROGRAM_SUBJECT_TOKEN_RE.test(normL) && !isWeakSubjectTokenLine(left)) return null;
     return { label: left, inlineBody: normalizeSpace(withBody[2]) };
@@ -140,7 +218,7 @@ export function splitDetailsIntoTableSubjectRowsWithMeta(
     const hdr = tryParseTableSubjectHeaderLine(t);
     if (hdr) {
       seenHeader = true;
-      if (current?.lines.length) segments.push(current);
+      if (current) segments.push(current);
       current = { label: hdr.label, lines: [] };
       if (hdr.inlineBody) current.lines.push(hdr.inlineBody);
       continue;
@@ -151,16 +229,23 @@ export function splitDetailsIntoTableSubjectRowsWithMeta(
     }
     if (current) current.lines.push(t);
   }
-  if (current?.lines.length) segments.push(current);
+  if (current) segments.push(current);
 
   if (!seenHeader || segments.length === 0) return null;
 
   const rows = segments
     .map((s) => ({ label: s.label, body: s.lines.join("\n").trim() }))
-    .filter((s) => s.label && s.body.length > 0);
+    .filter((s) => Boolean(s.label?.trim()));
 
   if (rows.length === 0) return null;
-  return { rows, preamble };
+  const mergedActivityPreamble = mergeOrphanPreambleIntoSubjectRows(preamble, rows);
+  const preambleOut = mergedActivityPreamble
+    ? preamble.filter((l) => {
+        const t = normalizeSpace(l);
+        return Boolean(t) && isLikelyFravaerOrAdminPreambleLine(t);
+      })
+    : preamble;
+  return { rows, preamble: preambleOut };
 }
 
 /** Bakoverkompatibel: kun radene (minst én). */

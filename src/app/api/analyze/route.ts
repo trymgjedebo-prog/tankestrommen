@@ -3124,6 +3124,12 @@ type OverlayNoiseFilterDebug = {
         overlayTextNormalizedOnly?: boolean;
         overlayTextParaphraseAvoided?: boolean;
         overlaySectionBuiltFromRawRow?: boolean;
+        /** Debug: rå `day.details` før tabell-split (kan være avkortet). */
+        overlayRawDayDetails?: string;
+        overlayTableSplitPreamble?: string[];
+        overlayTableSplitRows?: Array<{ label: string; body: string }>;
+        /** true når rader etter admin-strip har færre ikke-tomme kropper enn split ga rader. */
+        overlayRowAnchorCollapsed?: boolean;
       }
     >
   >;
@@ -3270,6 +3276,22 @@ function buildSchoolWeekOverlayProposal(
     dayMeta.inlineSectionLabelsDetected = inlineLabels;
 
     const tableMeta = splitDetailsIntoTableSubjectRowsWithMeta(day.details);
+    const OVERLAY_DEBUG_RAW_DETAILS_MAX = 12_000;
+    const rawDetails = day.details?.trim() ?? "";
+    if (rawDetails) {
+      dayMeta.overlayRawDayDetails =
+        rawDetails.length > OVERLAY_DEBUG_RAW_DETAILS_MAX
+          ? `${rawDetails.slice(0, OVERLAY_DEBUG_RAW_DETAILS_MAX)}…`
+          : rawDetails;
+    }
+    if (tableMeta) {
+      dayMeta.overlayTableSplitPreamble = [...tableMeta.preamble];
+      dayMeta.overlayTableSplitRows = tableMeta.rows.map((r) => ({
+        label: r.label,
+        body:
+          r.body.length > 4000 ? `${r.body.slice(0, 4000)}…` : r.body,
+      }));
+    }
     const bumpAdmin = (n: number) => {
       dayMeta.overlayAdminLinesFiltered = (dayMeta.overlayAdminLinesFiltered ?? 0) + n;
     };
@@ -3286,13 +3308,16 @@ function buildSchoolWeekOverlayProposal(
     const rawRowCount = tableMeta?.rows.length ?? 0;
     dayMeta.overlayRowAnchorsDetected = rawRowCount;
 
+    const splitRowCount = tableMeta?.rows.length ?? 0;
     const rowAnchoredRows =
-      tableMeta?.rows
-        .map((row) => {
-          const body = stripAdminLinesFromMultilineBody(row.body, bumpAdmin);
-          return { label: row.label, body };
-        })
-        .filter((r) => r.body.length > 0) ?? [];
+      tableMeta?.rows.map((row) => {
+        const body = stripAdminLinesFromMultilineBody(row.body, bumpAdmin);
+        return { label: row.label, body };
+      }) ?? [];
+    const nonEmptyAfterAdmin = rowAnchoredRows.filter((r) => r.body.length > 0).length;
+    if (splitRowCount > 0 && nonEmptyAfterAdmin < splitRowCount) {
+      dayMeta.overlayRowAnchorCollapsed = true;
+    }
 
     dayMeta.overlayRowsBuilt = rowAnchoredRows.length;
     if (rowAnchoredRows.length >= 1) {

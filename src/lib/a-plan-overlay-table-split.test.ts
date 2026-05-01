@@ -51,4 +51,43 @@ describe("splitDetailsIntoTableSubjectRowsWithMeta", () => {
     const details = "Bare noe generelt uten fagkolonner.\nNeste linje.";
     expect(splitDetailsIntoTableSubjectRowsWithMeta(details)).toBeNull();
   });
+
+  it("onsdag-lik celle: prose med flere fag er ikke ny overskrift; tomme fag-rader beholdes; mars-bad inn i samfunnsfag", () => {
+    const details = [
+      "Fravær skal meldes til kontaktlærer.",
+      "I timen: mars-bad!",
+      "Husk: badetøy, håndkle og mat.",
+      "Vi skal være tilbake til språktimen 12.25.",
+      "- Naturfag:",
+      "Vi jobber med egenarbeid.",
+      "Naturfag, norsk og samfunnsfag er også i timen.",
+      "- Norsk:",
+      "- Samfunnsfag:",
+      "- Tysk:",
+      "I timen: Skriftlig tyskprøve.",
+      "Ha med blyant og viskelær.",
+    ].join("\n");
+
+    const m = splitDetailsIntoTableSubjectRowsWithMeta(details);
+    expect(m).not.toBeNull();
+    const labels = m!.rows.map((r) => r.label);
+    expect(labels.some((l) => /naturfag/i.test(l))).toBe(true);
+    expect(labels.some((l) => /^norsk$/i.test(l.trim()))).toBe(true);
+    expect(labels.some((l) => /samfunnsfag/i.test(l))).toBe(true);
+    expect(labels.some((l) => /^tysk$/i.test(l.trim()))).toBe(true);
+
+    const nat = m!.rows.find((r) => /naturfag/i.test(r.label))!;
+    expect(nat.body).toContain("egenarbeid");
+    expect(nat.body).toContain("Naturfag, norsk og samfunnsfag er også i timen");
+
+    const samf = m!.rows.find((r) => /samfunnsfag/i.test(r.label))!;
+    expect(samf.body).toContain("mars-bad");
+
+    const tysk = m!.rows.find((r) => /^tysk$/i.test(r.label.trim()))!;
+    expect(tysk.body).toContain("tyskprøve");
+    expect(tysk.body).toContain("blyant");
+
+    expect(m!.preamble.some((l) => /Fravær|kontaktlærer/i.test(l))).toBe(true);
+    expect(m!.preamble.some((l) => /mars-bad/i.test(l))).toBe(false);
+  });
 });
