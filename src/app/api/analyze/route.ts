@@ -2792,6 +2792,22 @@ function normalizeMarkdownishTicks(line: string): string {
 }
 
 /**
+ * Word / DOCX legger ofte flere fag i én tabellcelle eller én avsnittslinje:
+ * «Samfunnsfag: … Tysk: …». Uten linjeskift ser splitDetailsIntoTableSubjectRows bare én fagrad.
+ * Sett inn \n før pålitelige fagoverskrifter (samme fagnavn som typisk A-plan-rader).
+ */
+function expandEmbeddedSubjectHeadersInDetails(details: string | null): string | null {
+  if (!details?.trim()) return details;
+  let t = details.replace(/\r\n/g, "\n");
+  t = t.replace(/\t+/g, "\n");
+  const subj =
+    "Samfunnsfag|Naturfag|Norsk|Engelsk|Tysk|Spansk|Fransk|Matematikk|Matte|KRLE|RLE|Kunst|Musikk|Kor(?:ps)?|Kroppsøving|Kroppsoving|Historie|Geografi|Biologi|Fysikk|Kjemi|Informasjon|Programmering|Natur";
+  const re = new RegExp(`(\\s+)(?=(?:[-*•·]\\s*)?(?:${subj})\\s*:)`, "gi");
+  t = t.replace(re, "\n");
+  return t;
+}
+
+/**
  * Fagnavn-rad i A-plan-tabell:
  * - «- Samfunnsfag:» egen linje
  * - «- Tysk» uten kolon
@@ -2847,11 +2863,12 @@ function tryParseTableSubjectHeaderLine(line: string): { label: string; inlineBo
 function splitDetailsIntoTableSubjectRows(
   details: string | null,
 ): Array<{ label: string; body: string }> | null {
-  if (!details?.trim()) return null;
+  const expanded = expandEmbeddedSubjectHeadersInDetails(details);
+  if (!expanded?.trim()) return null;
   const segments: Array<{ label: string; lines: string[] }> = [];
   let current: { label: string; lines: string[] } | null = null;
 
-  for (const raw of details.split(/\n/)) {
+  for (const raw of expanded.split(/\n/)) {
     const t = normalizeSpace(raw);
     if (!t) continue;
     const hdr = tryParseTableSubjectHeaderLine(t);
