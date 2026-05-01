@@ -2826,6 +2826,8 @@ type OverlayNoiseFilterDebug = {
         overlayDaySpecialDayReason?: string;
         overlayDaySignalsLocalToDay?: boolean;
         overlayDayExcludedOtherDayLines?: number;
+        overlaySubjectUpdateMissingKeyRecovered?: number;
+        overlaySubjectUpdateFallbackKeyUsed?: number;
       }
     >
   >;
@@ -2869,6 +2871,56 @@ function pickDayOverlaySummary(
     return text;
   }
   return null;
+}
+
+const OVERLAY_SUBJECT_KEY_FALLBACK = "other";
+
+function bumpDayMetaCount(
+  dayMeta: NonNullable<OverlayNoiseFilterDebug["days"][string]>,
+  key: "overlaySubjectUpdateMissingKeyRecovered" | "overlaySubjectUpdateFallbackKeyUsed",
+) {
+  dayMeta[key] = (dayMeta[key] ?? 0) + 1;
+}
+
+/**
+ * Foreldre-App validerer at hver subjectUpdate har ikke-tom subjectKey.
+ */
+function resolveValidOverlaySubjectKey(
+  parsed: ReturnType<typeof parseProgramSchoolFields>,
+  dayMeta: NonNullable<OverlayNoiseFilterDebug["days"][string]>,
+): string {
+  const direct = parsed.subjectKey?.trim();
+  if (direct) return direct;
+
+  const trySlug = (raw: string | null | undefined): string | null => {
+    const s = normalizeSpace(raw ?? "");
+    if (s.length < 2) return null;
+    return slugifySubjectKey(s);
+  };
+
+  const fromSubject = trySlug(parsed.subject);
+  if (fromSubject) {
+    bumpDayMetaCount(dayMeta, "overlaySubjectUpdateMissingKeyRecovered");
+    return fromSubject;
+  }
+
+  if (parsed.customLabel?.trim()) {
+    const lbl = parsed.customLabel.trim();
+    const head = lbl.split(/\s*[–—:]\s+/)[0]?.trim() ?? lbl;
+    const fromHead = trySlug(head);
+    if (fromHead) {
+      bumpDayMetaCount(dayMeta, "overlaySubjectUpdateMissingKeyRecovered");
+      return fromHead;
+    }
+    const fromFull = trySlug(lbl);
+    if (fromFull) {
+      bumpDayMetaCount(dayMeta, "overlaySubjectUpdateMissingKeyRecovered");
+      return fromFull;
+    }
+  }
+
+  bumpDayMetaCount(dayMeta, "overlaySubjectUpdateFallbackKeyUsed");
+  return OVERLAY_SUBJECT_KEY_FALLBACK;
 }
 
 function buildSchoolWeekOverlayProposal(
@@ -2960,7 +3012,7 @@ function buildSchoolWeekOverlayProposal(
       hasSectionContent || parsed.subjectKey || parsed.customLabel
         ? [
             {
-              subjectKey: parsed.subjectKey,
+              subjectKey: resolveValidOverlaySubjectKey(parsed, dayMeta),
               customLabel: parsed.customLabel ?? null,
               sections,
             },

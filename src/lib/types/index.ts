@@ -115,7 +115,8 @@ export interface SchoolWeekOverlaySections {
 }
 
 export interface SchoolWeekOverlaySubjectUpdate {
-  subjectKey: string | null;
+  /** Slug (aldrig tom); Foreldre-App krever gyldig nøkkel per update. */
+  subjectKey: string;
   customLabel?: string | null;
   sections: SchoolWeekOverlaySections;
 }
