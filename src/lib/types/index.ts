@@ -140,6 +140,11 @@ export interface SchoolWeekOverlayProposal {
   confidence: number;
   sourceTitle: string;
   originalSourceType: string;
+  /**
+   * Når satt (f.eks. for `documentKind: activity_plan`), prioriteres ordrett/bevarende tekst
+   * i overlay-seksjoner og kortere oppsummeringer — valgfri kontrakt for klienter.
+   */
+  overlayTextMode?: "preserve_source" | "standard";
   weekNumber: number | null;
   classLabel: string | null;
   weeklySummary: string[];
