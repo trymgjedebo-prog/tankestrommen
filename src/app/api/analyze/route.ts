@@ -11,6 +11,7 @@ import {
 import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
 import { extractTextFromPdfBuffer } from "@/lib/pdf/extract-pdf-text";
 import { extractTextFromDocxBuffer } from "@/lib/docx/extract-docx-text";
+import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import type {
   AnalysisSourceHint,
   AIAnalysisResult,
@@ -2787,105 +2788,23 @@ function buildOverlaySections(day: DayScheduleEntry): SchoolWeekOverlaySections 
   };
 }
 
-function normalizeMarkdownishTicks(line: string): string {
-  return normalizeSpace(line.replace(/^\s*`+|`+\s*$/g, "").trim());
-}
-
-/**
- * Word / DOCX legger ofte flere fag i én tabellcelle eller én avsnittslinje:
- * «Samfunnsfag: … Tysk: …». Uten linjeskift ser splitDetailsIntoTableSubjectRows bare én fagrad.
- * Sett inn \n før pålitelige fagoverskrifter (samme fagnavn som typisk A-plan-rader).
- */
-function expandEmbeddedSubjectHeadersInDetails(details: string | null): string | null {
-  if (!details?.trim()) return details;
-  let t = details.replace(/\r\n/g, "\n");
-  t = t.replace(/\t+/g, "\n");
-  const subj =
-    "Samfunnsfag|Naturfag|Norsk|Engelsk|Tysk|Spansk|Fransk|Matematikk|Matte|KRLE|RLE|Kunst|Musikk|Kor(?:ps)?|Kroppsøving|Kroppsoving|Historie|Geografi|Biologi|Fysikk|Kjemi|Informasjon|Programmering|Natur";
-  const re = new RegExp(`(\\s+)(?=(?:[-*•·]\\s*)?(?:${subj})\\s*:)`, "gi");
-  t = t.replace(re, "\n");
-  return t;
-}
-
-/**
- * Fagnavn-rad i A-plan-tabell:
- * - «- Samfunnsfag:» egen linje
- * - «- Tysk» uten kolon
- * - «Samfunnsfag: I timen: …» — første segment er fag, resten blir første innholdslinje
- */
-function tryParseTableSubjectHeaderLine(line: string): { label: string; inlineBody: string | null } | null {
-  const t = normalizeMarkdownishTicks(line);
-  const trimmed = normalizeSpace(t);
-  if (!trimmed) return null;
-
-  const onlyColon = /^\s*[-*•·]?\s*(.+?)\s*:\s*$/.exec(t);
-  if (onlyColon) {
-    const cand = cleanSubjectToken(normalizeSpace(onlyColon[1]));
-    if (cand.length < 2 || cand.length > 48) return null;
-    if (isLikelyOverlaySectionLeftLabel(cand)) return null;
-    if (GENERIC_SUBJECT_BUCKET_RE.test(cand)) return null;
-    const norm = normalizeNorwegianLetters(cand);
-    if (!PROGRAM_SUBJECT_TOKEN_RE.test(norm) && !isWeakSubjectTokenLine(cand)) return null;
-    return { label: cand, inlineBody: null };
-  }
-
-  if (!trimmed.includes(":")) {
-    const noBullet = trimmed.replace(/^\s*[-*•·]\s*/, "").trim();
-    if (noBullet.length >= 2 && noBullet.length <= 48 && !isLikelyOverlaySectionLeftLabel(noBullet)) {
-      const cand = cleanSubjectToken(noBullet);
-      if (!GENERIC_SUBJECT_BUCKET_RE.test(cand)) {
-        const norm = normalizeNorwegianLetters(cand);
-        if (PROGRAM_SUBJECT_TOKEN_RE.test(norm) || isWeakSubjectTokenLine(cand)) {
-          return { label: cand, inlineBody: null };
-        }
-      }
-    }
-  }
-
-  const withBody = /^\s*[-*•·]?\s*(.{2,48}?)\s*:\s+(.+)$/.exec(t);
-  if (withBody) {
-    const left = cleanSubjectToken(normalizeSpace(withBody[1]));
-    if (left.length < 2 || left.length > 48) return null;
-    if (isLikelyOverlaySectionLeftLabel(left)) return null;
-    if (GENERIC_SUBJECT_BUCKET_RE.test(normalizeNorwegianLetters(left))) return null;
-    const normL = normalizeNorwegianLetters(left);
-    if (!PROGRAM_SUBJECT_TOKEN_RE.test(normL) && !isWeakSubjectTokenLine(left)) return null;
-    return { label: left, inlineBody: normalizeSpace(withBody[2]) };
-  }
-
-  return null;
-}
-
-/**
- * Deler én dagens details i flere fag-rader (tabell / punktliste med fagnavn som overskrift).
- * Returnerer null hvis færre enn to rader — da brukes monolittisk flyt.
- */
-function splitDetailsIntoTableSubjectRows(
-  details: string | null,
-): Array<{ label: string; body: string }> | null {
-  const expanded = expandEmbeddedSubjectHeadersInDetails(details);
-  if (!expanded?.trim()) return null;
-  const segments: Array<{ label: string; lines: string[] }> = [];
-  let current: { label: string; lines: string[] } | null = null;
-
-  for (const raw of expanded.split(/\n/)) {
-    const t = normalizeSpace(raw);
-    if (!t) continue;
-    const hdr = tryParseTableSubjectHeaderLine(t);
-    if (hdr) {
-      if (current?.lines.length) segments.push(current);
-      current = { label: hdr.label, lines: [] };
-      if (hdr.inlineBody) current.lines.push(hdr.inlineBody);
+/** Fjern admin/rutine-linjer fra én fag-rad; tell for debug. */
+function stripAdminLinesFromMultilineBody(
+  body: string,
+  bumpAdminFiltered: (n: number) => void,
+): string {
+  const lines = body.split(/\n/).map((l) => normalizeSpace(l)).filter(Boolean);
+  const kept: string[] = [];
+  let dropped = 0;
+  for (const line of lines) {
+    if (isLikelyAdminOrRoutineText(line)) {
+      dropped += 1;
       continue;
     }
-    if (current) current.lines.push(t);
+    kept.push(line);
   }
-  if (current?.lines.length) segments.push(current);
-  if (segments.length < 2) return null;
-  const out = segments
-    .map((s) => ({ label: s.label, body: s.lines.join("\n").trim() }))
-    .filter((s) => s.label && s.body.length > 0);
-  return out.length >= 2 ? out : null;
+  if (dropped) bumpAdminFiltered(dropped);
+  return kept.join("\n").trim();
 }
 
 function promoteAssessmentLinesIntimenToProve(
@@ -3055,6 +2974,14 @@ type OverlayNoiseFilterDebug = {
         overlayDayExcludedOtherDayLines?: number;
         overlaySubjectUpdateMissingKeyRecovered?: number;
         overlaySubjectUpdateFallbackKeyUsed?: number;
+        /** Radforankret A-plan (debug; ikke i hovedpayload). */
+        overlayRowAnchorsDetected?: number;
+        overlayRowsBuilt?: number;
+        overlaySubjectUpdatesBuilt?: number;
+        overlayTasksBuiltFromRows?: number;
+        overlaySubjectUpdateFallbackOtherUsed?: number;
+        overlayAdminLinesFiltered?: number;
+        overlayOrphanPreambleLines?: number;
       }
     >
   >;
@@ -3170,13 +3097,39 @@ function buildSchoolWeekOverlayProposal(
     const inlineLabels = countInlineSectionLabels(day.details);
     dayMeta.inlineSectionLabelsDetected = inlineLabels;
 
-    const tableRows = splitDetailsIntoTableSubjectRows(day.details);
+    const tableMeta = splitDetailsIntoTableSubjectRowsWithMeta(day.details);
+    const bumpAdmin = (n: number) => {
+      dayMeta.overlayAdminLinesFiltered = (dayMeta.overlayAdminLinesFiltered ?? 0) + n;
+    };
+    if (tableMeta?.preamble?.length) {
+      const nonAdminPreamble = tableMeta.preamble.filter((l) => !isLikelyAdminOrRoutineText(l));
+      for (const line of tableMeta.preamble) {
+        if (isLikelyAdminOrRoutineText(line)) bumpAdmin(1);
+      }
+      if (nonAdminPreamble.length > 0) {
+        dayMeta.overlayOrphanPreambleLines = nonAdminPreamble.length;
+      }
+    }
+
+    const rawRowCount = tableMeta?.rows.length ?? 0;
+    dayMeta.overlayRowAnchorsDetected = rawRowCount;
+
+    const rowAnchoredRows =
+      tableMeta?.rows
+        .map((row) => {
+          const body = stripAdminLinesFromMultilineBody(row.body, bumpAdmin);
+          return { label: row.label, body };
+        })
+        .filter((r) => r.body.length > 0) ?? [];
+
+    dayMeta.overlayRowsBuilt = rowAnchoredRows.length;
+
     let subjectUpdates: SchoolWeekOverlaySubjectUpdate[] = [];
     let strongSections = false;
 
-    if (tableRows && tableRows.length >= 2) {
-      for (let ri = 0; ri < tableRows.length; ri++) {
-        const row = tableRows[ri];
+    if (rowAnchoredRows.length >= 1) {
+      for (let ri = 0; ri < rowAnchoredRows.length; ri++) {
+        const row = rowAnchoredRows[ri];
         const segmentDay: DayScheduleEntry = {
           ...day,
           details: row.body,
@@ -3258,6 +3211,11 @@ function buildSchoolWeekOverlayProposal(
         ];
       }
     }
+
+    dayMeta.overlaySubjectUpdatesBuilt = subjectUpdates.length;
+    dayMeta.overlaySubjectUpdateFallbackOtherUsed = subjectUpdates.filter(
+      (u) => u.subjectKey === OVERLAY_SUBJECT_KEY_FALLBACK,
+    ).length;
 
     const sectionSet = new Set<string>();
     for (const u of subjectUpdates) {
@@ -3908,6 +3866,16 @@ function toPortalBundle(
     );
     if (schoolWeekOverlayNoiseDebug) {
       debugPayload.overlayNoiseFilter = schoolWeekOverlayNoiseDebug;
+    }
+    if (schoolWeekOverlayNoiseDebug && overlayHomeworkDebug) {
+      const taskCountByDay = new Map<string, number>();
+      for (const a of overlayHomeworkDebug.accepted) {
+        taskCountByDay.set(a.dayIndex, (taskCountByDay.get(a.dayIndex) ?? 0) + 1);
+      }
+      for (const [dayIdx, n] of taskCountByDay) {
+        const dm = schoolWeekOverlayNoiseDebug.days[dayIdx];
+        if (dm) dm.overlayTasksBuiltFromRows = n;
+      }
     }
     if (schoolWeekOverlayProposal && overlayHomeworkDebug) {
       debugPayload.overlayHomeworkTasks = overlayHomeworkDebug;
