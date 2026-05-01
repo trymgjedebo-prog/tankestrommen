@@ -767,7 +767,7 @@ function isPacklistOrRememberSuppliesOnly(raw: string | null): boolean {
   if (!raw) return false;
   const n = normalizeNorwegianLetters(raw);
   if (ACTIONABLE_TASK_RE.test(n)) return false;
-  if (/\b(ta med|ta med deg|pakke(?:liste)?)\b/i.test(raw)) return true;
+  if (/\b(ta med|ta med deg|ha med|pakke(?:liste)?)\b/i.test(raw)) return true;
   if (
     /\bhusk\b/i.test(raw) &&
     /\b(pennal|skrivebok|skrivebøker|lærebok|larebok|notatbok|pc|laptop|ipad|nettbrett|oppladet|lader|sekken?|gymklær|treningstøy|matboks|flaske)\b/i.test(
@@ -833,7 +833,7 @@ const LANGUAGE_OR_TRACK_HINT_RE =
 
 /** Vanlige programfag (korte token – brukes til vekt-profil, ikke hard krav). */
 const PROGRAM_SUBJECT_TOKEN_RE =
-  /\b(matematikk|naturfag|samfunnsfag|norsk|engelsk|krle|rle|kunst|musikk|kor|korps|kroppsoving|kroppsøving|matte|natur|samf|historie|geografi|biologi|fysikk|kjemi|informasjon|programmering)\b/i;
+  /\b(matematikk|naturfag|samfunnsfag|norsk|engelsk|tysk|spansk|fransk|krle|rle|kunst|musikk|kor|korps|kroppsoving|kroppsøving|matte|natur|samf|historie|geografi|biologi|fysikk|kjemi|informasjon|programmering)\b/i;
 
 function lineHasConcreteAssessmentAnchorForStandalone(norm: string, raw: string): boolean {
   if (
@@ -966,7 +966,7 @@ function candidatesFromSubjectList(
  */
 function isLikelyOverlaySectionLeftLabel(raw: string): boolean {
   const n = normalizeNorwegianLetters(normalizeSpace(raw));
-  return /^(i\s+timen|husk|lekse\w?|hoydepunkter|notater?|ta\s+med|frister?|prove\w?|prover|vurdering|ressurser|ekstra\s+beskjed|aktivitet)$/.test(
+  return /^(i\s+timen|husk|lekse\w?|hoydepunkter|notater?|ta\s+med|ha\s+med|frister?|prove\w?|prover|vurdering|ressurser|ekstra\s+beskjed|aktivitet)$/.test(
     n,
   );
 }
@@ -1073,6 +1073,21 @@ function mergeOverlaySubjectWithRowHint(
     subjectKey: rowHint.subjectKey,
     subject: rowHint.subject ?? primary.subject,
     customLabel: rowHint.customLabel ?? primary.customLabel,
+    subjectCandidates:
+      rowHint.subjectCandidates.length > 0 ? rowHint.subjectCandidates : primary.subjectCandidates,
+  };
+}
+
+/** A-plan-tabellrad: fagoverskriften er autoritativ — ikke la første innholdslinje overstyre subjectKey. */
+function mergeTableRowOverlaySubject(
+  rowHint: ReturnType<typeof parseProgramSchoolFields>,
+  primary: ReturnType<typeof parseProgramSchoolFields>,
+): ReturnType<typeof parseProgramSchoolFields> {
+  if (!rowHint?.subjectKey) return primary;
+  return {
+    subjectKey: rowHint.subjectKey,
+    subject: rowHint.subject,
+    customLabel: rowHint.customLabel,
     subjectCandidates:
       rowHint.subjectCandidates.length > 0 ? rowHint.subjectCandidates : primary.subjectCandidates,
   };
@@ -2000,7 +2015,7 @@ function stripInlineSectionLabelForLine(line: string): {
   prefix?: string;
 } {
   const m =
-    /^(høydepunkter|hoydepunkter|husk|notater?|frister?|i\s+timen|lekse\w?|ta\s+med|prøve|prove|vurdering)\s*:\s*(.*)$/i.exec(
+    /^(høydepunkter|hoydepunkter|husk|notater?|frister?|i\s+timen|lekse\w?|ta\s+med|ha\s+med|prøve|prove|vurdering)\s*:\s*(.*)$/i.exec(
       line.trim(),
     );
   if (!m) return { text: normalizeSpace(line), hadPrefix: false };
@@ -2099,7 +2114,7 @@ function sectionsFromLabeledBlob(text: string | null | undefined): SchoolWeekOve
       current = "lekse";
       continue;
     }
-    if (/^(husk|ta med)\s*:?\s*$/i.test(n)) {
+    if (/^(husk|ta med|ha med)\s*:?\s*$/i.test(n)) {
       current = "husk";
       continue;
     }
@@ -2128,14 +2143,14 @@ function sectionsFromLabeledBlob(text: string | null | undefined): SchoolWeekOve
 
 /** Flere etiketter i én streng / inline — splitter til sections (replace-/blob-dager). */
 const INLINE_SECTION_LABEL_CAPTURE =
-  /\b(høydepunkter|hoydepunkter|husk|notater?|frister?|ta\s+med|prøve|prove|vurdering|i\s+timen|lekse\w?|ressurser|ekstra\s+beskjed)\s*:/gi;
+  /\b(høydepunkter|hoydepunkter|husk|notater?|frister?|ta\s+med|ha\s+med|prøve|prove|vurdering|i\s+timen|lekse\w?|ressurser|ekstra\s+beskjed)\s*:/gi;
 
 function mapCapturedLabelToSectionKey(rawLabel: string): keyof SchoolWeekOverlaySections | null {
   const raw = rawLabel.replace(/\s+/g, " ").trim();
   const n = normalizeNorwegianLetters(raw);
   if (n === "hoydepunkter" || n === "i timen") return "iTimen";
   if (n.startsWith("lekse")) return "lekse";
-  if (n === "husk" || n === "ta med") return "husk";
+  if (n === "husk" || n === "ta med" || n === "ha med") return "husk";
   if (n === "frister" || n === "frist") return "proveVurdering";
   if (n.startsWith("prove") || n === "vurdering") return "proveVurdering";
   if (n.startsWith("ressurser")) return "ressurser";
@@ -2193,7 +2208,7 @@ function sectionsFromInlineLabeledBlob(text: string | null | undefined): SchoolW
 }
 
 function isLikelySectionLabelLine(text: string): boolean {
-  return /^(hoydepunkter|husk|notater|frister|ta med|i timen|lekse|lekser|ressurser|ekstra beskjed)\s*:?$/i.test(
+  return /^(hoydepunkter|husk|notater|frister|ta med|ha med|i timen|lekse|lekser|ressurser|ekstra beskjed)\s*:?$/i.test(
     normalizeNorwegianLetters(text),
   );
 }
@@ -2776,18 +2791,53 @@ function normalizeMarkdownishTicks(line: string): string {
   return normalizeSpace(line.replace(/^\s*`+|`+\s*$/g, "").trim());
 }
 
-/** Fagnavn-rad i A-plan-tabell: «- Samfunnsfag:» egen linje (valgfritt innhold samme linje senere). */
-function tryNormalizeTableSubjectHeaderLine(line: string): string | null {
+/**
+ * Fagnavn-rad i A-plan-tabell:
+ * - «- Samfunnsfag:» egen linje
+ * - «- Tysk» uten kolon
+ * - «Samfunnsfag: I timen: …» — første segment er fag, resten blir første innholdslinje
+ */
+function tryParseTableSubjectHeaderLine(line: string): { label: string; inlineBody: string | null } | null {
   const t = normalizeMarkdownishTicks(line);
-  const m = /^\s*[-*•·]?\s*(.+?)\s*:\s*$/.exec(t);
-  if (!m) return null;
-  const cand = cleanSubjectToken(normalizeSpace(m[1]));
-  if (cand.length < 2 || cand.length > 48) return null;
-  if (isLikelyOverlaySectionLeftLabel(cand)) return null;
-  if (GENERIC_SUBJECT_BUCKET_RE.test(cand)) return null;
-  const norm = normalizeNorwegianLetters(cand);
-  if (!PROGRAM_SUBJECT_TOKEN_RE.test(norm) && !isWeakSubjectTokenLine(cand)) return null;
-  return cand;
+  const trimmed = normalizeSpace(t);
+  if (!trimmed) return null;
+
+  const onlyColon = /^\s*[-*•·]?\s*(.+?)\s*:\s*$/.exec(t);
+  if (onlyColon) {
+    const cand = cleanSubjectToken(normalizeSpace(onlyColon[1]));
+    if (cand.length < 2 || cand.length > 48) return null;
+    if (isLikelyOverlaySectionLeftLabel(cand)) return null;
+    if (GENERIC_SUBJECT_BUCKET_RE.test(cand)) return null;
+    const norm = normalizeNorwegianLetters(cand);
+    if (!PROGRAM_SUBJECT_TOKEN_RE.test(norm) && !isWeakSubjectTokenLine(cand)) return null;
+    return { label: cand, inlineBody: null };
+  }
+
+  if (!trimmed.includes(":")) {
+    const noBullet = trimmed.replace(/^\s*[-*•·]\s*/, "").trim();
+    if (noBullet.length >= 2 && noBullet.length <= 48 && !isLikelyOverlaySectionLeftLabel(noBullet)) {
+      const cand = cleanSubjectToken(noBullet);
+      if (!GENERIC_SUBJECT_BUCKET_RE.test(cand)) {
+        const norm = normalizeNorwegianLetters(cand);
+        if (PROGRAM_SUBJECT_TOKEN_RE.test(norm) || isWeakSubjectTokenLine(cand)) {
+          return { label: cand, inlineBody: null };
+        }
+      }
+    }
+  }
+
+  const withBody = /^\s*[-*•·]?\s*(.{2,48}?)\s*:\s+(.+)$/.exec(t);
+  if (withBody) {
+    const left = cleanSubjectToken(normalizeSpace(withBody[1]));
+    if (left.length < 2 || left.length > 48) return null;
+    if (isLikelyOverlaySectionLeftLabel(left)) return null;
+    if (GENERIC_SUBJECT_BUCKET_RE.test(normalizeNorwegianLetters(left))) return null;
+    const normL = normalizeNorwegianLetters(left);
+    if (!PROGRAM_SUBJECT_TOKEN_RE.test(normL) && !isWeakSubjectTokenLine(left)) return null;
+    return { label: left, inlineBody: normalizeSpace(withBody[2]) };
+  }
+
+  return null;
 }
 
 /**
@@ -2804,10 +2854,11 @@ function splitDetailsIntoTableSubjectRows(
   for (const raw of details.split(/\n/)) {
     const t = normalizeSpace(raw);
     if (!t) continue;
-    const hdr = tryNormalizeTableSubjectHeaderLine(t);
+    const hdr = tryParseTableSubjectHeaderLine(t);
     if (hdr) {
       if (current?.lines.length) segments.push(current);
-      current = { label: hdr, lines: [] };
+      current = { label: hdr.label, lines: [] };
+      if (hdr.inlineBody) current.lines.push(hdr.inlineBody);
       continue;
     }
     if (current) current.lines.push(t);
@@ -3124,7 +3175,7 @@ function buildSchoolWeekOverlayProposal(
             .map(normalizeSpace)
             .find((l) => l && !isLikelyAdminOrRoutineText(l)) ?? null;
         const primaryParsed = parseProgramSchoolFields(firstBodyLine);
-        const parsed = mergeOverlaySubjectWithRowHint(rowHintParsed, primaryParsed);
+        const parsed = mergeTableRowOverlaySubject(rowHintParsed, primaryParsed);
 
         const pipelineMeta = ri === 0 ? dayMeta : undefined;
         const sections = computeOverlaySectionsPipeline(
@@ -3338,6 +3389,10 @@ function inferHomeworkSubjectLabel(
   }
   const t = normalizeNorwegianLetters(candidate.text);
   if (/\b(matte|matematikk)\b/.test(t)) return "Matematikk";
+  if (/\bfranskpr[oø]ve\b/.test(t)) return "Fransk";
+  if (/\bspanskpr[oø]ve\b/.test(t)) return "Spansk";
+  if (/\btyskpr[oø]ve\b/.test(t)) return "Tysk";
+  if (/\bengelskpr[oø]ve\b/.test(t)) return "Engelsk";
   if (/\bfransk\b/.test(t)) return "Fransk";
   if (/\bspansk\b/.test(t)) return "Spansk";
   if (/\btysk\b/.test(t)) return "Tysk";
@@ -3414,6 +3469,7 @@ function buildHomeworkTaskNotes(
   sourceType: string,
   candidate: HomeworkCandidate,
   subjectLabel: string | null | undefined,
+  attachDetailLines?: string[],
 ): { notes: string; sourceUsed: string } {
   const lines: string[] = [];
   const src =
@@ -3427,12 +3483,22 @@ function buildHomeworkTaskNotes(
   const raw = normalizeSpace(candidate.text);
   const stripped = stripInlineSectionLabelForLine(raw);
   const body = stripped.text || raw;
+  const bodyKey = normalizeNorwegianLetters(body).replace(/\s+/g, " ").trim();
   const parts = body
     .split(/(?<=[.!?])\s+/)
     .map((x) => normalizeSpace(x))
     .filter(Boolean);
   if (parts.length > 0) lines.push(`Oppgave: ${parts[0]}`);
   if (parts.length > 1) lines.push(`Detaljer: ${parts.slice(1).join(" ")}`);
+  for (const ex of attachDetailLines ?? []) {
+    const rawEx = normalizeSpace(ex);
+    if (!rawEx) continue;
+    const exBody = stripInlineSectionLabelForLine(rawEx).text || rawEx;
+    if (!exBody) continue;
+    const exKey = normalizeNorwegianLetters(exBody).replace(/\s+/g, " ").trim();
+    if (exKey && exKey === bodyKey) continue;
+    lines.push(exBody);
+  }
   return { notes: lines.join("\n"), sourceUsed };
 }
 
@@ -3473,6 +3539,7 @@ function isAssessmentOrExamPrimaryLine(line: string): boolean {
   if (/\b(lekse|innlevering|lever\s*inn)\b/.test(n)) return false;
   if (/\b(les\s+|skriv\b|gjør\s|gjor\s|oppgave\s*\d|hjemme|øv\s+til|forbered)\b/.test(n))
     return false;
+  if (/\b(?:tysk|spansk|fransk|engelsk)pr[oø]ve\b/.test(n)) return true;
   return /\b(pr[oø]ve|fagpr[oø]ve|tentamen|vurdering|heldagspr[oø]ve|heldagsprove|eksamen|muntlig\s+eksamen|skriftlig\s+eksamen|kartlegging|standpunkt)\b/.test(
     n,
   );
@@ -3515,7 +3582,7 @@ function tryBuildAssessmentTaskTitle(
   if (/\bstandpunkt\b/.test(n)) {
     return { title: `${subj} standpunkt`, rule: "assessment_standpunkt" };
   }
-  if (/\b(pr[oø]ve|fagpr[oø]ve|tentamen)\b/.test(n)) {
+  if (/\b(pr[oø]ve|fagpr[oø]ve|tentamen)\b/.test(n) || /\b(?:tysk|spansk|fransk|engelsk)pr[oø]ve\b/.test(n)) {
     return { title: `${subj} prøve`, rule: "assessment_prove" };
   }
   return { title: `${subj} prøve`, rule: "assessment_fallback" };
@@ -3535,7 +3602,12 @@ function isValidOverlayHomeworkCandidate(
   if (isWeakSubjectTokenLine(line) || isWeakIntimenSubjectLine(line)) {
     return { ok: false, reason: "weak_subject_line" };
   }
-  if (/\bi\s+timen\b/i.test(line)) return { ok: false, reason: "classroom_only_line" };
+  const assessmentPrimary = isAssessmentOrExamPrimaryLine(line);
+  if (/\bi\s+timen\b/i.test(line)) {
+    if (!(candidate.section === "proveVurdering" && assessmentPrimary)) {
+      return { ok: false, reason: "classroom_only_line" };
+    }
+  }
   if (isResourceOnlyLine(line)) return { ok: false, reason: "resource_only_line" };
   if (isResourceDiscoveryNotHomeworkTask(line)) {
     return { ok: false, reason: "resource_discovery_not_task" };
@@ -3595,6 +3667,7 @@ function buildHomeworkTaskItemsFromOverlay(
     reason: string,
     dayIndex: string,
     validationReason?: string,
+    attachDetailLines?: string[],
   ) => {
     const { title, rule } = buildHomeworkTaskTitle(candidate, subjectLabel);
     const { notes, sourceUsed } = buildHomeworkTaskNotes(
@@ -3602,6 +3675,7 @@ function buildHomeworkTaskItemsFromOverlay(
       sourceType,
       candidate,
       subjectLabel,
+      attachDetailLines,
     );
     const dedupeKey = `${isoDate}|${normalizeNorwegianLetters(title).toLowerCase()}`;
     if (seenKeys.has(dedupeKey)) {
@@ -3678,6 +3752,11 @@ function buildHomeworkTaskItemsFromOverlay(
           }
           continue;
         }
+        const attachHuskForAssessment =
+          verdict.reason === "accepted_concrete_assessment_task" &&
+          candidate.section === "proveVurdering"
+            ? compactLines(su.sections.husk ?? [], 8)
+            : undefined;
         pushTask(
           iso,
           candidate,
@@ -3685,6 +3764,7 @@ function buildHomeworkTaskItemsFromOverlay(
           `from_section:${candidate.section}`,
           dayIndex,
           verdict.reason,
+          attachHuskForAssessment,
         );
       }
     }
