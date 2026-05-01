@@ -2205,6 +2205,8 @@ function isLikelyAdminOrRoutineText(text: string): boolean {
     /\b(fravaer|fravær|melde fravaer|melde fravær|sykemelding|sykmelding|ikke mott|ikke møtt)\b/.test(
       n,
     ) ||
+    /\b(fravær|fravaer)\s+skal\s+(?:meldes|allerede)/.test(n) ||
+    /\bmelde\s+(?:fravær|fravaer)\s+(?:til|p[aå])\b/.test(n) ||
     /\b(kontaktlaerer|kontaktlærer|kontaktlarer)\b/.test(n) ||
     /\b(foresatte|foreldre)\s+(skal|m[aå]|maa|b[oø]r)\b/.test(n) ||
     /\b(skolerutin|skolens\s+rutin|reglement|mobiltelefon|mobil\s+p[aå]\s+skolen)\b/.test(n) ||
@@ -2770,6 +2772,163 @@ function buildOverlaySections(day: DayScheduleEntry): SchoolWeekOverlaySections 
   };
 }
 
+function normalizeMarkdownishTicks(line: string): string {
+  return normalizeSpace(line.replace(/^\s*`+|`+\s*$/g, "").trim());
+}
+
+/** Fagnavn-rad i A-plan-tabell: «- Samfunnsfag:» egen linje (valgfritt innhold samme linje senere). */
+function tryNormalizeTableSubjectHeaderLine(line: string): string | null {
+  const t = normalizeMarkdownishTicks(line);
+  const m = /^\s*[-*•·]?\s*(.+?)\s*:\s*$/.exec(t);
+  if (!m) return null;
+  const cand = cleanSubjectToken(normalizeSpace(m[1]));
+  if (cand.length < 2 || cand.length > 48) return null;
+  if (isLikelyOverlaySectionLeftLabel(cand)) return null;
+  if (GENERIC_SUBJECT_BUCKET_RE.test(cand)) return null;
+  const norm = normalizeNorwegianLetters(cand);
+  if (!PROGRAM_SUBJECT_TOKEN_RE.test(norm) && !isWeakSubjectTokenLine(cand)) return null;
+  return cand;
+}
+
+/**
+ * Deler én dagens details i flere fag-rader (tabell / punktliste med fagnavn som overskrift).
+ * Returnerer null hvis færre enn to rader — da brukes monolittisk flyt.
+ */
+function splitDetailsIntoTableSubjectRows(
+  details: string | null,
+): Array<{ label: string; body: string }> | null {
+  if (!details?.trim()) return null;
+  const segments: Array<{ label: string; lines: string[] }> = [];
+  let current: { label: string; lines: string[] } | null = null;
+
+  for (const raw of details.split(/\n/)) {
+    const t = normalizeSpace(raw);
+    if (!t) continue;
+    const hdr = tryNormalizeTableSubjectHeaderLine(t);
+    if (hdr) {
+      if (current?.lines.length) segments.push(current);
+      current = { label: hdr, lines: [] };
+      continue;
+    }
+    if (current) current.lines.push(t);
+  }
+  if (current?.lines.length) segments.push(current);
+  if (segments.length < 2) return null;
+  const out = segments
+    .map((s) => ({ label: s.label, body: s.lines.join("\n").trim() }))
+    .filter((s) => s.label && s.body.length > 0);
+  return out.length >= 2 ? out : null;
+}
+
+function promoteAssessmentLinesIntimenToProve(
+  sections: SchoolWeekOverlaySections,
+): SchoolWeekOverlaySections {
+  const it = sections.iTimen;
+  if (!it?.length) return sections;
+  const keep: string[] = [];
+  const prove: string[] = [...(sections.proveVurdering ?? [])];
+  for (const line of it) {
+    const n = normalizeNorwegianLetters(line);
+    const toProve =
+      isAssessmentOrExamPrimaryLine(line) ||
+      /\b(skriftlig|muntlig)\s+pr[oø]ve\b/.test(n) ||
+      /\b(fagpr[oø]ve|tyskpr[oø]ve)\b/.test(n);
+    if (toProve) prove.push(line);
+    else keep.push(line);
+  }
+  const out: SchoolWeekOverlaySections = { ...sections };
+  if (keep.length) out.iTimen = compactLines(keep, 12);
+  else delete out.iTimen;
+  if (prove.length) out.proveVurdering = compactLines(prove, 12);
+  else delete out.proveVurdering;
+  return out;
+}
+
+function filterAdminRoutineFromSections(
+  sections: SchoolWeekOverlaySections,
+): SchoolWeekOverlaySections {
+  const keys: (keyof SchoolWeekOverlaySections)[] = [
+    "iTimen",
+    "lekse",
+    "husk",
+    "proveVurdering",
+    "ekstraBeskjed",
+    "ressurser",
+  ];
+  const out: SchoolWeekOverlaySections = { ...sections };
+  for (const k of keys) {
+    const arr = out[k];
+    if (!arr?.length) continue;
+    const next = arr.filter((line) => !isLikelyAdminOrRoutineText(line));
+    if (next.length) out[k] = compactLines(next, 12);
+    else delete out[k];
+  }
+  return out;
+}
+
+function overlayStrongSectionSignal(sections: SchoolWeekOverlaySections): boolean {
+  return (
+    Number(Boolean(sections.iTimen?.length)) +
+      Number(Boolean(sections.lekse?.length)) +
+      Number(Boolean(sections.husk?.length)) +
+      Number(Boolean(sections.proveVurdering?.length)) +
+      Number(Boolean(sections.ressurser?.length)) >=
+    2
+  );
+}
+
+function computeOverlaySectionsPipeline(
+  daySlice: DayScheduleEntry,
+  dayForMultiLang: DayScheduleEntry,
+  dayMeta: NonNullable<OverlayNoiseFilterDebug["days"][string]> | undefined,
+  languageTrack: SchoolWeekOverlayProposal["languageTrack"],
+  multiTrack: boolean,
+): SchoolWeekOverlaySections {
+  let sectionsRaw = buildOverlaySections(daySlice);
+  const finalizeTrace: { semicolonSplits?: string[]; prefixStrips?: Array<{ from: string; to: string }> } =
+    {};
+  sectionsRaw = finalizeOverlaySectionContent(sectionsRaw, finalizeTrace);
+  if (dayMeta) {
+    if (finalizeTrace.semicolonSplits?.length) {
+      dayMeta.semicolonSplits = [...(dayMeta.semicolonSplits ?? []), ...finalizeTrace.semicolonSplits];
+    }
+    if (finalizeTrace.prefixStrips?.length) {
+      dayMeta.prefixStrips = [...(dayMeta.prefixStrips ?? []), ...finalizeTrace.prefixStrips];
+    }
+  }
+
+  sectionsRaw = applyDeviationTailSplitToSections(sectionsRaw, dayMeta);
+
+  const dayMultiLang = dayHasMultipleLanguageSubjects(dayForMultiLang);
+  const multiLangOverlayNoise = multiTrack || dayMultiLang;
+  const { sections: afterMultiBlob, demoted: blobDemoted } = demoteMultiLanguageBlobLinesInSections(
+    sectionsRaw,
+    multiLangOverlayNoise,
+  );
+  if (dayMeta && blobDemoted) {
+    dayMeta.multiLanguageBlobsDemoted = (dayMeta.multiLanguageBlobsDemoted ?? 0) + blobDemoted;
+  }
+
+  const demoteLangActive = multiTrack || dayMultiLang;
+  if (dayMeta && demoteLangActive) {
+    dayMeta.languageDemoteScope = multiTrack ? "week_multi_track" : "day_multi_language";
+  }
+  const { sections: sDemoted, demoted } = demoteLanguageTaggedLinesInSections(afterMultiBlob, {
+    active: demoteLangActive,
+    resolvedTrack: languageTrack.resolvedTrack,
+  });
+  if (dayMeta && demoted) {
+    dayMeta.languageDemotedLines = (dayMeta.languageDemotedLines ?? 0) + demoted;
+  }
+
+  const { sections: sectionsFiltered, stripped } = filterWeakSubjectLinesFromSections(sDemoted);
+  if (dayMeta && stripped) {
+    dayMeta.weakSubjectLinesStripped = (dayMeta.weakSubjectLinesStripped ?? 0) + stripped;
+  }
+
+  return filterAdminRoutineFromSections(promoteAssessmentLinesIntimenToProve(sectionsFiltered));
+}
+
 function resolveLanguageTrack(result: AIAnalysisResult): SchoolWeekOverlayProposal["languageTrack"] {
   const text = normalizeNorwegianLetters(
     [result.title, result.description, ...result.scheduleByDay.map((d) => d.details ?? "")]
@@ -2940,84 +3099,104 @@ function buildSchoolWeekOverlayProposal(
     };
     noiseDebug.days[idx] = dayMeta;
 
-    const { subjectRowLabels, contentHighlights } = partitionHighlightsForOverlaySubjectRow(
-      day.highlights,
-    );
-    const dayForSections: DayScheduleEntry = { ...day, highlights: contentHighlights };
-
-    const rowHintParsed =
-      subjectRowLabels.length > 0 ? parsedSubjectFromWeakRowLabel(subjectRowLabels[0]) : null;
-    const primaryParsed = parseProgramSchoolFields(
-      day.details || contentHighlights[0] || day.notes[0] || null,
-    );
-    const parsed = mergeOverlaySubjectWithRowHint(rowHintParsed, primaryParsed);
-
-    if (rowHintParsed?.subjectKey && parsed.subjectKey === rowHintParsed.subjectKey) {
-      dayMeta.overlayDeviationAnchoredToSubject = {
-        subjectKey: parsed.subjectKey,
-        customLabel: parsed.customLabel,
-        source: "highlight_subject_row",
-        rowsUsed: subjectRowLabels.slice(0, 4),
-      };
-      dayMeta.overlayDeviationDropped = subjectRowLabels.map((line) => ({
-        line,
-        reason: "highlight_routed_to_subject_row_not_intimen_bullet",
-      }));
-    }
-
-    let sectionsRaw = buildOverlaySections(dayForSections);
     const inlineLabels = countInlineSectionLabels(day.details);
     dayMeta.inlineSectionLabelsDetected = inlineLabels;
 
-    const finalizeTrace: { semicolonSplits?: string[]; prefixStrips?: Array<{ from: string; to: string }> } =
-      {};
-    sectionsRaw = finalizeOverlaySectionContent(sectionsRaw, finalizeTrace);
-    if (finalizeTrace.semicolonSplits?.length) dayMeta.semicolonSplits = finalizeTrace.semicolonSplits;
-    if (finalizeTrace.prefixStrips?.length) dayMeta.prefixStrips = finalizeTrace.prefixStrips;
+    const tableRows = splitDetailsIntoTableSubjectRows(day.details);
+    let subjectUpdates: SchoolWeekOverlaySubjectUpdate[] = [];
+    let strongSections = false;
 
-    sectionsRaw = applyDeviationTailSplitToSections(sectionsRaw, dayMeta);
+    if (tableRows && tableRows.length >= 2) {
+      for (let ri = 0; ri < tableRows.length; ri++) {
+        const row = tableRows[ri];
+        const segmentDay: DayScheduleEntry = {
+          ...day,
+          details: row.body,
+          highlights: [],
+          notes: [],
+          rememberItems: [],
+          deadlines: [],
+        };
+        const rowHintParsed = parsedSubjectFromWeakRowLabel(row.label);
+        const firstBodyLine =
+          row.body
+            .split(/\n+/)
+            .map(normalizeSpace)
+            .find((l) => l && !isLikelyAdminOrRoutineText(l)) ?? null;
+        const primaryParsed = parseProgramSchoolFields(firstBodyLine);
+        const parsed = mergeOverlaySubjectWithRowHint(rowHintParsed, primaryParsed);
 
-    const dayMultiLang = dayHasMultipleLanguageSubjects(day);
-    const multiLangOverlayNoise = multiTrack || dayMultiLang;
-    const { sections: afterMultiBlob, demoted: blobDemoted } = demoteMultiLanguageBlobLinesInSections(
-      sectionsRaw,
-      multiLangOverlayNoise,
-    );
-    if (blobDemoted) dayMeta.multiLanguageBlobsDemoted = blobDemoted;
+        const pipelineMeta = ri === 0 ? dayMeta : undefined;
+        const sections = computeOverlaySectionsPipeline(
+          segmentDay,
+          day,
+          pipelineMeta,
+          languageTrack,
+          multiTrack,
+        );
+        if (overlayStrongSectionSignal(sections)) strongSections = true;
 
-    const demoteLangActive = multiTrack || dayMultiLang;
-    if (demoteLangActive) {
-      dayMeta.languageDemoteScope = multiTrack ? "week_multi_track" : "day_multi_language";
+        const hasSectionContent = Object.values(sections).some((v) => Array.isArray(v) && v.length > 0);
+        if (hasSectionContent || parsed.subjectKey || parsed.customLabel) {
+          subjectUpdates.push({
+            subjectKey: resolveValidOverlaySubjectKey(parsed, dayMeta),
+            customLabel: parsed.customLabel ?? row.label,
+            sections,
+          });
+        }
+      }
+    } else {
+      const { subjectRowLabels, contentHighlights } = partitionHighlightsForOverlaySubjectRow(
+        day.highlights,
+      );
+      const dayForSections: DayScheduleEntry = { ...day, highlights: contentHighlights };
+
+      const rowHintParsed =
+        subjectRowLabels.length > 0 ? parsedSubjectFromWeakRowLabel(subjectRowLabels[0]) : null;
+      const primaryParsed = parseProgramSchoolFields(
+        day.details || contentHighlights[0] || day.notes[0] || null,
+      );
+      const parsed = mergeOverlaySubjectWithRowHint(rowHintParsed, primaryParsed);
+
+      if (rowHintParsed?.subjectKey && parsed.subjectKey === rowHintParsed.subjectKey) {
+        dayMeta.overlayDeviationAnchoredToSubject = {
+          subjectKey: parsed.subjectKey,
+          customLabel: parsed.customLabel,
+          source: "highlight_subject_row",
+          rowsUsed: subjectRowLabels.slice(0, 4),
+        };
+        dayMeta.overlayDeviationDropped = subjectRowLabels.map((line) => ({
+          line,
+          reason: "highlight_routed_to_subject_row_not_intimen_bullet",
+        }));
+      }
+
+      const sections = computeOverlaySectionsPipeline(
+        dayForSections,
+        day,
+        dayMeta,
+        languageTrack,
+        multiTrack,
+      );
+      strongSections = overlayStrongSectionSignal(sections);
+      const hasSectionContent = Object.values(sections).some((v) => Array.isArray(v) && v.length > 0);
+      if (hasSectionContent || parsed.subjectKey || parsed.customLabel) {
+        subjectUpdates = [
+          {
+            subjectKey: resolveValidOverlaySubjectKey(parsed, dayMeta),
+            customLabel: parsed.customLabel ?? null,
+            sections,
+          },
+        ];
+      }
     }
-    const { sections: sDemoted, demoted } = demoteLanguageTaggedLinesInSections(afterMultiBlob, {
-      active: demoteLangActive,
-      resolvedTrack: languageTrack.resolvedTrack,
-    });
-    if (demoted) dayMeta.languageDemotedLines = demoted;
 
-    const { sections: sectionsFiltered, stripped } = filterWeakSubjectLinesFromSections(sDemoted);
-    if (stripped) dayMeta.weakSubjectLinesStripped = stripped;
-    const sections = sectionsFiltered;
-
-    const sectionSet = new Set(sectionValues(sections).map((x) => normalizeSpace(x)));
-    const strongSections =
-      Number(Boolean(sections.iTimen?.length)) +
-        Number(Boolean(sections.lekse?.length)) +
-        Number(Boolean(sections.husk?.length)) +
-        Number(Boolean(sections.proveVurdering?.length)) +
-        Number(Boolean(sections.ressurser?.length)) >=
-      2;
-    const hasSectionContent = Object.values(sections).some((v) => Array.isArray(v) && v.length > 0);
-    const subjectUpdates: SchoolWeekOverlaySubjectUpdate[] =
-      hasSectionContent || parsed.subjectKey || parsed.customLabel
-        ? [
-            {
-              subjectKey: resolveValidOverlaySubjectKey(parsed, dayMeta),
-              customLabel: parsed.customLabel ?? null,
-              sections,
-            },
-          ]
-        : [];
+    const sectionSet = new Set<string>();
+    for (const u of subjectUpdates) {
+      for (const v of sectionValues(u.sections)) {
+        sectionSet.add(normalizeSpace(v));
+      }
+    }
 
     const overlayDayKind = detectOverlayActionKind(day);
     const action = overlayDayKind.action;
