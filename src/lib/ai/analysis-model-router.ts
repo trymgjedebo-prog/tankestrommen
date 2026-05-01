@@ -37,8 +37,8 @@ export function getStrongAnalysisModel(): string {
 
 /**
  * Velger første modell basert på dokument-type og kilde.
- * - timetable → alltid sterk
- * - activity_plan / event_doc / text → lett
+ * - timetable / activity_plan → alltid sterk
+ * - event_doc / text → lett
  * - auto + tekst/PDF/Word → lett
  * - auto + bilde → lett (eskalering skjer i routed-analyse ved svakhet/feil)
  */
@@ -58,9 +58,9 @@ export function selectInitialAnalysisModel(
   }
   if (kind === "activity_plan") {
     return {
-      model: light,
-      tier: "light",
-      reason: "document_kind:activity_plan→light",
+      model: strong,
+      tier: "strong",
+      reason: "document_kind:activity_plan→strong",
     };
   }
   if (kind === "event_doc") {

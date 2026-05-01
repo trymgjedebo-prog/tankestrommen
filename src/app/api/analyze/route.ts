@@ -964,6 +964,13 @@ function candidatesFromSubjectList(
 /**
  * Tolker én programlinje til subject / subjectKey / customLabel og ev. flere kandidater.
  */
+function isLikelyOverlaySectionLeftLabel(raw: string): boolean {
+  const n = normalizeNorwegianLetters(normalizeSpace(raw));
+  return /^(i\s+timen|husk|lekse\w?|hoydepunkter|notater?|ta\s+med|frister?|prove\w?|prover|vurdering|ressurser|ekstra\s+beskjed|aktivitet)$/.test(
+    n,
+  );
+}
+
 function parseProgramSchoolFields(line: string | null): {
   subject: string | null;
   subjectKey: string | null;
@@ -978,7 +985,13 @@ function parseProgramSchoolFields(line: string | null): {
   };
   if (!line) return empty;
   const t = normalizeSpace(line);
-  const m = /^(.{2,50}?)\s*[–:—-]\s+(.+)$/.exec(t);
+  let m = /^(.{2,50}?)\s*[–:—-]\s+(.+)$/.exec(t);
+  if (m) {
+    const leftProbe = normalizeSpace(m[1]);
+    if (isLikelyOverlaySectionLeftLabel(leftProbe)) {
+      m = null;
+    }
+  }
   if (!m) {
     const alts = splitSubjectAlternatives(t);
     if (alts.length >= 2 && LANGUAGE_OR_TRACK_HINT_RE.test(t)) {
@@ -1012,6 +1025,56 @@ function parseProgramSchoolFields(line: string | null): {
     subjectKey: key,
     customLabel: normalizeSpace(`${left} – ${right}`),
     subjectCandidates: single,
+  };
+}
+
+/**
+ * A-plan-rader legger ofte fagnavn (f.eks. «Samfunnsfag») i highlights; det er fagrad, ikke «i timen»-innhold.
+ * Skiller disse fra faktiske høydepunkter slik de ikke legges i iTimen og deretter stripes som svake linjer.
+ */
+function partitionHighlightsForOverlaySubjectRow(highlights: string[]): {
+  subjectRowLabels: string[];
+  contentHighlights: string[];
+} {
+  const subjectRowLabels: string[] = [];
+  const contentHighlights: string[] = [];
+  for (const raw of highlights) {
+    const h = normalizeSpace(raw);
+    if (!h) continue;
+    if (isWeakSubjectTokenLine(h)) subjectRowLabels.push(h);
+    else contentHighlights.push(h);
+  }
+  return { subjectRowLabels, contentHighlights };
+}
+
+function parsedSubjectFromWeakRowLabel(label: string): ReturnType<typeof parseProgramSchoolFields> {
+  const t = cleanSubjectToken(normalizeSpace(label));
+  const key = slugifySubjectKey(t);
+  const single: SchoolSubjectCandidate[] =
+    key ? [{ subject: t, subjectKey: key, weight: 1 }] : [];
+  return {
+    subject: t,
+    subjectKey: key,
+    customLabel: t,
+    subjectCandidates: single,
+  };
+}
+
+function mergeOverlaySubjectWithRowHint(
+  rowHint: ReturnType<typeof parseProgramSchoolFields> | null,
+  primary: ReturnType<typeof parseProgramSchoolFields>,
+): ReturnType<typeof parseProgramSchoolFields> {
+  if (!rowHint?.subjectKey) return primary;
+  const bogusPrimarySubject =
+    (primary.subject && isLikelyOverlaySectionLeftLabel(primary.subject)) ||
+    (!primary.subjectKey && primary.subject && isWeakSubjectTokenLine(primary.subject));
+  if (primary.subjectKey && !bogusPrimarySubject) return primary;
+  return {
+    subjectKey: rowHint.subjectKey,
+    subject: rowHint.subject ?? primary.subject,
+    customLabel: rowHint.customLabel ?? primary.customLabel,
+    subjectCandidates:
+      rowHint.subjectCandidates.length > 0 ? rowHint.subjectCandidates : primary.subjectCandidates,
   };
 }
 
@@ -1774,23 +1837,113 @@ function segmentRawTextByWeekday(
   return out;
 }
 
-function detectOverlayActionKind(day: DayScheduleEntry): SchoolWeekOverlayDailyAction["action"] {
-  const text = normalizeNorwegianLetters(
-    [day.details ?? "", ...day.highlights, ...day.notes, ...day.rememberItems, ...day.deadlines]
-      .filter(Boolean)
-      .join(" "),
+/**
+ * Tekst for spesialdag-deteksjon: linjer som tydelig er en annen ukedag enn dagens rad,
+ * utelates (mot lekkasje fra ukesoversikt / nabodager).
+ */
+function buildDayLocalSpecialDaySignalText(day: DayScheduleEntry): {
+  norm: string;
+  excludedOtherDayLines: number;
+} {
+  const dayIdx = schoolWeekdayIndexFromLabel(day.dayLabel);
+  const chunks: string[] = [];
+  let excludedOtherDayLines = 0;
+
+  const considerLine = (line: string) => {
+    const t = normalizeSpace(line);
+    if (!t) return;
+    if (dayIdx) {
+      const lineDay = schoolWeekdayIndexFromLabel(t);
+      if (lineDay != null && lineDay !== dayIdx) {
+        excludedOtherDayLines += 1;
+        return;
+      }
+    }
+    chunks.push(t);
+  };
+
+  if (!dayIdx) {
+    const fallback = normalizeNorwegianLetters(
+      [day.details ?? "", ...day.highlights, ...day.notes, ...day.rememberItems, ...day.deadlines]
+        .filter(Boolean)
+        .join(" "),
+    );
+    return { norm: fallback, excludedOtherDayLines: 0 };
+  }
+
+  for (const part of (day.details ?? "").split(/\n+/)) considerLine(part);
+  for (const h of day.highlights) considerLine(h);
+  for (const n of day.notes) {
+    for (const part of (n ?? "").split(/\n+/)) considerLine(part);
+  }
+  for (const r of day.rememberItems) considerLine(r);
+  for (const d of day.deadlines) considerLine(d);
+
+  return { norm: normalizeNorwegianLetters(chunks.join(" ")), excludedOtherDayLines };
+}
+
+/** Hele skoleblokken erstattes — krever eksplisitte heldags-/dagsprogram-signaler, ikke bare fagtime-prøve. */
+function wholeDaySchoolReplacementSignals(norm: string): boolean {
+  if (/\b(heldagspr[oø]ve|heldags\s*prove)\b/.test(norm)) return true;
+  if (/\bforberedelsesdag\b/.test(norm)) return true;
+  if (/\b(turdag|skoletur|klassetur|ekskursjon|leirskole|studietur)\b/.test(norm)) return true;
+  if (/\b(aktivitetsdag|temadag|idrettsdag|opplevelsesdag)\b/.test(norm)) return true;
+  if (/\btentamensdag\b/.test(norm)) return true;
+  if (/\b(skriftlig|muntlig)\s+heldag\b/.test(norm)) return true;
+  if (/\bheldag\w*\s+.*\btentamen\b|\btentamen\b.*\bheldag\w*\b/.test(norm)) return true;
+  if (/\btentamen\b/.test(norm)) {
+    if (/\b(hele\s+dagen|hele\s+skoledagen|ingen\s+vanlige\s+timer|kun\s+tentamen)\b/.test(norm)) {
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+function overlayWeakSpecialDayHints(norm: string): boolean {
+  return /\b(tentamen|heldags|heldag|forberedelsesdag|turdag|aktivitetsdag|fridag|skolefri)\b/.test(
+    norm,
   );
-  if (/\b(fri|fridag|skolefri|planleggingsdag|elevfri)\b/.test(text)) {
-    return "remove_school_block";
+}
+
+function detectOverlayActionKind(day: DayScheduleEntry): {
+  action: SchoolWeekOverlayDailyAction["action"];
+  reason: string;
+  signalsLocalToDay: boolean;
+  excludedOtherDayLines: number;
+  hadWeakSpecialDayHints: boolean;
+} {
+  const { norm, excludedOtherDayLines } = buildDayLocalSpecialDaySignalText(day);
+  const signalsLocalToDay = schoolWeekdayIndexFromLabel(day.dayLabel) != null;
+  const hadWeakSpecialDayHints = overlayWeakSpecialDayHints(norm);
+
+  if (/\b(fri|fridag|skolefri|planleggingsdag|elevfri)\b/.test(norm)) {
+    return {
+      action: "remove_school_block",
+      reason: "local_remove_free_or_planning",
+      signalsLocalToDay,
+      excludedOtherDayLines,
+      hadWeakSpecialDayHints,
+    };
   }
-  if (
-    /\b(heldagsprøve|heldagsprove|forberedelsesdag|tentamen|turdag|aktivitetsdag)\b/.test(
-      text,
-    )
-  ) {
-    return "replace_school_block";
+  if (wholeDaySchoolReplacementSignals(norm)) {
+    return {
+      action: "replace_school_block",
+      reason: "local_whole_day_replacement_signal",
+      signalsLocalToDay,
+      excludedOtherDayLines,
+      hadWeakSpecialDayHints,
+    };
   }
-  return "enrich_existing_school_block";
+  return {
+    action: "enrich_existing_school_block",
+    reason: excludedOtherDayLines
+      ? "no_local_whole_day_signal_after_other_day_filter"
+      : "no_local_whole_day_signal",
+    signalsLocalToDay,
+    excludedOtherDayLines,
+    hadWeakSpecialDayHints,
+  };
 }
 
 function compactLines(lines: Array<string | null | undefined>, max = 6): string[] {
@@ -2656,11 +2809,23 @@ type OverlayNoiseFilterDebug = {
         multiLanguageBlobsDemoted?: number;
         overlayDeviationLineAccepted?: string[];
         overlayDeviationLineDropped?: Array<{ line: string; reason: string }>;
+        overlayDeviationDropped?: Array<{ line: string; reason: string }>;
+        overlayDeviationAnchoredToSubject?: {
+          subjectKey: string | null;
+          customLabel: string | null;
+          source: "highlight_subject_row";
+          rowsUsed: string[];
+        };
         overlayDeviationSectionAssigned?: Array<{
           fragment: string;
           section: string;
           from: string;
         }>;
+        overlayDaySpecialDayAccepted?: boolean;
+        overlayDaySpecialDayRejected?: boolean;
+        overlayDaySpecialDayReason?: string;
+        overlayDaySignalsLocalToDay?: boolean;
+        overlayDayExcludedOtherDayLines?: number;
       }
     >
   >;
@@ -2723,10 +2888,32 @@ function buildSchoolWeekOverlayProposal(
     };
     noiseDebug.days[idx] = dayMeta;
 
-    const parsed = parseProgramSchoolFields(
-      day.details || day.highlights[0] || day.notes[0] || null,
+    const { subjectRowLabels, contentHighlights } = partitionHighlightsForOverlaySubjectRow(
+      day.highlights,
     );
-    let sectionsRaw = buildOverlaySections(day);
+    const dayForSections: DayScheduleEntry = { ...day, highlights: contentHighlights };
+
+    const rowHintParsed =
+      subjectRowLabels.length > 0 ? parsedSubjectFromWeakRowLabel(subjectRowLabels[0]) : null;
+    const primaryParsed = parseProgramSchoolFields(
+      day.details || contentHighlights[0] || day.notes[0] || null,
+    );
+    const parsed = mergeOverlaySubjectWithRowHint(rowHintParsed, primaryParsed);
+
+    if (rowHintParsed?.subjectKey && parsed.subjectKey === rowHintParsed.subjectKey) {
+      dayMeta.overlayDeviationAnchoredToSubject = {
+        subjectKey: parsed.subjectKey,
+        customLabel: parsed.customLabel,
+        source: "highlight_subject_row",
+        rowsUsed: subjectRowLabels.slice(0, 4),
+      };
+      dayMeta.overlayDeviationDropped = subjectRowLabels.map((line) => ({
+        line,
+        reason: "highlight_routed_to_subject_row_not_intimen_bullet",
+      }));
+    }
+
+    let sectionsRaw = buildOverlaySections(dayForSections);
     const inlineLabels = countInlineSectionLabels(day.details);
     dayMeta.inlineSectionLabelsDetected = inlineLabels;
 
@@ -2780,7 +2967,19 @@ function buildSchoolWeekOverlayProposal(
           ]
         : [];
 
-    const action = detectOverlayActionKind(day);
+    const overlayDayKind = detectOverlayActionKind(day);
+    const action = overlayDayKind.action;
+    dayMeta.overlayDaySpecialDayReason = overlayDayKind.reason;
+    dayMeta.overlayDaySignalsLocalToDay = overlayDayKind.signalsLocalToDay;
+    if (overlayDayKind.excludedOtherDayLines) {
+      dayMeta.overlayDayExcludedOtherDayLines = overlayDayKind.excludedOtherDayLines;
+    }
+    if (action === "replace_school_block" || action === "remove_school_block") {
+      dayMeta.overlayDaySpecialDayAccepted = true;
+    } else if (overlayDayKind.hadWeakSpecialDayHints) {
+      dayMeta.overlayDaySpecialDayRejected = true;
+    }
+
     const summaryCandidate = pickDayOverlaySummary(day, sectionSet, dayMeta.summaryTrace);
     const shortSignal =
       action === "replace_school_block" || action === "remove_school_block"
