@@ -888,7 +888,7 @@ const LANGUAGE_OR_TRACK_HINT_RE =
 
 /** Vanlige programfag (korte token – brukes til vekt-profil, ikke hard krav). */
 const PROGRAM_SUBJECT_TOKEN_RE =
-  /\b(matematikk|naturfag|samfunnsfag|norsk|engelsk|tysk|spansk|fransk|krle|rle|kunst|musikk|kor|korps|kroppsoving|kroppsøving|matte|natur|samf|historie|geografi|biologi|fysikk|kjemi|informasjon|programmering)\b/i;
+  /\b(matematikk|naturfag|samfunnsfag|norsk|engelsk|tysk|spansk|fransk|polsk|krle|rle|kunst|musikk|kor|korps|kroppsoving|kroppsøving|matte|natur|samf|historie|geografi|biologi|fysikk|kjemi|informasjon|programmering)\b/i;
 
 function lineHasConcreteAssessmentAnchorForStandalone(norm: string, raw: string): boolean {
   if (
@@ -2337,7 +2337,7 @@ function isWeakSubjectTokenLine(text: string): boolean {
   if (/\b(kap\.|side\s+\d|s\.\s*\d)/i.test(t)) return false;
   if (/^(k\s*[&\/]\s*h|k\s+og\s+h\b|kunst\s+og\s+h)/i.test(t)) return true;
   if (
-    /^(krle|rle|spansk|tysk|fransk|norsk|engelsk|matte|musikk|kunst|naturfag|samfunnsfag|historie|geografi)$/i.test(
+    /^(krle|rle|spansk|polsk|tysk|fransk|norsk|engelsk|matte|musikk|kunst|naturfag|samfunnsfag|historie|geografi)$/i.test(
       norm,
     )
   )
@@ -3316,6 +3316,13 @@ const EXPLICIT_LINE_SUBJECT_PATTERNS: Array<{
   label: string;
   reason: string;
 }> = [
+  /** Konservativt: bare linjer som starter med eksplisitt «Polsk:» + innhold (ikke bare «Jobbe med yrker»). */
+  {
+    re: /^[-*•·\s]*polsk\s*:\s*.+/i,
+    subjectKey: "polsk",
+    label: "Polsk",
+    reason: "explicit_polsk_colon_line",
+  },
   {
     re: /\b(tyskpr[oø]ve|til\s+tyskpr[oø]v(en)?|skriftlig\s+tyskpr[oø]ve|tysk\s+pr[oø]ve)\b/,
     subjectKey: "tysk",
@@ -3373,6 +3380,32 @@ function overlaySubjectIndexByKey(
   return updates.findIndex((u) => u.subjectKey === subjectKey);
 }
 
+function overlayPolskTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
+  return updates.findIndex(
+    (u) =>
+      u.subjectKey === "polsk" ||
+      /\bpolsk\b/i.test(normalizeNorwegianLetters(u.customLabel ?? "")),
+  );
+}
+
+function overlayTyskTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
+  return updates.findIndex(
+    (u) =>
+      u.subjectKey === "tysk" ||
+      /\btysk\b/i.test(normalizeNorwegianLetters(u.customLabel ?? "")),
+  );
+}
+
+/** Finn målrad når eksplisitt linje-signal bruker subjectKey (slug), men rad kan ha customLabel-variasjoner. */
+function overlayExplicitLineTargetIndex(
+  updates: SchoolWeekOverlaySubjectUpdate[],
+  subjectKey: string,
+): number {
+  if (subjectKey === "tysk") return overlayTyskTargetIndex(updates);
+  if (subjectKey === "polsk") return overlayPolskTargetIndex(updates);
+  return overlaySubjectIndexByKey(updates, subjectKey);
+}
+
 function targetSectionForExplicitSubjectLine(
   line: string,
   fromSec: keyof SchoolWeekOverlaySections,
@@ -3426,7 +3459,7 @@ function reassignExplicitStrongSubjectLinesAmongTableSubjects(
         if (!hit) continue;
         detected.push({ line: t, subjectKey: hit.subjectKey, reason: hit.reason });
         if (hit.subjectKey === fromKey) continue;
-        const toIdx = overlaySubjectIndexByKey(subjectUpdates, hit.subjectKey);
+        const toIdx = overlayExplicitLineTargetIndex(subjectUpdates, hit.subjectKey);
         if (toIdx < 0 || toIdx === fromIdx) continue;
 
         const toSec = targetSectionForExplicitSubjectLine(t, fromSec);
@@ -3488,14 +3521,6 @@ function reassignExplicitStrongSubjectLinesAmongTableSubjects(
     removeOne(subjectUpdates[m.fromIdx].sections, m.fromSec, m.line);
     addLine(subjectUpdates[m.toIdx].sections, m.toSec, m.line);
   }
-}
-
-function overlayTyskTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
-  return updates.findIndex(
-    (u) =>
-      u.subjectKey === "tysk" ||
-      /\btysk\b/i.test(normalizeNorwegianLetters(u.customLabel ?? "")),
-  );
 }
 
 function overlaySamfunnsfagTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
@@ -4011,6 +4036,7 @@ function inferHomeworkSubjectLabel(
     if (/\b(matte|matematikk)\b/.test(n)) return "Matematikk";
     if (/\bfransk\b/.test(n)) return "Fransk";
     if (/\bspansk\b/.test(n)) return "Spansk";
+    if (/\bpolsk\b/.test(n)) return "Polsk";
     if (/\btysk\b/.test(n)) return "Tysk";
     if (/\bnorsk\b/.test(n)) return "Norsk";
     if (/\bengelsk\b/.test(n)) return "Engelsk";
@@ -4028,6 +4054,7 @@ function inferHomeworkSubjectLabel(
   if (/\bengelskpr[oø]ve\b/.test(t)) return "Engelsk";
   if (/\bfransk\b/.test(t)) return "Fransk";
   if (/\bspansk\b/.test(t)) return "Spansk";
+  if (/\bpolsk\b/.test(t)) return "Polsk";
   if (/\btysk\b/.test(t)) return "Tysk";
   if (/\bnorsk\b/.test(t)) return "Norsk";
   if (/\bengelsk\b/.test(t)) return "Engelsk";

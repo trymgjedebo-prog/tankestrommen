@@ -19,7 +19,7 @@ const GENERIC_SUBJECT_BUCKET_RE =
   /^(sprak|språk|fremmedsprak|fremmedspråk|valgfag|sprakvalg|språkvalg|felles|aktivitet|uke|programfag|program|linje|modul|moduler|studieretning)\b/i;
 
 const PROGRAM_SUBJECT_TOKEN_RE =
-  /\b(matematikk|naturfag|samfunnsfag|norsk|engelsk|tysk|spansk|fransk|krle|rle|kunst|musikk|kor|korps|kroppsoving|kroppsøving|matte|natur|samf|historie|geografi|biologi|fysikk|kjemi|informasjon|programmering)\b/i;
+  /\b(matematikk|naturfag|samfunnsfag|norsk|engelsk|tysk|spansk|fransk|polsk|krle|rle|kunst|musikk|kor|korps|kroppsoving|kroppsøving|matte|natur|samf|historie|geografi|biologi|fysikk|kjemi|informasjon|programmering)\b/i;
 
 function cleanSubjectToken(raw: string): string {
   return normalizeSpace(raw.replace(/[.,;:]+$/g, ""));
@@ -89,7 +89,7 @@ function isLanguageOnlyOverlayRowLabel(label: string): boolean {
   const raw = normalizeSpace(label).replace(/^\s*[-*•·]\s*/, "");
   const n = normalizeNorwegianLetters(raw);
   return (
-    /^(spansk|tysk|fransk|engelsk)$/i.test(n) ||
+    /^(spansk|polsk|tysk|fransk|engelsk)$/i.test(n) ||
     /^norsk\s+fordypning$/i.test(n)
   );
 }
@@ -152,7 +152,7 @@ function isWeakSubjectTokenLine(text: string): boolean {
   if (/\b(kap\.|side\s+\d|s\.\s*\d)/i.test(t)) return false;
   if (/^(k\s*[&\/]\s*h|k\s+og\s+h\b|kunst\s+og\s+h)/i.test(t)) return true;
   if (
-    /^(krle|rle|spansk|tysk|fransk|norsk|engelsk|matte|musikk|kunst|naturfag|samfunnsfag|historie|geografi)$/i.test(
+    /^(krle|rle|spansk|polsk|tysk|fransk|norsk|engelsk|matte|musikk|kunst|naturfag|samfunnsfag|historie|geografi)$/i.test(
       norm,
     )
   )
@@ -172,7 +172,7 @@ export function expandEmbeddedSubjectHeadersInDetails(details: string | null): s
   let t = details.replace(/\r\n/g, "\n");
   t = t.replace(/\t+/g, "\n");
   const subj =
-    "Samfunnsfag|Naturfag|Norsk|Engelsk|Tysk|Spansk|Fransk|Matematikk|Matte|KRLE|RLE|Kunst|Musikk|Kor(?:ps)?|Kroppsøving|Kroppsoving|Historie|Geografi|Biologi|Fysikk|Kjemi|Informasjon|Programmering|Natur";
+    "Samfunnsfag|Naturfag|Norsk|Engelsk|Tysk|Spansk|Fransk|Polsk|Matematikk|Matte|KRLE|RLE|Kunst|Musikk|Kor(?:ps)?|Kroppsøving|Kroppsoving|Historie|Geografi|Biologi|Fysikk|Kjemi|Informasjon|Programmering|Natur";
   const re = new RegExp(`(\\s+)(?=(?:[-*•·]\\s*)?(?:${subj})\\s*:)`, "gi");
   t = t.replace(re, "\n");
   return t;

@@ -91,6 +91,29 @@ describe("splitDetailsIntoTableSubjectRowsWithMeta", () => {
     expect(m!.preamble.some((l) => /mars-bad/i.test(l))).toBe(false);
   });
 
+  it("splitter Spansk, Polsk og Tysk som tre egne fag-rader (polsk-lekse ikke limt inn under Tysk)", () => {
+    const details = [
+      "- Spansk:",
+      "Les kapittel 2.",
+      "- Polsk:",
+      "Jobbe med yrker",
+      "jobbe med yrkene i boka vår.",
+      "- Tysk:",
+      "I timen: Skriftlig tyskprøve.",
+      "Ha med blyant og viskelær.",
+    ].join("\n");
+
+    const m = splitDetailsIntoTableSubjectRowsWithMeta(details);
+    expect(m).not.toBeNull();
+    const pol = m!.rows.find((r) => /^polsk$/i.test(r.label.trim()))!;
+    const ty = m!.rows.find((r) => /^tysk$/i.test(r.label.trim()))!;
+    expect(pol.body).toContain("Jobbe med yrker");
+    expect(pol.body).toContain("jobbe med yrkene i boka");
+    expect(ty.body).toContain("tyskprøve");
+    expect(ty.body).toContain("blyant");
+    expect(ty.body).not.toMatch(/yrkene i boka/i);
+  });
+
   it("mars-bad i preamble havner på Samfunnsfag selv om Spansk er første fagrad", () => {
     const details = [
       "I timen: mars-bad!",
