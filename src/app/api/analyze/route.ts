@@ -2215,6 +2215,11 @@ function sectionsFromLabeledBlob(
     }
     if (current) {
       push(current, line);
+    } else {
+      const ln = normalizeSpace(line);
+      if (ln.length >= 2 && !isLikelySectionLabelLine(ln)) {
+        push("iTimen", ln);
+      }
     }
   }
   return out;
@@ -3138,6 +3143,19 @@ type OverlayNoiseFilterDebug = {
           overlaySubjectAnchorOverridden: boolean;
           overlaySubjectAnchorOverrideReason: string | null;
         }>;
+        /** Linjer som ble flyttet fra feil fagrad (før omfordeling). */
+        overlayOrphanLinesBeforeAssignment?: string[];
+        overlayOrphanLineAssignedToSubject?: Array<{
+          line: string;
+          subjectKey: string;
+          fromSubjectKey: string;
+          reason: string;
+        }>;
+        overlayOrphanLineAssignmentReason?: string;
+        overlaySubjectUpdatesBuiltAfterOrphanAssignment?: number;
+        /** Fylles i portal-bundle etter task-bygging; kandidater her etter omfordeling. */
+        overlayHomeworkCandidatesAfterOrphanAssignment?: number;
+        overlayTasksBuiltAfterOrphanAssignment?: number;
       }
     >
   >;
@@ -3271,6 +3289,204 @@ function resolveValidOverlaySubjectKey(
 
   bumpDayMetaCount(dayMeta, "overlaySubjectUpdateFallbackKeyUsed");
   return OVERLAY_SUBJECT_KEY_FALLBACK;
+}
+
+const MOVABLE_ORPHAN_SECTIONS: (keyof SchoolWeekOverlaySections)[] = [
+  "ekstraBeskjed",
+  "husk",
+  "iTimen",
+  "proveVurdering",
+];
+
+function overlayTyskTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
+  return updates.findIndex(
+    (u) =>
+      u.subjectKey === "tysk" ||
+      /\btysk\b/i.test(normalizeNorwegianLetters(u.customLabel ?? "")),
+  );
+}
+
+function overlaySamfunnsfagTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
+  return updates.findIndex(
+    (u) =>
+      u.subjectKey === "samfunnsfag" ||
+      /^samf$/i.test(normalizeSpace(u.customLabel ?? "")) ||
+      /\bsamfunnsfag\b/i.test(normalizeNorwegianLetters(u.customLabel ?? "")),
+  );
+}
+
+/** Sterk nok til å knytte linjen til Tysk-raden (A-plan / prøve / utstyr til prøve). */
+function lineSuggestsTyskTableSubject(line: string): boolean {
+  const n = normalizeNorwegianLetters(line);
+  if (/\btyskpr[oø]v/i.test(n)) return true;
+  if (/\btil\s+tyskpr[oø]v/i.test(n)) return true;
+  if (/\bskriftlig\s+tyskpr[oø]v/i.test(n)) return true;
+  if (/\btysk\s+pr[oø]v/i.test(n)) return true;
+  return false;
+}
+
+/** Praktisk avvik / svøm / retur til språktime — typisk samfunnsfag-blokk i denne typen plan. */
+function lineSuggestsSamfunnsfagTableSubject(line: string): boolean {
+  const n = normalizeNorwegianLetters(line);
+  const t = normalizeSpace(line);
+  if (isLikelyAdminOrRoutineText(t)) return false;
+  if (/\bmars\s*-?\s*bad\b/.test(n)) return true;
+  if (/\bbadet[oø]y\b/.test(n)) return true;
+  if (/\bh[aå]ndkle\b/.test(n) && /\b(mat|bad|bade)\b/.test(n)) return true;
+  if (/\bsv[oø]m(?:ming|medrakt)?\b/.test(n) && t.length < 100) return true;
+  if (sentenceLooksLikeScheduleReturnOrTiming(t) && /\bspr[aå]k/i.test(n)) return true;
+  if (/\bm[oø]t\s+presis\b/.test(n)) return true;
+  if (/\bpresis\s+(kl\.|kl\s)/i.test(t)) return true;
+  return false;
+}
+
+function inferOrphanRedistributionTarget(
+  line: string,
+  tyskIdx: number,
+  samfIdx: number,
+): { kind: "tysk" | "samfunnsfag"; reason: string } | null {
+  const ty = tyskIdx >= 0 && lineSuggestsTyskTableSubject(line);
+  const sa = samfIdx >= 0 && lineSuggestsSamfunnsfagTableSubject(line);
+  if (ty && sa) {
+    if (/\btyskpr[oø]v/i.test(normalizeNorwegianLetters(line))) {
+      return { kind: "tysk", reason: "tyskprøve_overlaps_pool_context" };
+    }
+    return { kind: "samfunnsfag", reason: "pool_day_over_tysk_token_ambiguous" };
+  }
+  if (ty) return { kind: "tysk", reason: "tyskprøve_or_tysk_material" };
+  if (sa) return { kind: "samfunnsfag", reason: "pool_swim_return_or_mars_bad" };
+  return null;
+}
+
+function targetSectionKeyForRedistributedLine(
+  line: string,
+  kind: "tysk" | "samfunnsfag",
+): keyof SchoolWeekOverlaySections {
+  const n = normalizeNorwegianLetters(line);
+  if (kind === "tysk") {
+    if (/\bskriftlig\s+tyskpr[oø]v\b/.test(n)) return "proveVurdering";
+    if (/\btil\s+tyskpr[oø]v/i.test(n) || /\b(blyant|viskelær)\b/.test(n)) return "husk";
+    if (/\btyskpr[oø]v/i.test(n) && !/\btil\s+tyskpr/i.test(n)) return "proveVurdering";
+    return "husk";
+  }
+  if (/^husk\b/i.test(normalizeSpace(line)) || /\b(husk|ta med|ha med)\s*:/i.test(line)) {
+    return "husk";
+  }
+  if (/\bbadet[oø]y\b/.test(n) || (/\bh[aå]ndkle\b/.test(n) && /\bmat\b/.test(n))) return "husk";
+  if (/\bmars\s*-?\s*bad\b/.test(n)) return "iTimen";
+  if (sentenceLooksLikeScheduleReturnOrTiming(line)) return "ekstraBeskjed";
+  if (/\bm[oø]t\s+presis\b/.test(n)) return "iTimen";
+  return "ekstraBeskjed";
+}
+
+/**
+ * Når flere fag-rader finnes men praktiske linjer har havnet i ekstra/husk på «feil» rad
+ * eller i `other`, flytt til nærmeste plausible fag etter nøkkelord og tabellstruktur.
+ */
+function redistributeOrphanOverlayLinesAmongTableSubjects(
+  subjectUpdates: SchoolWeekOverlaySubjectUpdate[],
+  policy: OverlayTextPolicy,
+  dayMeta: NonNullable<OverlayNoiseFilterDebug["days"][string]>,
+): void {
+  if (subjectUpdates.length < 2) return;
+
+  const tyskIdx = overlayTyskTargetIndex(subjectUpdates);
+  const samfIdx = overlaySamfunnsfagTargetIndex(subjectUpdates);
+  if (tyskIdx < 0 && samfIdx < 0) return;
+
+  const cap = policy.sectionLineCap;
+  const ek = policy.ekstraPoolCap;
+
+  type Move = {
+    line: string;
+    fromIdx: number;
+    fromSec: keyof SchoolWeekOverlaySections;
+    toIdx: number;
+    toSec: keyof SchoolWeekOverlaySections;
+    reason: string;
+  };
+  const moves: Move[] = [];
+  const beforeLines: string[] = [];
+
+  for (let fromIdx = 0; fromIdx < subjectUpdates.length; fromIdx++) {
+    const su = subjectUpdates[fromIdx];
+    const fromKey = su.subjectKey;
+    for (const fromSec of MOVABLE_ORPHAN_SECTIONS) {
+      const arr = su.sections[fromSec];
+      if (!arr?.length) continue;
+      for (const line of arr) {
+        const t = normalizeSpace(line);
+        if (!t || isLikelyAdminOrRoutineText(t)) continue;
+        const hit = inferOrphanRedistributionTarget(line, tyskIdx, samfIdx);
+        if (!hit) continue;
+        const toIdx = hit.kind === "tysk" ? tyskIdx : samfIdx;
+        if (toIdx < 0 || toIdx === fromIdx) continue;
+        if (subjectUpdates[toIdx].subjectKey === fromKey) continue;
+
+        const toSec = targetSectionKeyForRedistributedLine(line, hit.kind);
+        const reason = `${hit.reason}→${subjectUpdates[toIdx].subjectKey}.${toSec}`;
+        beforeLines.push(t);
+        moves.push({ line: t, fromIdx, fromSec, toIdx, toSec, reason });
+      }
+    }
+  }
+
+  if (!moves.length) return;
+
+  const dedupe = new Set<string>();
+  const uniqueMoves = moves.filter((m) => {
+    const k = `${m.fromIdx}|${m.fromSec}|${m.line}`;
+    if (dedupe.has(k)) return false;
+    dedupe.add(k);
+    return true;
+  });
+  if (!uniqueMoves.length) return;
+
+  dayMeta.overlayOrphanLinesBeforeAssignment = [...new Set(beforeLines)];
+  dayMeta.overlayOrphanLineAssignedToSubject = uniqueMoves.map((m) => ({
+    line: m.line,
+    subjectKey: subjectUpdates[m.toIdx].subjectKey,
+    fromSubjectKey: subjectUpdates[m.fromIdx].subjectKey,
+    reason: m.reason,
+  }));
+  dayMeta.overlayOrphanLineAssignmentReason = `redistributed_${uniqueMoves.length}_lines`;
+
+  const removeOne = (
+    sections: SchoolWeekOverlaySections,
+    sec: keyof SchoolWeekOverlaySections,
+    line: string,
+  ) => {
+    const arr = sections[sec];
+    if (!arr) return;
+    const idx = arr.findIndex((x) => normalizeSpace(x) === line);
+    if (idx >= 0) {
+      const next = arr.filter((_, i) => i !== idx);
+      if (next.length) sections[sec] = compactLines(next, sec === "ekstraBeskjed" ? ek : cap);
+      else delete sections[sec];
+    }
+  };
+
+  const addLine = (
+    sections: SchoolWeekOverlaySections,
+    sec: keyof SchoolWeekOverlaySections,
+    line: string,
+  ) => {
+    const max = sec === "ekstraBeskjed" ? ek : cap;
+    const cur = sections[sec] ?? [];
+    sections[sec] = compactLines([...cur, line], max);
+  };
+
+  for (const m of uniqueMoves) {
+    removeOne(subjectUpdates[m.fromIdx].sections, m.fromSec, m.line);
+    addLine(subjectUpdates[m.toIdx].sections, m.toSec, m.line);
+  }
+
+  dayMeta.overlaySubjectUpdatesBuiltAfterOrphanAssignment = subjectUpdates.length;
+  let hw = 0;
+  for (const u of subjectUpdates) {
+    hw += collectHomeworkCandidateLinesFromSections(u.sections).length;
+  }
+  dayMeta.overlayHomeworkCandidatesAfterOrphanAssignment = hw;
 }
 
 function buildSchoolWeekOverlayProposal(
@@ -3409,6 +3625,9 @@ function buildSchoolWeekOverlayProposal(
             sections,
           });
         }
+      }
+      if (rowAnchoredRows.length >= 1 && subjectUpdates.length >= 2) {
+        redistributeOrphanOverlayLinesAmongTableSubjects(subjectUpdates, policy, dayMeta);
       }
     } else {
       const { subjectRowLabels, contentHighlights } = partitionHighlightsForOverlaySubjectRow(
@@ -4151,7 +4370,10 @@ function toPortalBundle(
       }
       for (const [dayIdx, n] of taskCountByDay) {
         const dm = schoolWeekOverlayNoiseDebug.days[dayIdx];
-        if (dm) dm.overlayTasksBuiltFromRows = n;
+        if (dm) {
+          dm.overlayTasksBuiltFromRows = n;
+          dm.overlayTasksBuiltAfterOrphanAssignment = n;
+        }
       }
     }
     if (schoolWeekOverlayProposal && overlayHomeworkDebug) {
