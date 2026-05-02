@@ -84,6 +84,46 @@ function isLikelyFravaerOrAdminPreambleLine(line: string): boolean {
  * Linjer før første fagoverskrift som egentlig hører til en fagkolonne (DOCX-rekkefølge),
  * f.eks. «I timen: mars-bad» før første «- Naturfag:». Legges inn i relevant rad i stedet for preamble.
  */
+/** Ren språkfag-rad (typisk kolonne 1 i timeplan) — ikke default for praktisk avvik/preamble. */
+function isLanguageOnlyOverlayRowLabel(label: string): boolean {
+  const raw = normalizeSpace(label).replace(/^\s*[-*•·]\s*/, "");
+  const n = normalizeNorwegianLetters(raw);
+  return (
+    /^(spansk|tysk|fransk|engelsk)$/i.test(n) ||
+    /^norsk\s+fordypning$/i.test(n)
+  );
+}
+
+/**
+ * Velg rad for orphan-preamble (mars-bad, husk, …) uten å bruke blindt `rows[0]`
+ * (som ofte er Spansk/Tysk og ga feil subjectKey i overlay).
+ */
+function findPreambleMergeTargetRowIndex(
+  rows: Array<{ label: string; body: string }>,
+  usableLines: string[],
+): number {
+  const nLabel = (s: string) => normalizeNorwegianLetters(normalizeSpace(s));
+  const nLine = (s: string) => normalizeNorwegianLetters(s);
+
+  const hasPoolOrBadDay = usableLines.some((l) =>
+    /\b(mars-?bad|mars\s+bad|sv[oø]m|bade\b|badet[oø]y|h[aå]ndkle)\b/.test(nLine(l)),
+  );
+
+  const samIdx = rows.findIndex((r) => {
+    const rl = nLabel(r.label);
+    return /\bsamfunnsfag\b/.test(rl) || /^samf\.?$/i.test(rl);
+  });
+  if (hasPoolOrBadDay && samIdx >= 0) return samIdx;
+
+  const natIdx = rows.findIndex((r) => /\bnaturfag\b/.test(nLabel(r.label)));
+  if (hasPoolOrBadDay && natIdx >= 0) return natIdx;
+
+  const nonLangIdx = rows.findIndex((r) => !isLanguageOnlyOverlayRowLabel(r.label));
+  if (nonLangIdx >= 0) return nonLangIdx;
+
+  return 0;
+}
+
 /** @returns true hvis ikke-admin preamble-linjer ble flyttet inn i rader (da skal de ikke telle som orphan preamble). */
 function mergeOrphanPreambleIntoSubjectRows(
   preamble: string[],
@@ -95,13 +135,8 @@ function mergeOrphanPreambleIntoSubjectRows(
     .filter((l) => l && !isLikelyFravaerOrAdminPreambleLine(l));
   if (!usable.length) return false;
 
-  const n = (s: string) => normalizeNorwegianLetters(s);
-  const swimOrSprakContext = usable.some((l) =>
-    /\b(mars|bad|bade|sv[oø]m|spr[aå]k|h[aå]ndkle|badet[oø]y)\b/.test(n(l)),
-  );
-  const samIdx = rows.findIndex((r) => /\bsamfunnsfag\b/.test(n(r.label)));
-  const target =
-    swimOrSprakContext && samIdx >= 0 ? rows[samIdx] : rows[0];
+  const targetIdx = findPreambleMergeTargetRowIndex(rows, usable);
+  const target = rows[targetIdx] ?? rows[0];
   const prefix = usable.join("\n").trim();
   const rest = target.body.trim();
   target.body = rest ? `${prefix}\n${rest}` : prefix;

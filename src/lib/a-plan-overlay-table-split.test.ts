@@ -90,4 +90,22 @@ describe("splitDetailsIntoTableSubjectRowsWithMeta", () => {
     expect(m!.preamble.some((l) => /Fravær|kontaktlærer/i.test(l))).toBe(true);
     expect(m!.preamble.some((l) => /mars-bad/i.test(l))).toBe(false);
   });
+
+  it("mars-bad i preamble havner på Samfunnsfag selv om Spansk er første fagrad", () => {
+    const details = [
+      "I timen: mars-bad!",
+      "Husk: badetøy.",
+      "- Spansk:",
+      "Les kapittel 2.",
+      "- Samfunnsfag:",
+      "Vanlig undervisning.",
+    ].join("\n");
+    const m = splitDetailsIntoTableSubjectRowsWithMeta(details);
+    expect(m).not.toBeNull();
+    const spansk = m!.rows.find((r) => /^spansk$/i.test(r.label.trim()))!;
+    const samf = m!.rows.find((r) => /samfunnsfag/i.test(r.label))!;
+    expect(spansk.body).not.toContain("mars-bad");
+    expect(samf.body).toContain("mars-bad");
+    expect(samf.body).toContain("badetøy");
+  });
 });

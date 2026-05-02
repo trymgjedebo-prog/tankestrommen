@@ -3130,6 +3130,14 @@ type OverlayNoiseFilterDebug = {
         overlayTableSplitRows?: Array<{ label: string; body: string }>;
         /** true når rader etter admin-strip har færre ikke-tomme kropper enn split ga rader. */
         overlayRowAnchorCollapsed?: boolean;
+        /** Per rad i tabell-split: spor faganker vs. første innholdslinje (debug). */
+        overlaySubjectUpdateTrace?: Array<{
+          overlaySubjectUpdateSourceRow: string;
+          overlaySubjectUpdateInitialSubjectKey: string | null;
+          overlaySubjectUpdateFinalSubjectKey: string;
+          overlaySubjectAnchorOverridden: boolean;
+          overlaySubjectAnchorOverrideReason: string | null;
+        }>;
       }
     >
   >;
@@ -3205,6 +3213,23 @@ function bumpDayMetaCount(
   key: "overlaySubjectUpdateMissingKeyRecovered" | "overlaySubjectUpdateFallbackKeyUsed",
 ) {
   dayMeta[key] = (dayMeta[key] ?? 0) + 1;
+}
+
+/** Uten sideeffekter (bump): hva første innholdslinje antyder av subjectKey — til debug-sammenligning. */
+function peekBodyInferredSubjectKey(
+  primary: ReturnType<typeof parseProgramSchoolFields>,
+): string | null {
+  if (primary.subjectKey?.trim()) return primary.subjectKey.trim();
+  if (primary.subject?.trim()) {
+    const k = slugifySubjectKey(primary.subject);
+    if (k) return k;
+  }
+  if (primary.customLabel?.trim()) {
+    const lbl = primary.customLabel.trim();
+    const head = lbl.split(/\s*[–—:]\s+/)[0]?.trim() ?? lbl;
+    return slugifySubjectKey(head) ?? slugifySubjectKey(lbl);
+  }
+  return null;
 }
 
 /**
@@ -3338,14 +3363,32 @@ function buildSchoolWeekOverlayProposal(
           rememberItems: [],
           deadlines: [],
         };
-        const rowHintParsed = parsedSubjectFromWeakRowLabel(row.label);
+        const rowAnchor = parsedSubjectFromWeakRowLabel(row.label);
         const firstBodyLine =
           row.body
             .split(/\n+/)
             .map(normalizeSpace)
             .find((l) => l && !isLikelyAdminOrRoutineText(l)) ?? null;
         const primaryParsed = parseProgramSchoolFields(firstBodyLine);
-        const parsed = mergeTableRowOverlaySubject(rowHintParsed, primaryParsed);
+        const merged = mergeTableRowOverlaySubject(rowAnchor, primaryParsed);
+        const parsedForKey = rowAnchor.subjectKey ? rowAnchor : merged;
+        const finalSubjectKey = resolveValidOverlaySubjectKey(parsedForKey, dayMeta);
+        const customLabelOut = (rowAnchor.subjectKey ? rowAnchor.customLabel : merged.customLabel) ?? row.label;
+        const bodyInferKey = peekBodyInferredSubjectKey(primaryParsed);
+        const anchorOverridden = Boolean(
+          rowAnchor.subjectKey && bodyInferKey && bodyInferKey !== finalSubjectKey,
+        );
+        const anchorOverrideReason = anchorOverridden
+          ? `prefer_table_row_anchor:${finalSubjectKey}_not_body_line_infer:${bodyInferKey}`
+          : null;
+        if (!dayMeta.overlaySubjectUpdateTrace) dayMeta.overlaySubjectUpdateTrace = [];
+        dayMeta.overlaySubjectUpdateTrace.push({
+          overlaySubjectUpdateSourceRow: row.label,
+          overlaySubjectUpdateInitialSubjectKey: rowAnchor.subjectKey ?? null,
+          overlaySubjectUpdateFinalSubjectKey: finalSubjectKey,
+          overlaySubjectAnchorOverridden: anchorOverridden,
+          overlaySubjectAnchorOverrideReason: anchorOverrideReason,
+        });
 
         const pipelineMeta = ri === 0 ? dayMeta : undefined;
         const sections = computeOverlaySectionsPipeline(
@@ -3359,10 +3402,10 @@ function buildSchoolWeekOverlayProposal(
         if (overlayStrongSectionSignal(sections)) strongSections = true;
 
         const hasSectionContent = Object.values(sections).some((v) => Array.isArray(v) && v.length > 0);
-        if (hasSectionContent || parsed.subjectKey || parsed.customLabel) {
+        if (hasSectionContent || merged.subjectKey || merged.customLabel) {
           subjectUpdates.push({
-            subjectKey: resolveValidOverlaySubjectKey(parsed, dayMeta),
-            customLabel: parsed.customLabel ?? row.label,
+            subjectKey: finalSubjectKey,
+            customLabel: customLabelOut,
             sections,
           });
         }
