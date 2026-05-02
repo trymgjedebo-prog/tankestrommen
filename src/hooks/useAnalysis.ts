@@ -104,7 +104,8 @@ async function analyzeOne(input: AnalysisInput): Promise<AIAnalysisResult> {
     body = { text: input.text };
   }
 
-  const response = await fetch("/api/analyze", {
+  /** `format=raw` beholder rå `AIAnalysisResult`; uten det får JSON-tekst portal-bundle som Foreldre-App. */
+  const response = await fetch("/api/analyze?format=raw", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

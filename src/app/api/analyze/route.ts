@@ -4781,6 +4781,14 @@ function toPortalBundle(
   if (includeDebug && result.analysisModelTrace) {
     debugPayload.analysisModel = result.analysisModelTrace;
   }
+  if (includeDebug && sourceType === "text") {
+    debugPayload.textAnalyzeTrace = {
+      textAnalyzeResponseShape: "PortalImportProposalBundle",
+      textAnalyzeWrappedBundle: true,
+      textAnalyzeSchemaVersion: "1.0.0",
+      textAnalyzePortalBundleReturned: true,
+    };
+  }
   return {
     schemaVersion: "1.0.0",
     provenance: {
@@ -4853,14 +4861,16 @@ function stripInternalAnalysisDebug(result: AIAnalysisResult): AIAnalysisResult 
  * Must be called before request.json() / request.formData().
  */
 function detectPortalMode(request: NextRequest): boolean {
+  const param = (request.nextUrl.searchParams.get("format") ?? "").toLowerCase();
+  /** Eksplisitt legacy-svar (rå `AIAnalysisResult`) for Tankestrømmen-UI m.m. */
+  if (param === "raw") return false;
+  if (param === "portal") return true;
+
   const ct = (request.headers.get("content-type") ?? "").toLowerCase();
   if (ct.includes("multipart/form-data")) return true;
 
   const accept = (request.headers.get("accept") ?? "").toLowerCase();
   if (accept.includes("application/vnd.foreldre.proposal+json")) return true;
-
-  const param = request.nextUrl.searchParams.get("format");
-  if (param === "portal") return true;
 
   return false;
 }
@@ -4897,20 +4907,36 @@ export async function POST(request: NextRequest) {
     }
 
     const multipart = isMultipart(request);
-    const portalMode = detectPortalMode(request);
+    let portalMode = detectPortalMode(request);
     const debug = isDebugRequest(request);
-    console.log("[api/analyze] incoming request", {
-      contentType: request.headers.get("content-type"),
-      multipart,
-      portalMode,
-      debug,
-    });
 
     const body: ParsedBody = multipart
       ? await parseMultipartBody(request)
       : await request.json();
     const { image, text, pdf, docx, fileName } = body;
     const documentKind = parseDocumentKind(body.documentKind);
+
+    /**
+     * JSON `{ text: "…" }` (lim inn) brukte tidligere rå analyse-JSON uten `schemaVersion`.
+     * Fil/multipart går alltid i portal-modus; tekst skal følge samme PortalImportProposalBundle
+     * med mindre klient ber om `?format=raw` (Tankestrømmen-UI).
+     */
+    if (
+      !multipart &&
+      typeof text === "string" &&
+      text.trim().length > 0 &&
+      request.nextUrl.searchParams.get("format")?.toLowerCase() !== "raw"
+    ) {
+      portalMode = true;
+    }
+
+    console.log("[api/analyze] incoming request", {
+      contentType: request.headers.get("content-type"),
+      multipart,
+      portalMode,
+      debug,
+      jsonTextPortalBundle: !multipart && Boolean(text && typeof text === "string" && text.trim()),
+    });
 
     if (text && typeof text === "string") {
       const trimmed = text.trim();
