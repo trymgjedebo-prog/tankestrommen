@@ -919,6 +919,166 @@ function isSchoolPlanBundleContext(
   return /\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t);
 }
 
+/** Normalisert nøkkel for dedupe av praktiske cup-linjer. */
+function cupLineNormKey(s: string): string {
+  return normalizeNorwegianLetters(normalizeSpace(s)).toLowerCase();
+}
+
+/** Lang Spond-/cup-/turneringsmelding (ikke skole-A-plan). */
+function looksLikeCupOrSpondBroadcast(result: AIAnalysisResult): boolean {
+  const blob = [
+    result.title,
+    result.description,
+    result.extractedText?.raw ?? "",
+    ...result.scheduleByDay.flatMap((d) => [
+      d.details ?? "",
+      d.dayLabel ?? "",
+      ...d.notes,
+      ...d.highlights,
+      ...d.rememberItems,
+      ...d.deadlines,
+    ]),
+  ].join("\n");
+  const n = normalizeNorwegianLetters(blob);
+  if (/\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) return false;
+  return /\b(cup|turnering|stevne|spond|sluttspill|seriekamp|idrett|fotball|håndball|oppm[oø]te|samling|pulje|finale|bronse|semifinale)\b/.test(
+    n,
+  );
+}
+
+/** Foreldre-/trenerkoordinering som bør bli egen portal-task (cup/Spond). */
+function isParentCoordinatorTaskLine(line: string): boolean {
+  const t = normalizeSpace(line);
+  if (!t || t.length > 320) return false;
+  const n = normalizeNorwegianLetters(t);
+  if (/\bspond\b/.test(n) && /\b(svar|besvar|melde|registrer|bekreft)\b/.test(n)) return true;
+  if (/\bsvar\s+(i\s+)?spond\b/.test(n)) return true;
+  if (/\b(svar|besvar)\b/.test(n) && /\b(innen|f[oø]r|senest|kl\.?)\b/.test(n) && /\bspond\b/.test(n))
+    return true;
+  if (/\bmeld\s+fra\b/.test(n) && /\b(medisin|medisiner|allergi|trener|trenere)\b/.test(n)) return true;
+  if (/\bgi\s+beskjed\b/.test(n) && /\b(medisin|bruker\s+medisin)\b/.test(n)) return true;
+  if (/\bmedisin/.test(n) && /\b(trener|trenere|vite\s+om)\b/.test(n)) return true;
+  if (/\b(voksne|foreldre)\b/.test(n) && /\b(hjelpe?|hjelp|behov|treng|søker|kan\s+stille|still\s+opp)\b/.test(n))
+    return true;
+  if (/\bhjelpe?\s+med\b/.test(n) && /\b(frukt|samlingspunkt|utstyr|opprigging|rigge|bære)\b/.test(n))
+    return true;
+  if (/\b(to|tre|fire|fem|\d+)\s+voksne\b/.test(n) && /\bhjelp\b/.test(n)) return true;
+  if (/\b(betaling|betal|vipps|kontingent)\b/.test(n) && /\b(innen|f[oø]r|senest|frist)\b/.test(n))
+    return true;
+  if (/\bpåmelding\b/.test(n) && /\b(innen|f[oø]r|senest)\b/.test(n)) return true;
+  if (/\bbekreft\b/.test(n) && /\b(deltakelse|oppm[oø]te|påmelding)\b/.test(n)) return true;
+  return false;
+}
+
+/** Generell pakkliste / vær — typisk én gang for perioden, ikke per kampdag. */
+function isGeneralCupPracticalBulkLine(line: string): boolean {
+  const t = normalizeSpace(line);
+  if (!t || t.length > 260) return false;
+  if (isParentCoordinatorTaskLine(t)) return false;
+  const n = normalizeNorwegianLetters(t);
+  if (/\b(kamp|serie|sluttspill|oppm[oø]te\s+kl|avspark)\b/.test(n)) return false;
+  const packingSignals =
+    /\b(regnjakke|regnfrakk|ekstra\s+sokker|matpakke|niste|drikke|drikkeflaske|flaske)\b/.test(n) ||
+    /\b(gode\s+sko|innend[ø]rs|utend[ø]rs\s+sko|ekstra\s+klær|håndkle|handkle)\b/.test(n) ||
+    /\b(bag|sekk|sportsklær|treningstøy|proviant)\b/.test(n);
+  if (/\bta\s+med\b/i.test(t) && packingSignals) return true;
+  if (/\b(husk\s+å\s+ta|husk\s+ta)\s+med\b/i.test(t) && packingSignals) return true;
+  if (/\bvær|varsel|yr\.no|prognose\b/.test(n) && t.length < 140 && !/\bkl\.?\s*\d/.test(n)) return true;
+  return false;
+}
+
+function isConditionalTournamentText(blob: string): boolean {
+  const n = normalizeNorwegianLetters(normalizeSpace(blob));
+  if (/\bhvis\s+vi\s+(går|gar)\s+videre\b/.test(n)) return true;
+  if (/\b(avhengig|evt\.?|eventuell)\b/.test(n) && /\b(sluttspill|cup|finale|spill)\b/.test(n)) return true;
+  if (/\btidspunkt\s+kommer\b/.test(n)) return true;
+  if (/\b(kommer|publiseres)\s+senere\b/.test(n)) return true;
+  if (/\bikke\s+fastsatt\b/.test(n)) return true;
+  if (/\bTBA\b/.test(blob)) return true;
+  return false;
+}
+
+function shouldCountAsPortalTask(text: string, cupLike: boolean): boolean {
+  const t = normalizeSpace(text);
+  if (!t) return false;
+  if (cupLike && isParentCoordinatorTaskLine(t)) return true;
+  if (isGeneralCupPracticalBulkLine(t)) return false;
+  return isStandaloneTaskCandidate(t);
+}
+
+function collectCupHoistedPracticalLines(
+  days: DayScheduleEntry[],
+): { lines: string[]; keys: Set<string> } {
+  const keys = new Set<string>();
+  const lines: string[] = [];
+  const add = (raw: string) => {
+    const s = normalizeSpace(raw);
+    if (!s || !isGeneralCupPracticalBulkLine(s)) return;
+    const k = cupLineNormKey(s);
+    if (keys.has(k)) return;
+    keys.add(k);
+    lines.push(s);
+  };
+  for (const d of days) {
+    for (const x of d.rememberItems) add(x);
+    for (const x of d.notes) for (const p of splitTaskCandidates(x)) add(p);
+    for (const x of d.highlights) for (const p of splitTaskCandidates(x)) add(p);
+    if (d.details) {
+      for (const ln of d.details.split(/\n/)) {
+        const s = normalizeSpace(ln);
+        if (!s || /^Høydepunkter:|^Husk:|^Frister:|^Notater:/i.test(s)) continue;
+        if (/^Høydepunkter:\s*/i.test(s)) {
+          const rest = s.replace(/^Høydepunkter:\s*/i, "");
+          for (const bit of rest.split(/[;]/).map(normalizeSpace).filter(Boolean)) add(bit);
+          continue;
+        }
+        if (/^Husk:\s*/i.test(s)) {
+          const rest = s.replace(/^Husk:\s*/i, "");
+          for (const bit of rest.split(/[;]/).map(normalizeSpace).filter(Boolean)) add(bit);
+          continue;
+        }
+        for (const p of splitTaskCandidates(s)) add(p);
+      }
+    }
+  }
+  return { lines, keys };
+}
+
+function filterHoistedCupStrings(arr: string[], hoistedKeys: Set<string>): string[] {
+  if (hoistedKeys.size === 0) return arr;
+  return arr.filter((x) => {
+    const t = normalizeSpace(x);
+    if (!t) return false;
+    return !hoistedKeys.has(cupLineNormKey(t));
+  });
+}
+
+function filterDetailsHoisted(details: string | null, hoistedKeys: Set<string>): string | null {
+  if (!details?.trim() || hoistedKeys.size === 0) return details;
+  const out: string[] = [];
+  for (const ln of details.split(/\n/)) {
+    const s = normalizeSpace(ln);
+    if (!s) continue;
+    if (hoistedKeys.has(cupLineNormKey(s))) continue;
+    const hm = /^Høydepunkter:\s*(.+)$/i.exec(s);
+    if (hm) {
+      const bits = hm[1].split(/[;]/).map(normalizeSpace).filter(Boolean);
+      const kept = bits.filter((b) => !hoistedKeys.has(cupLineNormKey(b)));
+      if (kept.length) out.push(`Høydepunkter: ${kept.join("; ")}`);
+      continue;
+    }
+    const hk = /^Husk:\s*(.+)$/i.exec(s);
+    if (hk) {
+      const bits = hk[1].split(/[;]/).map(normalizeSpace).filter(Boolean);
+      const kept = bits.filter((b) => !hoistedKeys.has(cupLineNormKey(b)));
+      if (kept.length) out.push(`Husk: ${kept.join("; ")}`);
+      continue;
+    }
+    out.push(s);
+  }
+  return out.length ? out.join("\n") : null;
+}
+
 function slugifySubjectKey(raw: string): string | null {
   const s = normalizeSpace(raw);
   if (s.length < 2) return null;
@@ -1565,53 +1725,84 @@ function buildProposalItems(
   };
 
   if (result.scheduleByDay.length > 0) {
+    const cupLike = looksLikeCupOrSpondBroadcast(result);
+    const hoistedPractical =
+      cupLike && result.scheduleByDay.length > 0
+        ? collectCupHoistedPracticalLines(result.scheduleByDay)
+        : { lines: [] as string[], keys: new Set<string>() };
+    const cupFooterOnce =
+      cupLike && hoistedPractical.lines.length > 0
+        ? `Praktisk for hele cup/perioden:\n${hoistedPractical.lines.map((l) => `- ${l}`).join("\n")}`
+        : null;
+    let pendingCupFooter = cupFooterOnce;
+
     for (const day of result.scheduleByDay) {
       const isoDate = resolveDate(day.date, day.dayLabel);
       if (!isoDate) continue;
 
-      // Huskeliste / «ta med» ligger i event-notater; ikke egne tasks.
+      const hk = hoistedPractical.keys;
+      const fRemember = cupLike ? filterHoistedCupStrings(day.rememberItems, hk) : day.rememberItems;
+      const fNotesRaw = cupLike ? filterHoistedCupStrings(day.notes, hk) : day.notes;
+      const fHighlights = cupLike ? filterHoistedCupStrings(day.highlights, hk) : day.highlights;
+      const fDetails = cupLike ? filterDetailsHoisted(day.details, hk) : day.details;
+
+      const notesForCtx = [...fNotesRaw];
+      if (pendingCupFooter) {
+        notesForCtx.push(pendingCupFooter);
+        pendingCupFooter = null;
+      }
+
+      const dayBlob = [
+        fDetails,
+        ...fHighlights,
+        ...notesForCtx,
+        ...fRemember,
+        day.dayLabel ?? "",
+      ].join(" ");
+      const conditionalDay = cupLike && isConditionalTournamentText(dayBlob);
+      const titleSuffix = conditionalDay
+        ? `${day.dayLabel ?? "Dag"} (betinget — avhengig av utslag / mer info kommer)`
+        : day.dayLabel;
+
       const taskCandidates = [
         ...day.deadlines,
-        ...day.notes.flatMap((n) => splitTaskCandidates(n)),
-        ...splitTaskCandidates(day.details),
+        ...fRemember.flatMap((r) => splitTaskCandidates(r)),
+        ...fNotesRaw.flatMap((n) => splitTaskCandidates(n)),
+        ...splitTaskCandidates(fDetails),
       ];
       const taskTexts = Array.from(
         new Set(
           taskCandidates
             .map((text) => normalizeSpace(text))
-            .filter((text) => text.length > 0 && isStandaloneTaskCandidate(text)),
+            .filter((text) => text.length > 0 && shouldCountAsPortalTask(text, cupLike)),
         ),
       );
 
-      const combinedDayText = [
-        day.details,
-        ...day.highlights,
-        ...day.notes,
-      ].join(" ");
-      const detailParts = day.details ? splitTaskCandidates(day.details) : [];
+      const combinedDayText = [fDetails, ...fHighlights, ...fNotesRaw].join(" ");
+      const detailParts = fDetails ? splitTaskCandidates(fDetails) : [];
       const hasNonTaskDetailPart =
         detailParts.some(
-          (p) => !isStandaloneTaskCandidate(p) && normalizeSpace(p).length > 0,
+          (p) => !shouldCountAsPortalTask(p, cupLike) && normalizeSpace(p).length > 0,
         ) ||
         (detailParts.length === 0 &&
-          Boolean(day.details) &&
-          normalizeSpace(day.details ?? "").length > 0 &&
-          !isStandaloneTaskCandidate(day.details ?? ""));
-      const hasNonTaskNote = day.notes.some((n) => {
+          Boolean(fDetails) &&
+          normalizeSpace(fDetails ?? "").length > 0 &&
+          !shouldCountAsPortalTask(fDetails ?? "", cupLike));
+      const hasNonTaskNote = fNotesRaw.some((n) => {
         const parts = splitTaskCandidates(n);
         if (parts.length === 0) {
-          return normalizeSpace(n).length > 0 && !isStandaloneTaskCandidate(n);
+          return normalizeSpace(n).length > 0 && !shouldCountAsPortalTask(n, cupLike);
         }
         return parts.some(
-          (p) => !isStandaloneTaskCandidate(p) && normalizeSpace(p).length > 0,
+          (p) => !shouldCountAsPortalTask(p, cupLike) && normalizeSpace(p).length > 0,
         );
       });
       const hasEventSignal =
         Boolean(day.time) ||
         isEventLikeText(combinedDayText) ||
-        day.highlights.length > 0 ||
+        fHighlights.length > 0 ||
         hasNonTaskDetailPart ||
-        day.rememberItems.length > 0 ||
+        fRemember.length > 0 ||
         hasNonTaskNote;
 
       if (hasEventSignal || taskTexts.length === 0) {
@@ -1622,31 +1813,41 @@ function buildProposalItems(
           weekPlanLike,
           day.time,
         );
-        // Override detekteres separat og legges på event.metadata.schoolDayOverride.
-        // Vanlige skoledager får kun schoolContext; avviksdager får ev. begge.
         const dayOverride = isSchoolPlanBundleContext(result, weekPlanLike)
           ? detectSchoolDayOverride(day, day.time)
           : null;
-        items.push(
-          buildEventItem(
-            isoDate,
-            day.time,
-            day.dayLabel,
-            day.details,
-            {
-              rememberItems: day.rememberItems,
-              deadlines: day.deadlines,
-              notes: day.notes,
-              highlights: day.highlights,
-            },
-            schoolCtx,
-            dayOverride,
-          ),
+        const ev = buildEventItem(
+          isoDate,
+          day.time,
+          titleSuffix,
+          fDetails,
+          {
+            rememberItems: fRemember,
+            deadlines: day.deadlines,
+            notes: notesForCtx,
+            highlights: fHighlights,
+          },
+          schoolCtx,
+          dayOverride,
         );
+        if (conditionalDay) {
+          ev.confidence = Math.min(ev.confidence, 0.56);
+          const prefix =
+            "NB: Innholdet kan være betinget (f.eks. videre avansement eller tid som ikke er endelig). Sjekk kilden.\n\n";
+          ev.event.notes = ev.event.notes ? `${prefix}${ev.event.notes}` : prefix.trim();
+        }
+        items.push(ev);
       }
 
       for (const taskText of taskTexts) {
-        items.push(buildTaskItem(isoDate, day.dayLabel, taskText));
+        const tk = buildTaskItem(isoDate, day.dayLabel, taskText);
+        if (pendingCupFooter) {
+          tk.task.notes = tk.task.notes
+            ? `${tk.task.notes}\n\n${pendingCupFooter}`
+            : pendingCupFooter;
+          pendingCupFooter = null;
+        }
+        items.push(tk);
       }
     }
   }
