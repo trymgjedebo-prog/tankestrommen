@@ -792,6 +792,8 @@ type CupProposalItemDebug = {
   conditionalDayRenderedAsSoftEvent?: boolean;
   defaultTimeSuppressed?: boolean;
   daySpecificContentAfterSharedLift?: boolean;
+  /** Antall unike foreldre-handlingsoppgaver etter dedupe (cup/Spond). */
+  actionableParentTasksDeduped?: number;
 };
 
 type PortalTaskItem = {
@@ -841,6 +843,29 @@ function splitTaskCandidates(raw: string | null): string[] {
     .split(/\n|;|•|-/)
     .map((part) => normalizeSpace(part))
     .filter((part) => part.length > 0);
+}
+
+/**
+ * Ekstra oppdeling for lange Spond-/cup-avsnitt uten linjeskift, slik at
+ * «Svar i Spond …» og «Gi beskjed om …» kan bli egne tasks.
+ */
+function splitTaskCandidatesForCup(raw: string | null): string[] {
+  if (!raw) return [];
+  const base = splitTaskCandidates(raw);
+  const out: string[] = [];
+  for (const part of base) {
+    const p = normalizeSpace(part);
+    if (!p) continue;
+    if (p.length >= 110 && /[.!?]\s+\S/.test(p)) {
+      const chunks = p.split(/(?<=[.!?])\s+/).map(normalizeSpace).filter(Boolean);
+      if (chunks.length >= 2) {
+        out.push(...chunks);
+        continue;
+      }
+    }
+    out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -965,24 +990,72 @@ function looksLikeCupOrSpondBroadcast(result: AIAnalysisResult): boolean {
   );
 }
 
-/** Foreldre-/trenerkoordinering som bør bli egen portal-task (cup/Spond). */
+/**
+ * Foreldre-handling som skal bli egen portal-task (cup/Spond), ikke «ren» helgeinfo.
+ * Overlappende konsept: `shared_actionable_parent_task` vs `shared_practical_info`
+ * (sistnevnte hoistes som felles blokk uten task).
+ */
 function isParentCoordinatorTaskLine(line: string): boolean {
   const t = normalizeSpace(line);
-  if (!t || t.length > 320) return false;
+  if (!t || t.length > 380) return false;
   const n = normalizeNorwegianLetters(t);
-  if (/\bspond\b/.test(n) && /\b(svar|besvar|melde|registrer|bekreft)\b/.test(n)) return true;
-  if (/\bsvar\s+(i\s+)?spond\b/.test(n)) return true;
-  if (/\b(svar|besvar)\b/.test(n) && /\b(innen|f[oø]r|senest|kl\.?)\b/.test(n) && /\bspond\b/.test(n))
+  if (/\bspond\b/.test(n) && /\b(svar|svare|besvar|besvare|melde|registrer|bekreft|sjekk|fyll\s+ut)\b/.test(n))
+    return true;
+  if (/\b(svar|svare|besvar|besvare)\s+(i\s+)?spond\b/.test(n)) return true;
+  if (
+    /\b(svar|besvar|bekreft)\b/.test(n) &&
+    /\b(innen|f[oø]r|senest|kl\.?|frist)\b/.test(n) &&
+    /\bspond\b/.test(n)
+  )
     return true;
   if (/\bmeld\s+fra\b/.test(n) && /\b(medisin|medisiner|allergi|trener|trenere)\b/.test(n)) return true;
-  if (/\bgi\s+beskjed\b/.test(n) && /\b(medisin|bruker\s+medisin)\b/.test(n)) return true;
-  if (/\bmedisin/.test(n) && /\b(trener|trenere|vite\s+om)\b/.test(n)) return true;
-  if (/\b(voksne|foreldre)\b/.test(n) && /\b(hjelpe?|hjelp|behov|treng|søker|kan\s+stille|still\s+opp)\b/.test(n))
+  if (/\bgi\s+beskjed\b/.test(n) && /\b(medisin|bruker\s+medisin|resept|medisinbruk)\b/.test(n)) return true;
+  if (/\bmedisin/.test(n) && /\b(trener|trenere|vite\s+om|m[aå]\s+vite)\b/.test(n)) return true;
+  if (
+    /\bgi\s+beskjed\b/.test(n) &&
+    /\b(hjelpe?|frukt|utstyr|kjøring|kjore|samlingspunkt|opprigging|rigge|bære|baere|still\s+opp|kan\s+ta|still\s+deg)\b/.test(
+      n,
+    )
+  )
     return true;
-  if (/\bhjelpe?\s+med\b/.test(n) && /\b(frukt|samlingspunkt|utstyr|opprigging|rigge|bære)\b/.test(n))
+  if (
+    /\bmeld\s+fra\b/.test(n) &&
+    /\b(fravær|fravar|tilgjengelighet|tilbakemelding|kan\s+ikke|rekke\s+ikke)\b/.test(n)
+  )
     return true;
-  if (/\b(to|tre|fire|fem|\d+)\s+voksne\b/.test(n) && /\bhjelp\b/.test(n)) return true;
-  if (/\b(betaling|betal|vipps|kontingent)\b/.test(n) && /\b(innen|f[oø]r|senest|frist)\b/.test(n))
+  if (
+    /\bmeld\s+fra\b/.test(n) &&
+    /\b(hjelpe?|frukt|utstyr|kjøring|kjore|varebil|hente|levere|kiosk|grill)\b/.test(n)
+  )
+    return true;
+  if (
+    /\b(voksne|foreldre)\b/.test(n) &&
+    /\b(hjelpe?|hjelp|behov|treng|søker|kan\s+stille|still\s+opp|still\s+dere)\b/.test(n)
+  )
+    return true;
+  if (
+    /\bhjelpe?\s+med\b/.test(n) &&
+    /\b(frukt|samlingspunkt|utstyr|opprigging|rigge|bære|baere|kjøring|kjore|kiosk|grill)\b/.test(n)
+  )
+    return true;
+  if (/\b(to|tre|fire|fem|\d+)\s+voksne\b/.test(n) && /\b(hjelp|trengs|behov)\b/.test(n)) return true;
+  if (/\btrengs\b/.test(n) && /\b(voksne|foreldre|noen\s+som|frivillige)\b/.test(n)) return true;
+  if (
+    /\b(kan\s+du|kan\s+dere)\s+hjelpe\b/.test(n) &&
+    /\b(frukt|utstyr|kjøring|kjore|samlingspunkt|kiosk|grill|hente|bære|baere)\b/.test(n)
+  )
+    return true;
+  if (
+    /\b(still\s+opp|still\s+dere|ta\s+kontakt)\b/.test(n) &&
+    /\b(trener|lagleder|koordinator|frivillig|støtteapparat)\b/.test(n)
+  )
+    return true;
+  if (
+    /\b(betaling|betal|vipps|kontingent|egenandel|deltakeravgift|påmeldingsavgift|pameldingsavgift)\b/.test(
+      n,
+    ) &&
+    /\b(innen|f[oø]r|senest|frist|betale|kr\s*\d|\d+\s*kr)\b/.test(n)
+  )
     return true;
   if (/\bpåmelding\b/.test(n) && /\b(innen|f[oø]r|senest)\b/.test(n)) return true;
   if (/\bbekreft\b/.test(n) && /\b(deltakelse|oppm[oø]te|påmelding)\b/.test(n)) return true;
@@ -999,7 +1072,8 @@ function isGeneralCupPracticalBulkLine(line: string): boolean {
   const packingSignals =
     /\b(regnjakke|regnfrakk|ekstra\s+sokker|matpakke|niste|drikke|drikkeflaske|flaske)\b/.test(n) ||
     /\b(gode\s+sko|innend[ø]rs|utend[ø]rs\s+sko|ekstra\s+klær|håndkle|handkle)\b/.test(n) ||
-    /\b(bag|sekk|sportsklær|treningstøy|proviant)\b/.test(n);
+    /\b(bag|sekk|sportsklær|treningstøy|proviant)\b/.test(n) ||
+    (/\bfrukt\b/.test(n) && /\b(ta\s+med|husk\s+å\s+ta|husk\s+ta)\b/i.test(t));
   if (/\bta\s+med\b/i.test(t) && packingSignals) return true;
   if (/\b(husk\s+å\s+ta|husk\s+ta)\s+med\b/i.test(t) && packingSignals) return true;
   if (/\bvær|varsel|yr\.no|prognose\b/.test(n) && t.length < 140 && !/\bkl\.?\s*\d/.test(n)) return true;
@@ -1854,6 +1928,10 @@ function buildProposalItems(
         ? `Felles for cup/helg (samme info flere dager eller generelt utstyr):\n${mergedFooterLines.map((l) => `- ${l}`).join("\n")}`
         : null;
     let pendingCupFooter = cupFooterOnce;
+    const seenCupTaskKey = new Set<string>();
+    let actionableParentTasksDeduped = 0;
+    const splitTasks = (raw: string | null) =>
+      cupLike ? splitTaskCandidatesForCup(raw) : splitTaskCandidates(raw);
 
     for (const day of result.scheduleByDay) {
       const isoDate = resolveDate(day.date, day.dayLabel);
@@ -1864,6 +1942,17 @@ function buildProposalItems(
       const fNotesRaw = cupLike ? filterHoistedCupStrings(day.notes, hk) : day.notes;
       const fHighlights = cupLike ? filterHoistedCupStrings(day.highlights, hk) : day.highlights;
       const fDetails = cupLike ? filterDetailsHoisted(day.details, hk) : day.details;
+
+      const fHighlightsForEvent =
+        cupLike
+          ? fHighlights.filter((h) => {
+              const s = normalizeSpace(h);
+              if (!s) return false;
+              const parts = splitTaskCandidatesForCup(s);
+              if (parts.length === 1 && isParentCoordinatorTaskLine(parts[0]!)) return false;
+              return true;
+            })
+          : fHighlights;
 
       const notesForCtx = [...fNotesRaw];
       if (pendingCupFooter) {
@@ -1895,9 +1984,10 @@ function buildProposalItems(
 
       const taskCandidates = [
         ...day.deadlines,
-        ...fRemember.flatMap((r) => splitTaskCandidates(r)),
-        ...fNotesRaw.flatMap((n) => splitTaskCandidates(n)),
-        ...splitTaskCandidates(fDetails),
+        ...fRemember.flatMap((r) => splitTasks(r)),
+        ...fNotesRaw.flatMap((n) => splitTasks(n)),
+        ...fHighlights.flatMap((h) => splitTasks(h)),
+        ...splitTasks(fDetails),
       ];
       const taskTexts = Array.from(
         new Set(
@@ -1907,8 +1997,8 @@ function buildProposalItems(
         ),
       );
 
-      const combinedDayText = [fDetails, ...fHighlights, ...fNotesRaw].join(" ");
-      const detailParts = fDetails ? splitTaskCandidates(fDetails) : [];
+      const combinedDayText = [fDetails, ...fHighlightsForEvent, ...fNotesRaw].join(" ");
+      const detailParts = fDetails ? splitTasks(fDetails) : [];
       const hasNonTaskDetailPart =
         detailParts.some(
           (p) => !shouldCountAsPortalTask(p, cupLike) && normalizeSpace(p).length > 0,
@@ -1918,7 +2008,7 @@ function buildProposalItems(
           normalizeSpace(fDetails ?? "").length > 0 &&
           !shouldCountAsPortalTask(fDetails ?? "", cupLike));
       const hasNonTaskNote = fNotesRaw.some((n) => {
-        const parts = splitTaskCandidates(n);
+        const parts = splitTasks(n);
         if (parts.length === 0) {
           return normalizeSpace(n).length > 0 && !shouldCountAsPortalTask(n, cupLike);
         }
@@ -1947,7 +2037,7 @@ function buildProposalItems(
           : null;
         const daySpecificContentAfterSharedLift = Boolean(
           (fDetails && fDetails.trim()) ||
-            fHighlights.length > 0 ||
+            fHighlightsForEvent.length > 0 ||
             fRemember.length > 0 ||
             fNotesRaw.some((x) => normalizeSpace(x).length > 0),
         );
@@ -1970,7 +2060,7 @@ function buildProposalItems(
             rememberItems: fRemember,
             deadlines: day.deadlines,
             notes: notesForCtx,
-            highlights: fHighlights,
+            highlights: fHighlightsForEvent,
           },
           schoolCtx,
           dayOverride,
@@ -1991,6 +2081,12 @@ function buildProposalItems(
       }
 
       for (const taskText of taskTexts) {
+        if (cupLike) {
+          const tkKey = cupLineNormKey(taskText);
+          if (seenCupTaskKey.has(tkKey)) continue;
+          seenCupTaskKey.add(tkKey);
+        }
+        if (cupLike && isParentCoordinatorTaskLine(taskText)) actionableParentTasksDeduped += 1;
         const tk = buildTaskItem(isoDate, day.dayLabel, taskText);
         if (pendingCupFooter) {
           tk.task.notes = tk.task.notes
@@ -1999,6 +2095,14 @@ function buildProposalItems(
           pendingCupFooter = null;
         }
         items.push(tk);
+      }
+    }
+
+    if (cupLike) {
+      for (const it of items) {
+        if (it.kind !== "event" || !it.event.metadata?.cupProposalDebug) continue;
+        it.event.metadata.cupProposalDebug.actionableParentTasksDeduped =
+          actionableParentTasksDeduped;
       }
     }
   }

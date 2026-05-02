@@ -1932,7 +1932,7 @@ Rules:
 20. Summarize into clean actionable language; do not copy long raw paragraphs.
 21. If the source is a recurring weekly timetable (same subjects/periods every week: "timeplan", "ukeskjema", grid with clock times + subjects Mon–Fri), set "schoolWeeklyProfile" to an object and set "days" to []. Do not copy each lesson into "days".
 22. For A-plans, one-off weekly activity plans, invitations, or week-specific narratives, set "schoolWeeklyProfile" to null and use "days" as usual.
-23. Sports tournaments / Spond messages: put Spond reply deadlines in "deadlines". Put parent volunteer help (fruit, meeting point, equipment) and "notify about medicine" as short separate bullets in "rememberItems" or "deadlines", not buried in long "notes" paragraphs.
+23. Sports tournaments / Spond messages: put Spond reply deadlines in "deadlines". Put parent volunteer help (fruit, meeting point, equipment), payment/contribution with a due date, and "notify about medicine" as short separate bullets in "rememberItems", "deadlines", or "highlights" (one bullet per action)—not only inside long "notes" paragraphs.
 24. If a day or match depends on progressing (e.g. "if we advance", "time TBD", "published later"), state that clearly in "notes" or "highlights" for that day—do not imply the time is final.
 25. For the same cup weekend: put information that applies to every day (packing, weather, general venue rules) once in "generalImportantInfo" or repeat the exact same short bullet only if needed; put day-specific kickoff/meeting times and opponents in that day's "highlights" or "time".
 
