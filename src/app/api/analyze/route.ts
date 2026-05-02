@@ -525,6 +525,71 @@ function parseDateWithFallbackYear(raw: string | null, fallbackYear: number): st
   return null;
 }
 
+function extractClockHHMMFromText(text: string): string | null {
+  const m = /\bkl\.?\s*(\d{1,2})[.:](\d{2})\b/i.exec(text);
+  if (!m) return null;
+  const h = Number(m[1]);
+  if (h < 0 || h > 23) return null;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+}
+
+/** Finn dato-kandidater i fritekst (norsk måned + ev. år). */
+function collectIsoDateCandidatesInText(text: string, fallbackYear: number): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const push = (iso: string | null) => {
+    if (iso && !seen.has(iso)) {
+      seen.add(iso);
+      candidates.push(iso);
+    }
+  };
+  const isoBare = /\b(20\d{2}-\d{2}-\d{2})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = isoBare.exec(text)) !== null) push(m[1]);
+
+  const reY = /(\d{1,2})\.\s*([a-zæøå.]+)\s+(20\d{2})/gi;
+  while ((m = reY.exec(text)) !== null) {
+    push(parseDateWithFallbackYear(`${m[1]}. ${m[2]} ${m[3]}`, fallbackYear));
+  }
+  const reN = /(\d{1,2})\.\s*([a-zæøå.]+)\b/gi;
+  while ((m = reN.exec(text)) !== null) {
+    if (/\s20\d{2}\s*$/.test(m[0])) continue;
+    push(parseDateWithFallbackYear(`${m[1]}. ${m[2]}`, fallbackYear));
+  }
+  const reS = /\b(\d{1,2})[./](\d{1,2})[./](20\d{2})\b/g;
+  while ((m = reS.exec(text)) !== null) {
+    push(parseDateWithFallbackYear(`${m[1]}.${m[2]}.${m[3]}`, fallbackYear));
+  }
+  const wd =
+    /\b(?:mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag)\s+(\d{1,2})\.?\s+([a-zæøå.]+)(?:\s+(20\d{2}))?\b/gi;
+  while ((m = wd.exec(text)) !== null) {
+    push(
+      m[3]
+        ? parseDateWithFallbackYear(`${m[1]}. ${m[2]} ${m[3]}`, Number(m[3]))
+        : parseDateWithFallbackYear(`${m[1]}. ${m[2]}`, fallbackYear),
+    );
+  }
+  const daySpaceMonth = /\b(\d{1,2})\s+([a-zæøå.]+)(?:\s+(20\d{2}))?\b/gi;
+  while ((m = daySpaceMonth.exec(text)) !== null) {
+    if (!NB_MONTHS[normalizeMonthName(m[2])]) continue;
+    push(
+      m[3]
+        ? parseDateWithFallbackYear(`${m[1]}. ${m[2]} ${m[3]}`, Number(m[3]))
+        : parseDateWithFallbackYear(`${m[1]}. ${m[2]}`, fallbackYear),
+    );
+  }
+  return candidates;
+}
+
+function pickBestDeadlineDateFromTaskLine(line: string, fallbackYear: number): string | null {
+  const kw = /\b(innen|inne|senest|frist|f[oø]r|inn\s+f[oø]r|innan)\b/i.exec(line);
+  const focus = kw ? line.slice(kw.index) : line;
+  const fromFocus = collectIsoDateCandidatesInText(focus, fallbackYear);
+  if (fromFocus.length > 0) return fromFocus[fromFocus.length - 1]!;
+  const fromFull = collectIsoDateCandidatesInText(line, fallbackYear);
+  return fromFull.length > 0 ? fromFull[fromFull.length - 1]! : null;
+}
+
 function normalizeSpace(input: string): string {
   return input.replace(/\s+/g, " ").trim();
 }
@@ -812,14 +877,31 @@ type CupProposalItemDebug = {
   cupEventNotesAfterTaskStripping?: string | null;
 };
 
+/** Diagnostikk for portal-task (Spond/cup-frist og tittelkontekst). */
+type TaskProposalDebug = {
+  taskDeadlineDerivedFromLine?: boolean;
+  taskDeadlineDerivedFromContext?: boolean;
+  taskDeadlineOverrodeDayContext?: boolean;
+  taskContextPhraseDetected?: string | null;
+  taskTitleEnrichedWithContext?: boolean;
+  taskTitleContextSource?: "resultTitle" | "description" | null;
+  taskDeadlineIso?: string | null;
+  taskDueTime?: string | null;
+};
+
 type PortalTaskItem = {
   proposalId: string;
   kind: "task";
   sourceId: string;
   originalSourceType: string;
   confidence: number;
+  metadata?: {
+    taskProposalDebug?: TaskProposalDebug;
+  };
   task: {
     date: string;
+    /** Valgfri klokkeslett-frist (24h HH:MM) når utledet fra kilden. */
+    dueTime?: string;
     personId: string;
     title: string;
     notes?: string;
@@ -1028,6 +1110,125 @@ function preferParentTaskDisplayVariant(a: string, b: string): string {
 
 function normalizeCupParentTaskBodyForTitle(taskText: string): string {
   return normalizeTaskTitle(stripCupNoteLikePrefixes(taskText));
+}
+
+function stripDeadlineClauseFromTaskBody(body: string, hadExplicitLineDate: boolean): string {
+  if (!hadExplicitLineDate) return body;
+  return normalizeSpace(
+    body.replace(/\b(innen|inne|senest|frist|f[oø]r|inn\s+f[oø]r|innan)\b[\s\S]*$/i, "").trim(),
+  );
+}
+
+function deriveTaskContextLabel(result: AIAnalysisResult): {
+  phrase: string | null;
+  source: "resultTitle" | "description" | null;
+} {
+  const title = normalizeSpace(result.title || "");
+  if (title.length >= 4 && title.length <= 78) {
+    const n = normalizeNorwegianLetters(title);
+    if (!/\b(a-plan|ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) {
+      const short = title.split(/[–—|]/)[0]?.trim() ?? title;
+      if (short.length >= 4) return { phrase: short, source: "resultTitle" };
+    }
+  }
+  const desc = normalizeSpace(result.description || "").slice(0, 240);
+  if (desc.length >= 14) {
+    const clip = desc.split(/[.!?]\s+/)[0]?.trim() ?? desc;
+    if (clip.length >= 12 && clip.length <= 72) return { phrase: clip, source: "description" };
+  }
+  return { phrase: null, source: null };
+}
+
+function cupTaskNeedsContextInTitle(body: string): boolean {
+  const t = stripCupNoteLikePrefixes(body);
+  const n = normalizeNorwegianLetters(t);
+  if (t.length > 58) return false;
+  if (/\bspond\b/.test(n)) {
+    if (/\b(om\s+deltakelse|angå|vedrørende|påmelding|til\s+cup|for\s+cup)\b/.test(n)) return false;
+    return true;
+  }
+  if (/^gi\s+beskjed\b/i.test(t) && t.length < 52) return true;
+  if (/^betal(ing)?\b/i.test(t) && t.split(/\s+/).length < 7) return true;
+  if (/^meld\s+fra\b/i.test(t) && t.length < 50) return true;
+  if (/^bekreft\b/i.test(t) && t.length < 46) return true;
+  return false;
+}
+
+function enrichCupTaskTitleIfVague(
+  body: string,
+  ctxPhrase: string | null,
+): { title: string; enriched: boolean } {
+  if (!ctxPhrase || !cupTaskNeedsContextInTitle(body)) return { title: body, enriched: false };
+  const needle = normalizeNorwegianLetters(ctxPhrase).slice(0, 14);
+  if (needle.length >= 6 && normalizeNorwegianLetters(body).includes(needle)) {
+    return { title: body, enriched: false };
+  }
+  const n = normalizeNorwegianLetters(body);
+  let suffix: string;
+  if (/\bspond\b/.test(n) && /\b(svar|besvar|bekreft|registrer|meld)\b/.test(n)) {
+    suffix = `– ${ctxPhrase}`;
+  } else if (/^betal/i.test(body)) {
+    suffix = `(for ${ctxPhrase})`;
+  } else if (/^gi\s+beskjed/i.test(body)) {
+    suffix = `(${ctxPhrase})`;
+  } else if (/^meld\s+fra/i.test(body)) {
+    suffix = `– ${ctxPhrase}`;
+  } else {
+    suffix = `– ${ctxPhrase}`;
+  }
+  let merged = normalizeSpace(`${body} ${suffix}`);
+  if (merged.length > 90) {
+    merged = normalizeSpace(`${trimSentence(body, 42)} ${suffix}`);
+  }
+  if (merged.length > 90) return { title: body, enriched: false };
+  return { title: merged, enriched: true };
+}
+
+function resolveCupTaskDeadlineAndMeta(
+  line: string,
+  nearbyContextBlob: string,
+  fallbackYear: number,
+  scheduleDayIso: string,
+): {
+  taskDate: string;
+  dueTime: string | null;
+  debug: TaskProposalDebug;
+} {
+  const lineDate = pickBestDeadlineDateFromTaskLine(line, fallbackYear);
+  const lineTime = extractClockHHMMFromText(line);
+  let taskDate = scheduleDayIso;
+  let dueTime: string | null = lineTime;
+  let derivedLine = false;
+  let derivedContext = false;
+
+  if (lineDate) {
+    taskDate = lineDate;
+    derivedLine = true;
+  } else if (
+    nearbyContextBlob.length > 20 &&
+    /\b(innen|senest|frist|inne|kl\.?\s*\d)\b/i.test(line)
+  ) {
+    const ctxDate = pickBestDeadlineDateFromTaskLine(nearbyContextBlob, fallbackYear);
+    if (ctxDate) {
+      taskDate = ctxDate;
+      derivedContext = true;
+      if (!dueTime) dueTime = extractClockHHMMFromText(nearbyContextBlob);
+    }
+  }
+
+  const overrode = taskDate !== scheduleDayIso;
+
+  return {
+    taskDate,
+    dueTime,
+    debug: {
+      taskDeadlineDerivedFromLine: derivedLine,
+      taskDeadlineDerivedFromContext: derivedContext,
+      taskDeadlineOverrodeDayContext: overrode,
+      taskDeadlineIso: taskDate,
+      taskDueTime: dueTime,
+    },
+  };
 }
 
 function filterCupStringArrayStripPromotedTasks(
@@ -2039,6 +2240,10 @@ function buildProposalItems(
     date: string,
     dayLabel: string | null,
     taskText: string,
+    extras?: {
+      dueTime?: string | null;
+      metadata?: { taskProposalDebug?: TaskProposalDebug };
+    },
   ): PortalTaskItem => {
     const cleanTask = normalizeTaskTitle(taskText);
     const day = normalizeSpace(dayLabel || "");
@@ -2049,11 +2254,13 @@ function buildProposalItems(
       sourceId,
       originalSourceType: sourceType,
       confidence: result.confidence,
+      ...(extras?.metadata ? { metadata: extras.metadata } : {}),
       task: {
         date,
         personId: "pending",
         title: title || "Oppgave",
         notes: result.title ? `Fra: ${result.title}` : undefined,
+        ...(extras?.dueTime ? { dueTime: extras.dueTime } : {}),
       },
     };
   };
@@ -2321,12 +2528,58 @@ function buildProposalItems(
         items.push(ev);
       }
 
+      const deadlineBlobForDay = [
+        day.details ?? "",
+        ...day.highlights,
+        ...day.notes,
+        ...day.rememberItems,
+        ...day.deadlines,
+      ].join("\n");
+      const taskCtxLabel = deriveTaskContextLabel(result);
+
       for (const taskText of taskTexts) {
-        const taskBody =
+        let taskDate = isoDate;
+        let dueTime: string | null = null;
+        let taskDebug: TaskProposalDebug | null = null;
+
+        if (cupLike) {
+          const resolved = resolveCupTaskDeadlineAndMeta(
+            taskText,
+            deadlineBlobForDay,
+            resolvedYear,
+            isoDate,
+          );
+          taskDate = resolved.taskDate;
+          dueTime = resolved.dueTime;
+          taskDebug = resolved.debug;
+        }
+
+        let taskBody =
           cupLike && isParentCoordinatorTaskLine(taskText)
             ? normalizeCupParentTaskBodyForTitle(taskText)
             : taskText;
-        const tk = buildTaskItem(isoDate, day.dayLabel, taskBody);
+
+        if (cupLike) {
+          taskBody = stripDeadlineClauseFromTaskBody(
+            taskBody,
+            Boolean(taskDebug?.taskDeadlineDerivedFromLine),
+          );
+          taskBody = isParentCoordinatorTaskLine(taskText)
+            ? normalizeCupParentTaskBodyForTitle(taskBody)
+            : normalizeTaskTitle(taskBody);
+          const enc = enrichCupTaskTitleIfVague(taskBody, taskCtxLabel.phrase);
+          taskBody = enc.title;
+          if (taskDebug) {
+            taskDebug.taskContextPhraseDetected = taskCtxLabel.phrase;
+            taskDebug.taskTitleEnrichedWithContext = enc.enriched;
+            taskDebug.taskTitleContextSource = enc.enriched ? taskCtxLabel.source : null;
+          }
+        }
+
+        const tk = buildTaskItem(taskDate, day.dayLabel, taskBody, {
+          dueTime: dueTime ?? undefined,
+          metadata: cupLike && taskDebug ? { taskProposalDebug: taskDebug } : undefined,
+        });
         if (pendingCupFooter) {
           tk.task.notes = tk.task.notes
             ? `${tk.task.notes}\n\n${pendingCupFooter}`
