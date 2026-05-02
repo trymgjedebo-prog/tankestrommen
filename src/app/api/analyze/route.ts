@@ -791,6 +791,13 @@ type PortalTaskItem = {
 
 type PortalProposalItem = PortalEventItem | PortalTaskItem;
 
+/** Semantikk for vurderings-/prøvelinjer (debug og intern klassifisering). */
+type AssessmentLineSemantics =
+  | "actual_assessment"
+  | "assessment_preparation"
+  | "generic_homework"
+  | "in_class_activity";
+
 /** Ekte skolearbeid / frist – ikke generell huskeliste eller pakkeliste. */
 const ACTIONABLE_TASK_RE = new RegExp(
   [
@@ -817,7 +824,42 @@ function splitTaskCandidates(raw: string | null): string[] {
     .filter((part) => part.length > 0);
 }
 
-/** Linjer som primært er «ta med» / utstyr – skal ikke bli egne tasks. */
+/**
+ * Forberedelse / repetisjon / øving — ikke selve gjennomføringen av vurderingen.
+ * Brukes for å unngå «Fag prøve»-tasks på generiske forberedelseslinjer.
+ */
+function isAssessmentPreparationLine(line: string): boolean {
+  const n = normalizeNorwegianLetters(normalizeSpace(line));
+  if (!n) return false;
+  if (/\b(forberede\s+seg\s+til\s+vurdering|forberede\s+seg\s+til\s+eksamen)\b/.test(n))
+    return true;
+  if (
+    /\bforbered(?:e|else|es|er)?\b/.test(n) &&
+    /\b(pr[oø]ve|tentamen|vurdering|eksamen|kartlegging)\b/.test(n)
+  ) {
+    return true;
+  }
+  if (/\bøv(?:e)?\s+til\b/.test(n) && /\b(pr[oø]ve|tentamen|eksamen)\b/.test(n)) return true;
+  if (
+    /\b(repetisjon|gjennomgang|oppsummering|repetere)\b/.test(n) &&
+    /\b(f[oø]r|til)\s+(?:en\s+)?(?:pr[oø]ve|tentamen|eksamen|vurdering)\b/.test(n)
+  ) {
+    return true;
+  }
+  if (/\brepetisjon\s+f[oø]r\s+tentamen\b/.test(n)) return true;
+  if (/\bøvingsoppgav|øving\s+f[oø]r\b/.test(n) && /\b(pr[oø]ve|tentamen)\b/.test(n)) return true;
+  return false;
+}
+
+function classifyAssessmentLineSemantics(line: string): AssessmentLineSemantics {
+  const t = normalizeSpace(line);
+  if (!t) return "generic_homework";
+  if (isAssessmentPreparationLine(t)) return "assessment_preparation";
+  if (/\bi\s+timen\b/i.test(t) && !isAssessmentOrExamPrimaryLine(t)) return "in_class_activity";
+  if (isAssessmentOrExamPrimaryLine(t)) return "actual_assessment";
+  return "generic_homework";
+}
+
 function isPacklistOrRememberSuppliesOnly(raw: string | null): boolean {
   if (!raw) return false;
   const n = normalizeNorwegianLetters(raw);
@@ -851,7 +893,15 @@ function isStandaloneTaskCandidate(text: string): boolean {
   ) {
     return true;
   }
-  if (isEventLikeText(t)) return false;
+  if (isEventLikeText(t)) {
+    if (
+      isAssessmentPreparationLine(t) &&
+      (ACTIONABLE_TASK_RE.test(n) || isLekseInnleveringOrConcreteHomework(t))
+    ) {
+      return true;
+    }
+    return false;
+  }
   return ACTIONABLE_TASK_RE.test(n);
 }
 
@@ -3175,8 +3225,13 @@ type OverlayHomeworkTasksDebug = {
     reason: string;
     assessmentTaskAccepted?: boolean;
     assessmentTaskReason?: string;
+    /** Semantisk kategori for linjen (debug). */
+    assessmentSemanticsDetected?: AssessmentLineSemantics;
+    assessmentPreparationDetected?: boolean;
     /** Fag utledet fra sterkt signal i oppgavelinjen (debug). */
     taskSubjectDerivedFromLine?: string | null;
+    /** Eksplisitt linjefag (samme som taskSubjectDerivedFromLine når det kommer fra EXPLICIT-mønstre). */
+    taskSubjectDerivedFromExplicitLine?: string | null;
     /** true når linjefag overstyrrer radens customLabel. */
     taskSubjectOverrodeRowSubject?: boolean;
   }>;
@@ -3186,6 +3241,10 @@ type OverlayHomeworkTasksDebug = {
     reason: string;
     assessmentTaskRejected?: boolean;
     assessmentTaskReason?: string;
+    assessmentSemanticsDetected?: AssessmentLineSemantics;
+    assessmentPreparationDetected?: boolean;
+    /** true når linjen lå under prøve-seksjon men er forberedelse/repetisjon, ikke selve vurderingen. */
+    assessmentTaskSuppressedBecausePreparation?: boolean;
   }>;
 };
 
@@ -3353,6 +3412,30 @@ const EXPLICIT_LINE_SUBJECT_PATTERNS: Array<{
     label: "Norsk",
     reason: "explicit_norskprove",
   },
+  {
+    re: /\b(mattepr[oø]ve|matematikkpr[oø]ve|tentamen\s+i\s+(matte|matematikk)|pr[oø]ve\s+i\s+(matte|matematikk))\b/,
+    subjectKey: "matematikk",
+    label: "Matematikk",
+    reason: "explicit_matteprove",
+  },
+  {
+    re: /\b(naturpr[oø]ve|naturfagpr[oø]ve|tentamen\s+i\s+naturfag|pr[oø]ve\s+i\s+naturfag)\b/,
+    subjectKey: "naturfag",
+    label: "Naturfag",
+    reason: "explicit_naturprove",
+  },
+  {
+    re: /\b(samfunnsfagpr[oø]ve|tentamen\s+i\s+samfunnsfag|pr[oø]ve\s+i\s+samfunnsfag)\b/,
+    subjectKey: "samfunnsfag",
+    label: "Samfunnsfag",
+    reason: "explicit_samfprove",
+  },
+  {
+    re: /\b(krlepr[oø]ve|rlepr[oø]ve|tentamen\s+i\s+(krle|rle)|pr[oø]ve\s+i\s+(krle|rle))\b/,
+    subjectKey: "krle",
+    label: "KRLE",
+    reason: "explicit_krleprove",
+  },
 ];
 
 type ExplicitStrongLineSubject = {
@@ -3396,6 +3479,22 @@ function overlayTyskTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): numb
   );
 }
 
+function overlayMathTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
+  return updates.findIndex((u) => {
+    const k = (u.subjectKey ?? "").toLowerCase();
+    if (k === "matematikk" || k === "matte") return true;
+    return /\b(matte|matematikk)\b/.test(normalizeNorwegianLetters(u.customLabel ?? ""));
+  });
+}
+
+function overlayNaturfagTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
+  return updates.findIndex((u) => {
+    const k = (u.subjectKey ?? "").toLowerCase();
+    if (k === "naturfag" || k === "natur") return true;
+    return /\bnaturfag\b/.test(normalizeNorwegianLetters(u.customLabel ?? ""));
+  });
+}
+
 /** Finn målrad når eksplisitt linje-signal bruker subjectKey (slug), men rad kan ha customLabel-variasjoner. */
 function overlayExplicitLineTargetIndex(
   updates: SchoolWeekOverlaySubjectUpdate[],
@@ -3403,6 +3502,8 @@ function overlayExplicitLineTargetIndex(
 ): number {
   if (subjectKey === "tysk") return overlayTyskTargetIndex(updates);
   if (subjectKey === "polsk") return overlayPolskTargetIndex(updates);
+  if (subjectKey === "matematikk") return overlayMathTargetIndex(updates);
+  if (subjectKey === "naturfag") return overlayNaturfagTargetIndex(updates);
   return overlaySubjectIndexByKey(updates, subjectKey);
 }
 
@@ -4210,6 +4311,8 @@ function isLekseInnleveringOrConcreteHomework(line: string): boolean {
   )
     return true;
   if (/\bjobb\s+med\b/.test(n) && /\b(oppgav|matte|matematikk)\b/.test(n)) return true;
+  if (/\brepetisjon\b/.test(n) && /\b(tentamen|pr[oø]ve|vurdering)\b/.test(n)) return true;
+  if (/\bgjennomgang\b/.test(n) && /\b(tentamen|pr[oø]ve)\b/.test(n)) return true;
   return false;
 }
 
@@ -4220,9 +4323,14 @@ function isResourceDiscoveryNotHomeworkTask(line: string): boolean {
 }
 
 function isAssessmentOrExamPrimaryLine(line: string): boolean {
+  if (isAssessmentPreparationLine(line)) return false;
   const n = normalizeNorwegianLetters(line);
   if (/\b(lekse|innlevering|lever\s*inn)\b/.test(n)) return false;
-  if (/\b(les\s+|skriv\b|gjør\s|gjor\s|oppgave\s*\d|hjemme|øv\s+til|forbered)\b/.test(n))
+  if (
+    /\b(les\s+|skriv\b|gjør\s|gjor\s|oppgave\s*\d|hjemme|øv\s+til|forbered(?:e|else|es|er)?)\b/.test(
+      n,
+    )
+  )
     return false;
   if (/\b(?:tysk|spansk|fransk|engelsk)pr[oø]ve\b/.test(n)) return true;
   return /\b(pr[oø]ve|fagpr[oø]ve|tentamen|vurdering|heldagspr[oø]ve|heldagsprove|eksamen|muntlig\s+eksamen|skriftlig\s+eksamen|kartlegging|standpunkt)\b/.test(
@@ -4245,6 +4353,7 @@ function tryBuildAssessmentTaskTitle(
   candidate: HomeworkCandidate,
   subjectLabel: string | null | undefined,
 ): { title: string; rule: string } | null {
+  if (isAssessmentPreparationLine(candidate.text)) return null;
   if (!isAssessmentOrExamPrimaryLine(candidate.text)) return null;
   const subj = inferHomeworkSubjectLabel(candidate, subjectLabel);
   if (!subj) return null;
@@ -4390,11 +4499,16 @@ function buildHomeworkTaskItemsFromOverlay(
         !isBlobOrSectionLabelForSubject(rowHead) &&
         normalizeNorwegianLetters(exSub.label) !== normalizeNorwegianLetters(rowHead),
     );
+    const sem = classifyAssessmentLineSemantics(candidate.text);
+    const prep = isAssessmentPreparationLine(candidate.text);
     debug?.accepted.push({
       dayIndex,
       title: title || "Oppgave",
       reason: `${reason};titleRule=${rule};source=${sourceUsed};langMentions=${languageMentionCountInLine(candidate.text)};notes=${notes.includes("Detaljer:") ? "with_details" : "basic"}`,
+      assessmentSemanticsDetected: sem,
+      assessmentPreparationDetected: prep,
       taskSubjectDerivedFromLine: exSub?.label ?? null,
+      taskSubjectDerivedFromExplicitLine: exSub?.label ?? null,
       taskSubjectOverrodeRowSubject: overrodeRow,
       ...(validationReason === "accepted_concrete_assessment_task"
         ? {
@@ -4444,16 +4558,34 @@ function buildHomeworkTaskItemsFromOverlay(
       for (const candidate of collectHomeworkCandidateLinesFromSections(su.sections)) {
         const verdict = isValidOverlayHomeworkCandidate(candidate, su.customLabel);
         if (!verdict.ok) {
+          const sem = classifyAssessmentLineSemantics(candidate.text);
+          const prep = isAssessmentPreparationLine(candidate.text);
+          const suppressedPrep =
+            prep &&
+            candidate.section === "proveVurdering" &&
+            /\b(pr[oø]ve|tentamen|vurdering|eksamen)\b/.test(
+              normalizeNorwegianLetters(candidate.text),
+            );
           if (isAssessmentOrExamPrimaryLine(candidate.text)) {
             debug?.rejected.push({
               dayIndex,
               line: candidate.text,
               reason: verdict.reason,
+              assessmentSemanticsDetected: sem,
+              assessmentPreparationDetected: prep,
+              assessmentTaskSuppressedBecausePreparation: suppressedPrep,
               assessmentTaskRejected: true,
               assessmentTaskReason: verdict.reason,
             });
           } else {
-            debug?.rejected.push({ dayIndex, line: candidate.text, reason: verdict.reason });
+            debug?.rejected.push({
+              dayIndex,
+              line: candidate.text,
+              reason: verdict.reason,
+              assessmentSemanticsDetected: sem,
+              assessmentPreparationDetected: prep,
+              assessmentTaskSuppressedBecausePreparation: suppressedPrep,
+            });
           }
           continue;
         }
