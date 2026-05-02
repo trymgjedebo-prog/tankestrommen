@@ -1934,6 +1934,7 @@ Rules:
 22. For A-plans, one-off weekly activity plans, invitations, or week-specific narratives, set "schoolWeeklyProfile" to null and use "days" as usual.
 23. Sports tournaments / Spond messages: put Spond reply deadlines in "deadlines". Put parent volunteer help (fruit, meeting point, equipment) and "notify about medicine" as short separate bullets in "rememberItems" or "deadlines", not buried in long "notes" paragraphs.
 24. If a day or match depends on progressing (e.g. "if we advance", "time TBD", "published later"), state that clearly in "notes" or "highlights" for that day—do not imply the time is final.
+25. For the same cup weekend: put information that applies to every day (packing, weather, general venue rules) once in "generalImportantInfo" or repeat the exact same short bullet only if needed; put day-specific kickoff/meeting times and opponents in that day's "highlights" or "time".
 
 Return this JSON shape:
 

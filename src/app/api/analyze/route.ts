@@ -645,6 +645,14 @@ function overlayPreserveTaskTitleTrim(taskText: string, maxLen: number): string 
   return `${stripped.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
 }
 
+/** Grovt «hele dagen»-vindu når cup-/Spond-kilden ikke gir pålitelig klokkeslett (unngå 08:00–09:00). */
+const CUP_UNCERTAIN_DAY_WINDOW = { start: "06:00", end: "22:00" } as const;
+
+function hasReliableClockInTimeField(time: string | null | undefined): boolean {
+  if (!time?.trim()) return false;
+  return /\d{1,2}[.:]\d{2}/.test(time);
+}
+
 function extractStartEnd(time: string | null): { start: string; end: string } {
   const fallback = { start: "08:00", end: "09:00" };
   if (!time) return fallback;
@@ -771,8 +779,19 @@ type PortalEventItem = {
        * Foreldre-App leser dette fra `event.metadata.schoolDayOverride`.
        */
       schoolDayOverride?: SchoolDayOverride;
+      /** Valgfri diagnostikk for cup/Spond-forslag (ignoreres av klienter som ikke leser feltet). */
+      cupProposalDebug?: CupProposalItemDebug;
     };
   };
+};
+
+/** Debug for cup-/turneringsforslag (portal bundle / Network). */
+type CupProposalItemDebug = {
+  sharedCupInfoLiftedOut?: boolean;
+  conditionalDayDetected?: boolean;
+  conditionalDayRenderedAsSoftEvent?: boolean;
+  defaultTimeSuppressed?: boolean;
+  daySpecificContentAfterSharedLift?: boolean;
 };
 
 type PortalTaskItem = {
@@ -990,12 +1009,102 @@ function isGeneralCupPracticalBulkLine(line: string): boolean {
 function isConditionalTournamentText(blob: string): boolean {
   const n = normalizeNorwegianLetters(normalizeSpace(blob));
   if (/\bhvis\s+vi\s+(går|gar)\s+videre\b/.test(n)) return true;
-  if (/\b(avhengig|evt\.?|eventuell)\b/.test(n) && /\b(sluttspill|cup|finale|spill)\b/.test(n)) return true;
+  if (/\b(hvis|dersom)\s+(vi|laget|gruppa|dere)\s+(går|gar|kommer)\b/.test(n)) return true;
+  if (/\b(avhengig|evt\.?|eventuell|eventuelle)\b/.test(n) && /\b(sluttspill|cup|finale|spill|kamp)\b/.test(n))
+    return true;
+  if (/\beventuell\w*\b/.test(n) && /\b(sluttspill|kamp|finale|cup|A-)\b/.test(n)) return true;
+  if (/\bA-?sluttspill\b/.test(n)) return true;
   if (/\btidspunkt\s+kommer\b/.test(n)) return true;
   if (/\b(kommer|publiseres)\s+senere\b/.test(n)) return true;
   if (/\bikke\s+fastsatt\b/.test(n)) return true;
   if (/\bTBA\b/.test(blob)) return true;
+  if (/\b(søndag|sondag)\b/.test(n) && /\b(sluttspill|finale|cupkamp|semifinale)\b/.test(n)) {
+    if (/\b(hvis|dersom|eventuell|avhengig|kanskje|evt)\b/.test(n)) return true;
+  }
+  const rawSpaced = normalizeSpace(blob);
+  if (/\b(søndag|sondag)\b/i.test(rawSpaced) && /\b(sluttspill|finale|semifinale)\b/.test(n)) {
+    if (!/\d{1,2}[.:]\d{2}/.test(rawSpaced)) return true;
+  }
   return false;
+}
+
+/** Linje som sannsynligvis hører til én kampdag (skal ikke flyttes til «felles for helgen»). */
+function isLikelyDaySpecificCupLine(line: string): boolean {
+  const n = normalizeNorwegianLetters(normalizeSpace(line));
+  if (/\b(kamp|avspark|omkamp|walkover)\b/.test(n)) return true;
+  if (/\bmot\s+[A-ZÆØÅa-zæøå]/.test(line)) return true;
+  if (/\bbane\s*\d|felt\s*\d/.test(n)) return true;
+  if (/\boppm[oø]te\s+(kl\.?|ca\.?|\d{1,2})/.test(n)) return true;
+  if (/\bkl\.?\s*\d{1,2}[.:]\d{2}\b/.test(line)) return true;
+  return false;
+}
+
+function forEachCupShareCandidateLine(day: DayScheduleEntry, fn: (line: string) => void): void {
+  for (const x of day.rememberItems) fn(x);
+  for (const x of day.notes) for (const p of splitTaskCandidates(x)) fn(p);
+  for (const x of day.highlights) for (const p of splitTaskCandidates(x)) fn(p);
+  if (day.details) {
+    for (const ln of day.details.split(/\n/)) {
+      const s = normalizeSpace(ln);
+      if (!s || /^Høydepunkter:|^Frister:|^Notater:/i.test(s)) continue;
+      const hm = /^Høydepunkter:\s*(.+)$/i.exec(s);
+      if (hm) {
+        for (const bit of hm[1].split(/[;]/).map(normalizeSpace).filter(Boolean)) fn(bit);
+        continue;
+      }
+      const hk = /^Husk:\s*(.+)$/i.exec(s);
+      if (hk) {
+        for (const bit of hk[1].split(/[;]/).map(normalizeSpace).filter(Boolean)) fn(bit);
+        continue;
+      }
+      for (const p of splitTaskCandidates(s)) fn(p);
+    }
+  }
+}
+
+/** Tekst som gjentas på flere dager → typisk «felles for cuphelgen» (ikke dag-spesifikk kamp). */
+function collectCupSharedLinesRepeatedAcrossDays(
+  days: DayScheduleEntry[],
+): { lines: string[]; keys: Set<string> } {
+  const keyToDays = new Map<string, Set<number>>();
+  const keyToCanon = new Map<string, string>();
+  days.forEach((d, idx) => {
+    forEachCupShareCandidateLine(d, (raw) => {
+      const s = normalizeSpace(raw);
+      if (!s || s.length < 14 || s.length > 480) return;
+      if (isParentCoordinatorTaskLine(s)) return;
+      if (isGeneralCupPracticalBulkLine(s)) return;
+      if (isLikelyDaySpecificCupLine(s)) return;
+      if (/\b(innen|senest|f[oø]r)\b.*\d{1,2}[./]/.test(s)) return;
+      const k = cupLineNormKey(s);
+      if (k.length < 14) return;
+      if (!keyToDays.has(k)) keyToDays.set(k, new Set());
+      keyToDays.get(k)!.add(idx);
+      const prev = keyToCanon.get(k);
+      if (!prev || s.length < prev.length) keyToCanon.set(k, s);
+    });
+  });
+  const keys = new Set<string>();
+  const lines: string[] = [];
+  for (const [k, ds] of keyToDays) {
+    if (ds.size < 2) continue;
+    keys.add(k);
+    lines.push(keyToCanon.get(k)!);
+  }
+  lines.sort((a, b) => a.localeCompare(b, "nb"));
+  return { lines, keys };
+}
+
+function mergeCupFooterLines(primary: string[], extra: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of [...primary, ...extra]) {
+    const k = cupLineNormKey(part);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(part);
+  }
+  return out;
 }
 
 function shouldCountAsPortalTask(text: string, cupLike: boolean): boolean {
@@ -1673,8 +1782,10 @@ function buildProposalItems(
     },
     schoolContext?: EventSchoolContext | null,
     schoolDayOverride?: SchoolDayOverride | null,
+    explicitStartEnd?: { start: string; end: string } | null,
+    cupProposalDebug?: CupProposalItemDebug | null,
   ): PortalEventItem => {
-    const { start, end } = extractStartEnd(time);
+    const { start, end } = explicitStartEnd ?? extractStartEnd(time);
     const item: PortalEventItem = {
       proposalId: randomUUID(),
       kind: "event",
@@ -1692,10 +1803,11 @@ function buildProposalItems(
     const n = buildStructuredNotes(notes, dayContext);
     if (n) item.event.notes = n;
     if (result.location) item.event.location = result.location;
-    if (schoolContext || schoolDayOverride) {
+    if (schoolContext || schoolDayOverride || cupProposalDebug) {
       item.event.metadata = {
         ...(schoolContext ? { schoolContext } : {}),
         ...(schoolDayOverride ? { schoolDayOverride } : {}),
+        ...(cupProposalDebug ? { cupProposalDebug } : {}),
       };
     }
     return item;
@@ -1730,9 +1842,16 @@ function buildProposalItems(
       cupLike && result.scheduleByDay.length > 0
         ? collectCupHoistedPracticalLines(result.scheduleByDay)
         : { lines: [] as string[], keys: new Set<string>() };
+    const multiDayShared =
+      cupLike && result.scheduleByDay.length >= 2
+        ? collectCupSharedLinesRepeatedAcrossDays(result.scheduleByDay)
+        : { lines: [] as string[], keys: new Set<string>() };
+    const allHoistKeys = new Set<string>([...hoistedPractical.keys, ...multiDayShared.keys]);
+    const mergedFooterLines = mergeCupFooterLines(hoistedPractical.lines, multiDayShared.lines);
+    const sharedCupInfoLiftedOut = cupLike && mergedFooterLines.length > 0;
     const cupFooterOnce =
-      cupLike && hoistedPractical.lines.length > 0
-        ? `Praktisk for hele cup/perioden:\n${hoistedPractical.lines.map((l) => `- ${l}`).join("\n")}`
+      sharedCupInfoLiftedOut
+        ? `Felles for cup/helg (samme info flere dager eller generelt utstyr):\n${mergedFooterLines.map((l) => `- ${l}`).join("\n")}`
         : null;
     let pendingCupFooter = cupFooterOnce;
 
@@ -1740,7 +1859,7 @@ function buildProposalItems(
       const isoDate = resolveDate(day.date, day.dayLabel);
       if (!isoDate) continue;
 
-      const hk = hoistedPractical.keys;
+      const hk = allHoistKeys;
       const fRemember = cupLike ? filterHoistedCupStrings(day.rememberItems, hk) : day.rememberItems;
       const fNotesRaw = cupLike ? filterHoistedCupStrings(day.notes, hk) : day.notes;
       const fHighlights = cupLike ? filterHoistedCupStrings(day.highlights, hk) : day.highlights;
@@ -1761,8 +1880,18 @@ function buildProposalItems(
       ].join(" ");
       const conditionalDay = cupLike && isConditionalTournamentText(dayBlob);
       const titleSuffix = conditionalDay
-        ? `${day.dayLabel ?? "Dag"} (betinget — avhengig av utslag / mer info kommer)`
+        ? `${day.dayLabel ?? "Dag"} (usikker / betinget — ikke fast opplegg)`
         : day.dayLabel;
+
+      let explicitStartEnd: { start: string; end: string } | null = null;
+      if (cupLike) {
+        if (conditionalDay) {
+          explicitStartEnd = { ...CUP_UNCERTAIN_DAY_WINDOW };
+        } else if (!hasReliableClockInTimeField(day.time)) {
+          explicitStartEnd = { ...CUP_UNCERTAIN_DAY_WINDOW };
+        }
+      }
+      const defaultTimeSuppressed = Boolean(explicitStartEnd);
 
       const taskCandidates = [
         ...day.deadlines,
@@ -1816,6 +1945,22 @@ function buildProposalItems(
         const dayOverride = isSchoolPlanBundleContext(result, weekPlanLike)
           ? detectSchoolDayOverride(day, day.time)
           : null;
+        const daySpecificContentAfterSharedLift = Boolean(
+          (fDetails && fDetails.trim()) ||
+            fHighlights.length > 0 ||
+            fRemember.length > 0 ||
+            fNotesRaw.some((x) => normalizeSpace(x).length > 0),
+        );
+        const cupDbg: CupProposalItemDebug | null = cupLike
+          ? {
+              sharedCupInfoLiftedOut,
+              conditionalDayDetected: conditionalDay,
+              conditionalDayRenderedAsSoftEvent: conditionalDay,
+              defaultTimeSuppressed,
+              daySpecificContentAfterSharedLift,
+            }
+          : null;
+
         const ev = buildEventItem(
           isoDate,
           day.time,
@@ -1829,12 +1974,18 @@ function buildProposalItems(
           },
           schoolCtx,
           dayOverride,
+          explicitStartEnd,
+          cupDbg,
         );
         if (conditionalDay) {
-          ev.confidence = Math.min(ev.confidence, 0.56);
+          ev.confidence = Math.min(ev.confidence, 0.52);
           const prefix =
-            "NB: Innholdet kan være betinget (f.eks. videre avansement eller tid som ikke er endelig). Sjekk kilden.\n\n";
+            "NB: Usikkert eller betinget opplegg (f.eks. avhengig av resultat eller tid som ikke er endelig). Ikke behandle som fast avtale.\n\n";
           ev.event.notes = ev.event.notes ? `${prefix}${ev.event.notes}` : prefix.trim();
+        } else if (defaultTimeSuppressed) {
+          const softTime =
+            "NB: Ingen tydelig klokkeslett i kilden – kalenderen bruker bredt vindu (06:00–22:00). Sjekk oppmøte i Spond/melding.\n\n";
+          ev.event.notes = ev.event.notes ? `${softTime}${ev.event.notes}` : softTime.trim();
         }
         items.push(ev);
       }
@@ -1861,7 +2012,7 @@ function buildProposalItems(
         items.push(buildTaskItem(isoDate, slot.label, slotSignal));
       } else {
         items.push(
-          buildEventItem(isoDate, slot.time, slot.label, null, undefined, null, null),
+          buildEventItem(isoDate, slot.time, slot.label, null, undefined, null, null, null, null),
         );
       }
     }
@@ -1869,7 +2020,7 @@ function buildProposalItems(
 
   if (items.length === 0) {
     const today = new Date().toISOString().slice(0, 10);
-    items.push(buildEventItem(today, null, null, null, undefined, null, null));
+    items.push(buildEventItem(today, null, null, null, undefined, null, null, null, null));
   }
 
   return items;
