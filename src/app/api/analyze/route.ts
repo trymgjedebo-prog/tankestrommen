@@ -3156,6 +3156,13 @@ type OverlayNoiseFilterDebug = {
         /** Fylles i portal-bundle etter task-bygging; kandidater her etter omfordeling. */
         overlayHomeworkCandidatesAfterOrphanAssignment?: number;
         overlayTasksBuiltAfterOrphanAssignment?: number;
+        overlayExplicitLineSubjectDetected?: Array<{
+          line: string;
+          subjectKey: string;
+          reason: string;
+        }>;
+        overlayExplicitLineSubjectOverridesRow?: number;
+        overlayExplicitLineSubjectOverrideReason?: string;
       }
     >
   >;
@@ -3168,6 +3175,10 @@ type OverlayHomeworkTasksDebug = {
     reason: string;
     assessmentTaskAccepted?: boolean;
     assessmentTaskReason?: string;
+    /** Fag utledet fra sterkt signal i oppgavelinjen (debug). */
+    taskSubjectDerivedFromLine?: string | null;
+    /** true når linjefag overstyrrer radens customLabel. */
+    taskSubjectOverrodeRowSubject?: boolean;
   }>;
   rejected: Array<{
     dayIndex: string;
@@ -3298,6 +3309,187 @@ const MOVABLE_ORPHAN_SECTIONS: (keyof SchoolWeekOverlaySections)[] = [
   "proveVurdering",
 ];
 
+/** Konservativt: bare tydelige «språkprøve»- og tilsvarende mønstre (normalisert tekst). */
+const EXPLICIT_LINE_SUBJECT_PATTERNS: Array<{
+  re: RegExp;
+  subjectKey: string;
+  label: string;
+  reason: string;
+}> = [
+  {
+    re: /\b(tyskpr[oø]ve|til\s+tyskpr[oø]v(en)?|skriftlig\s+tyskpr[oø]ve|tysk\s+pr[oø]ve)\b/,
+    subjectKey: "tysk",
+    label: "Tysk",
+    reason: "explicit_tyskprove",
+  },
+  {
+    re: /\b(spanskpr[oø]ve|til\s+spanskpr[oø]v(en)?|skriftlig\s+spanskpr[oø]ve|spansk\s+pr[oø]ve)\b/,
+    subjectKey: "spansk",
+    label: "Spansk",
+    reason: "explicit_spanskprove",
+  },
+  {
+    re: /\b(franskpr[oø]ve|til\s+franskpr[oø]v(en)?|skriftlig\s+franskpr[oø]ve|fransk\s+pr[oø]ve)\b/,
+    subjectKey: "fransk",
+    label: "Fransk",
+    reason: "explicit_franskprove",
+  },
+  {
+    re: /\b(engelskpr[oø]ve|til\s+engelskpr[oø]v(en)?|skriftlig\s+engelskpr[oø]ve|engelsk\s+pr[oø]ve)\b/,
+    subjectKey: "engelsk",
+    label: "Engelsk",
+    reason: "explicit_engelskprove",
+  },
+  {
+    re: /\b(norskpr[oø]ve|til\s+norskpr[oø]v(en)?|skriftlig\s+norskpr[oø]ve)\b/,
+    subjectKey: "norsk",
+    label: "Norsk",
+    reason: "explicit_norskprove",
+  },
+];
+
+type ExplicitStrongLineSubject = {
+  subjectKey: string;
+  label: string;
+  reason: string;
+};
+
+function detectExplicitStrongSubjectInLine(line: string | null | undefined): ExplicitStrongLineSubject | null {
+  const t = normalizeSpace(line ?? "");
+  if (!t || isLikelyAdminOrRoutineText(t)) return null;
+  const n = normalizeNorwegianLetters(t);
+  for (const p of EXPLICIT_LINE_SUBJECT_PATTERNS) {
+    if (p.re.test(n)) {
+      return { subjectKey: p.subjectKey, label: p.label, reason: p.reason };
+    }
+  }
+  return null;
+}
+
+function overlaySubjectIndexByKey(
+  updates: SchoolWeekOverlaySubjectUpdate[],
+  subjectKey: string,
+): number {
+  return updates.findIndex((u) => u.subjectKey === subjectKey);
+}
+
+function targetSectionForExplicitSubjectLine(
+  line: string,
+  fromSec: keyof SchoolWeekOverlaySections,
+): keyof SchoolWeekOverlaySections {
+  const n = normalizeNorwegianLetters(line);
+  if (/\b(ha\s+med|ta\s+med)\b/i.test(line) || /\btil\s+\w+pr[oø]v/.test(n)) return "husk";
+  if (/\bskriftlig\s+\w+pr[oø]ve\b/.test(n)) return "proveVurdering";
+  if (/\w+pr[oø]ve\b/.test(n) && !/\btil\s+\w+pr/.test(n)) return "proveVurdering";
+  if (fromSec === "proveVurdering") return "proveVurdering";
+  return fromSec;
+}
+
+/**
+ * Flytt linjer med eksplisitt fagsignal (f.eks. tyskprøve) fra feil rad til riktig subjectKey.
+ */
+function reassignExplicitStrongSubjectLinesAmongTableSubjects(
+  subjectUpdates: SchoolWeekOverlaySubjectUpdate[],
+  policy: OverlayTextPolicy,
+  dayMeta: NonNullable<OverlayNoiseFilterDebug["days"][string]>,
+): void {
+  if (subjectUpdates.length < 2) return;
+
+  const cap = policy.sectionLineCap;
+  const ek = policy.ekstraPoolCap;
+  const scanSections: (keyof SchoolWeekOverlaySections)[] = [
+    ...MOVABLE_ORPHAN_SECTIONS,
+    "lekse",
+  ];
+
+  type Move = {
+    line: string;
+    fromIdx: number;
+    fromSec: keyof SchoolWeekOverlaySections;
+    toIdx: number;
+    toSec: keyof SchoolWeekOverlaySections;
+    reason: string;
+  };
+  const moves: Move[] = [];
+  const detected: Array<{ line: string; subjectKey: string; reason: string }> = [];
+
+  for (let fromIdx = 0; fromIdx < subjectUpdates.length; fromIdx++) {
+    const su = subjectUpdates[fromIdx];
+    const fromKey = su.subjectKey;
+    for (const fromSec of scanSections) {
+      const arr = su.sections[fromSec];
+      if (!arr?.length) continue;
+      for (const line of arr) {
+        const t = normalizeSpace(line);
+        if (!t || isLikelyAdminOrRoutineText(t)) continue;
+        const hit = detectExplicitStrongSubjectInLine(t);
+        if (!hit) continue;
+        detected.push({ line: t, subjectKey: hit.subjectKey, reason: hit.reason });
+        if (hit.subjectKey === fromKey) continue;
+        const toIdx = overlaySubjectIndexByKey(subjectUpdates, hit.subjectKey);
+        if (toIdx < 0 || toIdx === fromIdx) continue;
+
+        const toSec = targetSectionForExplicitSubjectLine(t, fromSec);
+        moves.push({
+          line: t,
+          fromIdx,
+          fromSec,
+          toIdx,
+          toSec,
+          reason: `${hit.reason}:${fromKey}→${hit.subjectKey}`,
+        });
+      }
+    }
+  }
+
+  if (detected.length) {
+    dayMeta.overlayExplicitLineSubjectDetected = detected;
+  }
+  if (!moves.length) return;
+
+  const dedupe = new Set<string>();
+  const uniqueMoves = moves.filter((m) => {
+    const k = `${m.fromIdx}|${m.fromSec}|${m.line}`;
+    if (dedupe.has(k)) return false;
+    dedupe.add(k);
+    return true;
+  });
+  if (!uniqueMoves.length) return;
+
+  dayMeta.overlayExplicitLineSubjectOverridesRow = uniqueMoves.length;
+  dayMeta.overlayExplicitLineSubjectOverrideReason = uniqueMoves.map((m) => m.reason).join("; ");
+
+  const removeOne = (
+    sections: SchoolWeekOverlaySections,
+    sec: keyof SchoolWeekOverlaySections,
+    line: string,
+  ) => {
+    const arr = sections[sec];
+    if (!arr) return;
+    const idx = arr.findIndex((x) => normalizeSpace(x) === line);
+    if (idx >= 0) {
+      const next = arr.filter((_, i) => i !== idx);
+      if (next.length) sections[sec] = compactLines(next, sec === "ekstraBeskjed" ? ek : cap);
+      else delete sections[sec];
+    }
+  };
+
+  const addLine = (
+    sections: SchoolWeekOverlaySections,
+    sec: keyof SchoolWeekOverlaySections,
+    line: string,
+  ) => {
+    const max = sec === "ekstraBeskjed" ? ek : cap;
+    const cur = sections[sec] ?? [];
+    sections[sec] = compactLines([...cur, line], max);
+  };
+
+  for (const m of uniqueMoves) {
+    removeOne(subjectUpdates[m.fromIdx].sections, m.fromSec, m.line);
+    addLine(subjectUpdates[m.toIdx].sections, m.toSec, m.line);
+  }
+}
+
 function overlayTyskTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]): number {
   return updates.findIndex(
     (u) =>
@@ -3317,12 +3509,7 @@ function overlaySamfunnsfagTargetIndex(updates: SchoolWeekOverlaySubjectUpdate[]
 
 /** Sterk nok til å knytte linjen til Tysk-raden (A-plan / prøve / utstyr til prøve). */
 function lineSuggestsTyskTableSubject(line: string): boolean {
-  const n = normalizeNorwegianLetters(line);
-  if (/\btyskpr[oø]v/i.test(n)) return true;
-  if (/\btil\s+tyskpr[oø]v/i.test(n)) return true;
-  if (/\bskriftlig\s+tyskpr[oø]v/i.test(n)) return true;
-  if (/\btysk\s+pr[oø]v/i.test(n)) return true;
-  return false;
+  return detectExplicitStrongSubjectInLine(line)?.subjectKey === "tysk";
 }
 
 /** Praktisk avvik / svøm / retur til språktime — typisk samfunnsfag-blokk i denne typen plan. */
@@ -3348,7 +3535,7 @@ function inferOrphanRedistributionTarget(
   const ty = tyskIdx >= 0 && lineSuggestsTyskTableSubject(line);
   const sa = samfIdx >= 0 && lineSuggestsSamfunnsfagTableSubject(line);
   if (ty && sa) {
-    if (/\btyskpr[oø]v/i.test(normalizeNorwegianLetters(line))) {
+    if (detectExplicitStrongSubjectInLine(line)?.subjectKey === "tysk") {
       return { kind: "tysk", reason: "tyskprøve_overlaps_pool_context" };
     }
     return { kind: "samfunnsfag", reason: "pool_day_over_tysk_token_ambiguous" };
@@ -3364,9 +3551,9 @@ function targetSectionKeyForRedistributedLine(
 ): keyof SchoolWeekOverlaySections {
   const n = normalizeNorwegianLetters(line);
   if (kind === "tysk") {
-    if (/\bskriftlig\s+tyskpr[oø]v\b/.test(n)) return "proveVurdering";
-    if (/\btil\s+tyskpr[oø]v/i.test(n) || /\b(blyant|viskelær)\b/.test(n)) return "husk";
-    if (/\btyskpr[oø]v/i.test(n) && !/\btil\s+tyskpr/i.test(n)) return "proveVurdering";
+    if (/\bskriftlig\s+tyskpr[oø]ve\b/.test(n)) return "proveVurdering";
+    if (/\btil\s+tyskpr[oø]v(en)?\b/i.test(n) || /\b(blyant|viskelær)\b/.test(n)) return "husk";
+    if (/\btyskpr[oø]ve\b/.test(n) && !/\btil\s+tyskpr/i.test(n)) return "proveVurdering";
     return "husk";
   }
   if (/^husk\b/i.test(normalizeSpace(line)) || /\b(husk|ta med|ha med)\s*:/i.test(line)) {
@@ -3628,6 +3815,7 @@ function buildSchoolWeekOverlayProposal(
       }
       if (rowAnchoredRows.length >= 1 && subjectUpdates.length >= 2) {
         redistributeOrphanOverlayLinesAmongTableSubjects(subjectUpdates, policy, dayMeta);
+        reassignExplicitStrongSubjectLinesAmongTableSubjects(subjectUpdates, policy, dayMeta);
       }
     } else {
       const { subjectRowLabels, contentHighlights } = partitionHighlightsForOverlaySubjectRow(
@@ -3809,6 +3997,9 @@ function inferHomeworkSubjectLabel(
   candidate: HomeworkCandidate,
   subjectLabel: string | null | undefined,
 ): string | null {
+  const explicit = detectExplicitStrongSubjectInLine(candidate.text);
+  if (explicit) return explicit.label;
+
   const raw = normalizeSpace(subjectLabel ?? "");
   const base = raw
     .replace(/^fag\s*[:\-]\s*/i, "")
@@ -3832,6 +4023,8 @@ function inferHomeworkSubjectLabel(
   if (/\bfranskpr[oø]ve\b/.test(t)) return "Fransk";
   if (/\bspanskpr[oø]ve\b/.test(t)) return "Spansk";
   if (/\btyskpr[oø]ve\b/.test(t)) return "Tysk";
+  if (/\btil\s+tyskpr[oø]v(en)?\b/.test(t)) return "Tysk";
+  if (/\bskriftlig\s+tyskpr[oø]ve\b/.test(t)) return "Tysk";
   if (/\bengelskpr[oø]ve\b/.test(t)) return "Engelsk";
   if (/\bfransk\b/.test(t)) return "Fransk";
   if (/\bspansk\b/.test(t)) return "Spansk";
@@ -4158,10 +4351,24 @@ function buildHomeworkTaskItemsFromOverlay(
       return;
     }
     seenKeys.add(dedupeKey);
+    const exSub = detectExplicitStrongSubjectInLine(candidate.text);
+    const rowHead = normalizeSpace(subjectLabel ?? "")
+      .replace(/^fag\s*[:\-]\s*/i, "")
+      .split(/[;|]/)[0]
+      ?.split(/\s+[–—-]\s+/)[0]
+      ?.trim();
+    const overrodeRow = Boolean(
+      exSub &&
+        rowHead &&
+        !isBlobOrSectionLabelForSubject(rowHead) &&
+        normalizeNorwegianLetters(exSub.label) !== normalizeNorwegianLetters(rowHead),
+    );
     debug?.accepted.push({
       dayIndex,
       title: title || "Oppgave",
       reason: `${reason};titleRule=${rule};source=${sourceUsed};langMentions=${languageMentionCountInLine(candidate.text)};notes=${notes.includes("Detaljer:") ? "with_details" : "basic"}`,
+      taskSubjectDerivedFromLine: exSub?.label ?? null,
+      taskSubjectOverrodeRowSubject: overrodeRow,
       ...(validationReason === "accepted_concrete_assessment_task"
         ? {
             assessmentTaskAccepted: true,
