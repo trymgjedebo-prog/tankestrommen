@@ -794,6 +794,22 @@ type CupProposalItemDebug = {
   daySpecificContentAfterSharedLift?: boolean;
   /** Antall unike foreldre-handlingsoppgaver etter dedupe (cup/Spond). */
   actionableParentTasksDeduped?: number;
+  /** Kanoniske nøkler for foreldre-tasks som ble til egne oppgaver denne dagen. */
+  cupParentTaskCanonicalized?: string[];
+  /** Grovt: antall linjedeler som matchet en promotert task per kilde (før stripping). */
+  cupParentTaskPromotedFromSource?: {
+    rememberItems: number;
+    notes: number;
+    highlights: number;
+    deadlines: number;
+    details: number;
+  };
+  /** Antall tekstdeler fjernet fra hendelsesbygg fordi de ble tasks. */
+  cupParentTaskRemovedFromEventNotes?: number;
+  /** Foreldre-task-varianter undertrykt av dedupe (samme kanoniske nøkkel). */
+  cupDuplicateParentTaskSuppressed?: number;
+  /** Kort utdrag av ferdige hendelsesnotater etter task-stripping (verifisering). */
+  cupEventNotesAfterTaskStripping?: string | null;
 };
 
 type PortalTaskItem = {
@@ -966,6 +982,138 @@ function isSchoolPlanBundleContext(
 /** Normalisert nøkkel for dedupe av praktiske cup-linjer. */
 function cupLineNormKey(s: string): string {
   return normalizeNorwegianLetters(normalizeSpace(s)).toLowerCase();
+}
+
+/** Fjerner typiske portal-/JSON-prefiks slik at «Notater: X» og «X» får samme dedupe-nøkkel. */
+function stripCupNoteLikePrefixes(line: string): string {
+  let s = normalizeSpace(line);
+  for (let i = 0; i < 5; i++) {
+    const next = s
+      .replace(/^(notater|husk|frister|huskeliste|viktig|obs|nb)\s*:\s*/i, "")
+      .replace(/^(høydepunkter|hoydepunkter|dagens\s+innhold)\s*:\s*/i, "")
+      .trim();
+    if (next === s) break;
+    s = next;
+  }
+  return normalizeSpace(s);
+}
+
+/** Kanonisk nøkkel for foreldre-handlingsoppgaver (cup/Spond). */
+function cupParentTaskDedupeKey(line: string): string {
+  return cupLineNormKey(stripCupNoteLikePrefixes(line));
+}
+
+function cupTaskStripKey(text: string): string {
+  return isParentCoordinatorTaskLine(text)
+    ? cupParentTaskDedupeKey(text)
+    : cupLineNormKey(text);
+}
+
+function parentTaskVariantScore(s: string): number {
+  const t = normalizeSpace(s);
+  let penalty = 0;
+  if (/^notater\s*:/i.test(t)) penalty += 200;
+  if (/^husk\s*:/i.test(t)) penalty += 80;
+  if (/^frister\s*:/i.test(t)) penalty += 80;
+  if (/^høydepunkter\s*:/i.test(t)) penalty += 60;
+  return penalty * 500 + t.length;
+}
+
+function preferParentTaskDisplayVariant(a: string, b: string): string {
+  const sa = parentTaskVariantScore(a);
+  const sb = parentTaskVariantScore(b);
+  if (sa !== sb) return sa < sb ? a : b;
+  return stripCupNoteLikePrefixes(a).length <= stripCupNoteLikePrefixes(b).length ? a : b;
+}
+
+function normalizeCupParentTaskBodyForTitle(taskText: string): string {
+  return normalizeTaskTitle(stripCupNoteLikePrefixes(taskText));
+}
+
+function filterCupStringArrayStripPromotedTasks(
+  arr: string[],
+  promotedKeys: Set<string>,
+): { out: string[]; removed: number } {
+  if (promotedKeys.size === 0) return { out: arr, removed: 0 };
+  let removed = 0;
+  const out: string[] = [];
+  for (const raw of arr) {
+    const parts = splitTaskCandidatesForCup(raw);
+    const kept: string[] = [];
+    for (const p of parts) {
+      const n = normalizeSpace(p);
+      if (!n) continue;
+      if (shouldCountAsPortalTask(n, true) && promotedKeys.has(cupTaskStripKey(n))) {
+        removed++;
+        continue;
+      }
+      kept.push(p);
+    }
+    if (kept.length === 0) continue;
+    const joined = kept.length === 1 ? kept[0]! : kept.join("; ");
+    out.push(joined === normalizeSpace(raw) ? raw : joined);
+  }
+  return { out, removed };
+}
+
+function filterCupDetailsStripPromotedTasks(
+  details: string | null,
+  promotedKeys: Set<string>,
+): { text: string | null; removed: number } {
+  if (!details?.trim() || promotedKeys.size === 0) return { text: details, removed: 0 };
+  let removed = 0;
+  const out: string[] = [];
+  for (const ln of details.split(/\n/)) {
+    const s = normalizeSpace(ln);
+    if (!s) continue;
+    const stripPart = (bits: string[]): string[] =>
+      bits.filter((b) => {
+        const n = normalizeSpace(b);
+        if (!n) return false;
+        if (shouldCountAsPortalTask(n, true) && promotedKeys.has(cupTaskStripKey(n))) {
+          removed++;
+          return false;
+        }
+        return true;
+      });
+    if (/^Høydepunkter:\s*(.+)$/i.test(s)) {
+      const rest = s.replace(/^Høydepunkter:\s*/i, "");
+      const kept = stripPart(rest.split(/[;]/).map(normalizeSpace).filter(Boolean));
+      if (kept.length) out.push(`Høydepunkter: ${kept.join("; ")}`);
+      continue;
+    }
+    if (/^Husk:\s*(.+)$/i.test(s)) {
+      const rest = s.replace(/^Husk:\s*/i, "");
+      const kept = stripPart(rest.split(/[;]/).map(normalizeSpace).filter(Boolean));
+      if (kept.length) out.push(`Husk: ${kept.join("; ")}`);
+      continue;
+    }
+    if (/^Frister:\s*(.+)$/i.test(s)) {
+      const rest = s.replace(/^Frister:\s*/i, "");
+      const kept = stripPart(rest.split(/[;]/).map(normalizeSpace).filter(Boolean));
+      if (kept.length) out.push(`Frister: ${kept.join("; ")}`);
+      continue;
+    }
+    if (/^Notater:\s*(.+)$/i.test(s)) {
+      const rest = s.replace(/^Notater:\s*/i, "");
+      const kept = stripPart(rest.split(/[;]/).map(normalizeSpace).filter(Boolean));
+      if (kept.length) out.push(`Notater: ${kept.join("; ")}`);
+      continue;
+    }
+    const parts = splitTaskCandidatesForCup(s);
+    const kept: string[] = [];
+    for (const p of parts) {
+      const n = normalizeSpace(p);
+      if (!n) continue;
+      if (shouldCountAsPortalTask(n, true) && promotedKeys.has(cupTaskStripKey(n))) {
+        removed++;
+        continue;
+      }
+      kept.push(p);
+    }
+    if (kept.length) out.push(kept.length === 1 ? kept[0]! : kept.join("; "));
+  }
+  return { text: out.length ? out.join("\n") : null, removed };
 }
 
 /** Lang Spond-/cup-/turneringsmelding (ikke skole-A-plan). */
@@ -1954,16 +2102,10 @@ function buildProposalItems(
             })
           : fHighlights;
 
-      const notesForCtx = [...fNotesRaw];
-      if (pendingCupFooter) {
-        notesForCtx.push(pendingCupFooter);
-        pendingCupFooter = null;
-      }
-
       const dayBlob = [
         fDetails,
         ...fHighlights,
-        ...notesForCtx,
+        ...fNotesRaw,
         ...fRemember,
         day.dayLabel ?? "",
       ].join(" ");
@@ -1989,25 +2131,112 @@ function buildProposalItems(
         ...fHighlights.flatMap((h) => splitTasks(h)),
         ...splitTasks(fDetails),
       ];
-      const taskTexts = Array.from(
-        new Set(
-          taskCandidates
-            .map((text) => normalizeSpace(text))
-            .filter((text) => text.length > 0 && shouldCountAsPortalTask(text, cupLike)),
-        ),
-      );
+      const rawTaskPieces = taskCandidates
+        .map((text) => normalizeSpace(text))
+        .filter((text) => text.length > 0 && shouldCountAsPortalTask(text, cupLike));
 
-      const combinedDayText = [fDetails, ...fHighlightsForEvent, ...fNotesRaw].join(" ");
-      const detailParts = fDetails ? splitTasks(fDetails) : [];
+      let taskTexts: string[] = [];
+      let duplicateParentSuppressed = 0;
+      const resolvedStripKeysThisDay = new Set<string>();
+      const canonicalParentKeysEmitted: string[] = [];
+
+      if (!cupLike) {
+        taskTexts = Array.from(new Set(rawTaskPieces));
+      } else {
+        const parentBestForDay = new Map<string, string>();
+        const variantsByKey = new Map<string, string[]>();
+        for (const t of rawTaskPieces) {
+          if (!isParentCoordinatorTaskLine(t)) continue;
+          const k = cupParentTaskDedupeKey(t);
+          if (!variantsByKey.has(k)) variantsByKey.set(k, []);
+          variantsByKey.get(k)!.push(t);
+        }
+        for (const [k, variants] of variantsByKey) {
+          parentBestForDay.set(k, variants.reduce(preferParentTaskDisplayVariant));
+        }
+
+        for (const t of rawTaskPieces) {
+          const isParent = isParentCoordinatorTaskLine(t);
+          const stripKey = isParent ? cupParentTaskDedupeKey(t) : cupLineNormKey(t);
+          const display = isParent ? (parentBestForDay.get(stripKey) ?? t) : t;
+
+          if (seenCupTaskKey.has(stripKey)) {
+            if (isParent) duplicateParentSuppressed += 1;
+            continue;
+          }
+          seenCupTaskKey.add(stripKey);
+          if (isParent) {
+            actionableParentTasksDeduped += 1;
+            canonicalParentKeysEmitted.push(stripKey);
+          }
+          resolvedStripKeysThisDay.add(stripKey);
+          taskTexts.push(display);
+        }
+      }
+
+      let rememberForEvent = fRemember;
+      let notesOnlyForEvent = fNotesRaw;
+      let deadlinesForEvent = day.deadlines;
+      let highlightsForEventFinal = fHighlightsForEvent;
+      let detailsForEvent = fDetails;
+      let totalStripped = 0;
+      const promotedFromSource = {
+        rememberItems: 0,
+        notes: 0,
+        highlights: 0,
+        deadlines: 0,
+        details: 0,
+      };
+
+      if (cupLike && resolvedStripKeysThisDay.size > 0) {
+        const rm = filterCupStringArrayStripPromotedTasks(fRemember, resolvedStripKeysThisDay);
+        rememberForEvent = rm.out;
+        promotedFromSource.rememberItems = rm.removed;
+        totalStripped += rm.removed;
+
+        const rn = filterCupStringArrayStripPromotedTasks(fNotesRaw, resolvedStripKeysThisDay);
+        notesOnlyForEvent = rn.out;
+        promotedFromSource.notes = rn.removed;
+        totalStripped += rn.removed;
+
+        const rh = filterCupStringArrayStripPromotedTasks(
+          fHighlightsForEvent,
+          resolvedStripKeysThisDay,
+        );
+        highlightsForEventFinal = rh.out;
+        promotedFromSource.highlights = rh.removed;
+        totalStripped += rh.removed;
+
+        const rd = filterCupStringArrayStripPromotedTasks(day.deadlines, resolvedStripKeysThisDay);
+        deadlinesForEvent = rd.out;
+        promotedFromSource.deadlines = rd.removed;
+        totalStripped += rd.removed;
+
+        const rdet = filterCupDetailsStripPromotedTasks(fDetails, resolvedStripKeysThisDay);
+        detailsForEvent = rdet.text;
+        promotedFromSource.details = rdet.removed;
+        totalStripped += rdet.removed;
+      }
+
+      const notesForCtx = [...notesOnlyForEvent];
+      if (pendingCupFooter) {
+        notesForCtx.push(pendingCupFooter);
+        pendingCupFooter = null;
+      }
+
+      const combinedDayText = [detailsForEvent, ...highlightsForEventFinal, ...notesOnlyForEvent].join(
+        " ",
+      );
+      const detailParts = detailsForEvent ? splitTasks(detailsForEvent) : [];
       const hasNonTaskDetailPart =
         detailParts.some(
           (p) => !shouldCountAsPortalTask(p, cupLike) && normalizeSpace(p).length > 0,
         ) ||
         (detailParts.length === 0 &&
-          Boolean(fDetails) &&
-          normalizeSpace(fDetails ?? "").length > 0 &&
-          !shouldCountAsPortalTask(fDetails ?? "", cupLike));
-      const hasNonTaskNote = fNotesRaw.some((n) => {
+          Boolean(detailsForEvent) &&
+          normalizeSpace(detailsForEvent ?? "").length > 0 &&
+          !shouldCountAsPortalTask(detailsForEvent ?? "", cupLike));
+      const hasNonTaskNote = notesOnlyForEvent.some((n) => {
         const parts = splitTasks(n);
         if (parts.length === 0) {
           return normalizeSpace(n).length > 0 && !shouldCountAsPortalTask(n, cupLike);
@@ -2036,10 +2265,10 @@ function buildProposalItems(
           ? detectSchoolDayOverride(day, day.time)
           : null;
         const daySpecificContentAfterSharedLift = Boolean(
-          (fDetails && fDetails.trim()) ||
-            fHighlightsForEvent.length > 0 ||
-            fRemember.length > 0 ||
-            fNotesRaw.some((x) => normalizeSpace(x).length > 0),
+          (detailsForEvent && detailsForEvent.trim()) ||
+            highlightsForEventFinal.length > 0 ||
+            rememberForEvent.length > 0 ||
+            notesOnlyForEvent.some((x) => normalizeSpace(x).length > 0),
         );
         const cupDbg: CupProposalItemDebug | null = cupLike
           ? {
@@ -2048,6 +2277,13 @@ function buildProposalItems(
               conditionalDayRenderedAsSoftEvent: conditionalDay,
               defaultTimeSuppressed,
               daySpecificContentAfterSharedLift,
+              cupParentTaskCanonicalized:
+                canonicalParentKeysEmitted.length > 0 ? canonicalParentKeysEmitted : undefined,
+              cupParentTaskPromotedFromSource:
+                totalStripped > 0 ? promotedFromSource : undefined,
+              cupParentTaskRemovedFromEventNotes: totalStripped > 0 ? totalStripped : undefined,
+              cupDuplicateParentTaskSuppressed:
+                duplicateParentSuppressed > 0 ? duplicateParentSuppressed : undefined,
             }
           : null;
 
@@ -2055,12 +2291,12 @@ function buildProposalItems(
           isoDate,
           day.time,
           titleSuffix,
-          fDetails,
+          detailsForEvent,
           {
-            rememberItems: fRemember,
-            deadlines: day.deadlines,
+            rememberItems: rememberForEvent,
+            deadlines: deadlinesForEvent,
             notes: notesForCtx,
-            highlights: fHighlightsForEvent,
+            highlights: highlightsForEventFinal,
           },
           schoolCtx,
           dayOverride,
@@ -2077,17 +2313,20 @@ function buildProposalItems(
             "NB: Ingen tydelig klokkeslett i kilden – kalenderen bruker bredt vindu (06:00–22:00). Sjekk oppmøte i Spond/melding.\n\n";
           ev.event.notes = ev.event.notes ? `${softTime}${ev.event.notes}` : softTime.trim();
         }
+        if (cupLike && ev.event.metadata?.cupProposalDebug && ev.event.notes) {
+          const n = ev.event.notes;
+          ev.event.metadata.cupProposalDebug.cupEventNotesAfterTaskStripping =
+            n.length > 520 ? `${n.slice(0, 520)}…` : n;
+        }
         items.push(ev);
       }
 
       for (const taskText of taskTexts) {
-        if (cupLike) {
-          const tkKey = cupLineNormKey(taskText);
-          if (seenCupTaskKey.has(tkKey)) continue;
-          seenCupTaskKey.add(tkKey);
-        }
-        if (cupLike && isParentCoordinatorTaskLine(taskText)) actionableParentTasksDeduped += 1;
-        const tk = buildTaskItem(isoDate, day.dayLabel, taskText);
+        const taskBody =
+          cupLike && isParentCoordinatorTaskLine(taskText)
+            ? normalizeCupParentTaskBodyForTitle(taskText)
+            : taskText;
+        const tk = buildTaskItem(isoDate, day.dayLabel, taskBody);
         if (pendingCupFooter) {
           tk.task.notes = tk.task.notes
             ? `${tk.task.notes}\n\n${pendingCupFooter}`
