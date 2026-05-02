@@ -9,6 +9,10 @@ import {
   type AnalysisDocumentKind,
 } from "@/lib/ai/analysis-model-router";
 import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
+import {
+  buildDocxDocumentVisualMerge,
+  buildPdfDocumentVisualMerge,
+} from "@/lib/document/document-visual-merge";
 import { extractTextFromPdfBuffer } from "@/lib/pdf/extract-pdf-text";
 import { extractTextFromDocxBuffer } from "@/lib/docx/extract-docx-text";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
@@ -16,6 +20,7 @@ import type {
   AnalysisSourceHint,
   AIAnalysisResult,
   DayScheduleEntry,
+  DocumentVisualExtractionDebug,
   SchoolWeekOverlayDailyAction,
   SchoolWeekOverlayProposal,
   SchoolWeekOverlaySections,
@@ -209,8 +214,14 @@ async function analyzeFromExtractedText(
   portalMode: boolean,
   includeDebug: boolean = false,
   documentKind?: AnalysisDocumentKind,
+  documentVisual?: {
+    supplement: string;
+    debug: DocumentVisualExtractionDebug;
+  } | null,
 ) {
-  let textForModel = rawText;
+  const supplement = documentVisual?.supplement ?? "";
+  const mergedRawForModel = (rawText || "") + supplement;
+  let textForModel = mergedRawForModel;
   if (textForModel.length > MAX_DOC_TEXT_FOR_MODEL) {
     textForModel =
       textForModel.slice(0, MAX_DOC_TEXT_FOR_MODEL) +
@@ -234,10 +245,18 @@ async function analyzeFromExtractedText(
   }
 
   const displayRaw =
-    rawText.length > MAX_EXTRACTED_RAW_DISPLAY
-      ? rawText.slice(0, MAX_EXTRACTED_RAW_DISPLAY) +
+    mergedRawForModel.length > MAX_EXTRACTED_RAW_DISPLAY
+      ? mergedRawForModel.slice(0, MAX_EXTRACTED_RAW_DISPLAY) +
         "\n\n[... Teksten er forkortet i visning ...]"
-      : rawText;
+      : mergedRawForModel;
+
+  let sourceHintOut: AnalysisSourceHint = sourceHint;
+  if (documentVisual?.debug && sourceHint.type !== "image") {
+    sourceHintOut = {
+      ...sourceHint,
+      documentVisualExtractionDebug: documentVisual.debug,
+    };
+  }
 
   return wrapResponse(
     result,
@@ -245,7 +264,7 @@ async function analyzeFromExtractedText(
     sourceHint.type,
     documentKind,
     {
-      sourceHint,
+      sourceHint: sourceHintOut,
       extractedText: {
         raw: displayRaw,
         language: result.extractedText.language || "no",
@@ -5950,36 +5969,56 @@ export async function POST(request: NextRequest) {
         ));
       }
 
-      const rawText = extracted.text;
-      if (!rawText || rawText.length < 3) {
+      const rawText = extracted.text ?? "";
+      const safeName = sanitizeFileName(
+        typeof fileName === "string" ? fileName : "",
+        "dokument.pdf",
+      );
+      const pageCount = Math.max(1, extracted.numpages);
+
+      const visual = await buildPdfDocumentVisualMerge(
+        buffer,
+        rawText,
+        pageCount,
+        documentKind,
+      );
+
+      const hasText = rawText.trim().length >= 3;
+      if (!hasText && !visual.supplement.trim()) {
         return withCors(NextResponse.json(
           {
             error:
-              "Fant ingen lesbar tekst i PDF-en. Prøv «Tekst»-fanen, eller et dokument med tekst (ikke skannet bilde uten OCR).",
+              "Fant ikke nok lesbar tekst eller bildebasert innhold i PDF-en. Prøv et tydeligere dokument, eller «Tekst»-fanen.",
           },
-          { status: 422 }
+          { status: 422 },
         ));
       }
 
-      const safeName = sanitizeFileName(
-        typeof fileName === "string" ? fileName : "",
-        "dokument.pdf"
+      const preamble = hasText
+        ? visual.supplement.trim()
+          ? `Dette er tekst uttrekk fra PDF-filen «${safeName}» (${pageCount} sider). Et avsnitt merket «VISUELL PDF-DATA» er automatisk lest fra sider som bilder og skal brukes sammen med tekstlaget. Tolke og strukturer alt sammen.\n\n`
+          : `Dette er tekst uttrekk fra PDF-filen «${safeName}» (${pageCount} sider). Tolke og strukturer innholdet som beskrevet.\n\n`
+        : `PDF-filen «${safeName}» (${pageCount} sider) har lite eller ingen maskinlesbar tekst. Hovedinnholdet kommer fra transkripsjon av sider som bilder (se «VISUELL PDF-DATA»). Tolke og strukturer som vanlig.\n\n`;
+
+      return withCors(
+        await analyzeFromExtractedText(
+          hasText ? rawText : "",
+          preamble,
+          {
+            type: "pdf",
+            fileName: safeName,
+            pageCount,
+          },
+          portalMode,
+          debug,
+          documentKind,
+          visual.supplement.trim() ||
+          (visual.debug.documentEmbeddedImagesDetected ?? 0) > 0
+            ? visual
+            : null,
+        ),
+        "pdf_success",
       );
-
-      const preamble = `Dette er tekst uttrekk fra PDF-filen «${safeName}» (${extracted.numpages || "?"} sider). Tolke og strukturer innholdet som beskrevet.\n\n`;
-
-      return withCors(await analyzeFromExtractedText(
-        rawText,
-        preamble,
-        {
-          type: "pdf",
-          fileName: safeName,
-          pageCount: Math.max(1, extracted.numpages),
-        },
-        portalMode,
-        debug,
-        documentKind,
-      ), "pdf_success");
     }
 
     if (docx && typeof docx === "string") {
@@ -6026,34 +6065,53 @@ export async function POST(request: NextRequest) {
         ));
       }
 
-      if (!rawText || rawText.length < 3) {
+      const safeName = sanitizeFileName(
+        typeof fileName === "string" ? fileName : "",
+        "dokument.docx",
+      );
+
+      const visual = await buildDocxDocumentVisualMerge(
+        buffer,
+        rawText ?? "",
+        documentKind,
+      );
+
+      const hasText = rawText.trim().length >= 3;
+      if (!hasText && !visual.supplement.trim()) {
         return withCors(NextResponse.json(
           {
             error:
-              "Fant ingen lesbar tekst i dokumentet. Sjekk at filen er .docx med faktisk innhold.",
+              "Fant ikke nok lesbar tekst eller bildebasert innhold i dokumentet. Sjekk at filen er .docx med innhold, eller prøv PDF.",
           },
-          { status: 422 }
+          { status: 422 },
         ));
       }
 
-      const safeName = sanitizeFileName(
-        typeof fileName === "string" ? fileName : "",
-        "dokument.docx"
+      const preamble = hasText
+        ? visual.supplement.trim()
+          ? `Dette er tekst uttrekk fra Word-filen «${safeName}» (.docx). Et avsnitt merket «VISUELL WORD-DATA» er automatisk lest fra innsatte bilder og skal brukes sammen med tekstlaget. Tolke og strukturer alt sammen (ukeplan, datoer, kontakt osv. når det finnes).\n\n`
+          : `Dette er tekst uttrekk fra Word-filen «${safeName}» (.docx). Tolke og strukturer innholdet som beskrevet (ukeplan, datoer, kontakt osv. når det finnes).\n\n`
+        : `Word-filen «${safeName}» (.docx) har lite maskinlesbar tekst. Hovedinnholdet kan komme fra innsatte bilder (se «VISUELL WORD-DATA»). Tolke og strukturer som vanlig.\n\n`;
+
+      return withCors(
+        await analyzeFromExtractedText(
+          hasText ? rawText : "",
+          preamble,
+          {
+            type: "docx",
+            fileName: safeName,
+          },
+          portalMode,
+          debug,
+          documentKind,
+          visual.supplement.trim() ||
+          (visual.debug.documentEmbeddedImagesDetected ?? 0) > 0 ||
+          visual.debug.documentEmbeddedFileDetected
+            ? visual
+            : null,
+        ),
+        "docx_success",
       );
-
-      const preamble = `Dette er tekst uttrekk fra Word-filen «${safeName}» (.docx). Tolke og strukturer innholdet som beskrevet (ukeplan, datoer, kontakt osv. når det finnes).\n\n`;
-
-      return withCors(await analyzeFromExtractedText(
-        rawText,
-        preamble,
-        {
-          type: "docx",
-          fileName: safeName,
-        },
-        portalMode,
-        debug,
-        documentKind,
-      ), "docx_success");
     }
 
     if (image && typeof image === "string") {

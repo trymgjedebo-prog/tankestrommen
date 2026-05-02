@@ -37,10 +37,31 @@ export interface DayScheduleEntry {
   notes: string[];
 }
 
+/** Diagnostikk når PDF/Word analyseres med tillegg fra innsatte bilder / rasteriserte sider. */
+export type DocumentVisualExtractionDebug = {
+  documentEmbeddedImagesDetected?: number;
+  documentEmbeddedImagesAnalyzed?: number;
+  documentImageAnalysisUsedAsSupplement?: boolean;
+  documentImageAnalysisUsedAsFallback?: boolean;
+  documentTextLayerWeak?: boolean;
+  documentEmbeddedFileDetected?: boolean;
+};
+
 /** Satt av API ved bilde/PDF/Word, ikke av språkmodellen. */
 export type AnalysisSourceHint =
-  | { type: "pdf"; fileName: string; pageCount: number; fileUrl?: string }
-  | { type: "docx"; fileName: string; fileUrl?: string }
+  | {
+      type: "pdf";
+      fileName: string;
+      pageCount: number;
+      fileUrl?: string;
+      documentVisualExtractionDebug?: DocumentVisualExtractionDebug;
+    }
+  | {
+      type: "docx";
+      fileName: string;
+      fileUrl?: string;
+      documentVisualExtractionDebug?: DocumentVisualExtractionDebug;
+    }
   | { type: "image"; fileName: string; fileUrl?: string };
 
 /**

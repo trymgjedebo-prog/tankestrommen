@@ -2098,6 +2098,57 @@ async function analyzeTextWithModel(
   return parseAIResponse(completion.choices[0]?.message?.content);
 }
 
+const DOCUMENT_IMAGE_TRANSCRIBE_PROMPT = `Du ser et utsnitt fra et dokument (Word eller PDF) som norske foreldre skal forstå.
+Oppgave: gjengi alt meningsfullt innhold som er synlig:
+- transkribér synlig tekst (overskrifter, punkter, datoer, klokkeslett, navn, sted)
+- for tabeller, ukeplaner, kampoppsett eller rutenett: skriv som lesbar tekst med dager og tider
+Ikke finn på innhold som ikke står eller ikke er synlig; bruk [uleselig] der nødvendig.
+
+Svar som ett JSON-objekt med nøyaktig denne formen:
+{ "transcription": string }`;
+
+async function transcribeDocumentImageWithModel(
+  imageBase64: string,
+  model: string,
+): Promise<string> {
+  const openai = getOpenAIClient();
+  const imageUrl = toDataUrl(imageBase64);
+  const completion = await openai.chat.completions.create({
+    model,
+    messages: [
+      { role: "system", content: DOCUMENT_IMAGE_TRANSCRIBE_PROMPT },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Transkribér og strukturer bildet." },
+          { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+        ],
+      },
+    ],
+    response_format: { type: "json_object" },
+    ...chatCompletionOutputTokenParam(model, 3800),
+    temperature: 0.1,
+  });
+  const content = completion.choices[0]?.message?.content;
+  try {
+    const parsed = JSON.parse(content || "{}") as { transcription?: unknown };
+    return typeof parsed.transcription === "string" ? parsed.transcription : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Lett visuell transkripsjon for å slå sammen med PDF/Word-tekst (ikke full JSON-analyse).
+ */
+export async function transcribeDocumentImageForMerge(
+  imageBase64: string,
+  input: AnalysisModelRoutingInput,
+): Promise<string> {
+  const { model } = selectInitialAnalysisModel({ ...input, sourceRoute: "image" });
+  return transcribeDocumentImageWithModel(imageBase64, model);
+}
+
 function runRoutedImageAnalysis(
   imageBase64: string,
   input: AnalysisModelRoutingInput,
