@@ -1006,6 +1006,14 @@ type TaskProposalDebug = {
   taskCandidateDroppedReason?: string | null;
   /** Utvidet råtekst-split / eksplisitte mønstre ble vurdert for denne oppgaven. */
   taskExtractionFromRawTextApplied?: boolean;
+  /** Linjen matcher smalt mønster for svar-/bekreftelsesfrist i Spond e.l. */
+  deadlineResponseTaskMatched?: boolean;
+  /** Kandidat ble trukket ut som task med svarfrist-signal (høyprioritet). */
+  deadlineResponseTaskCandidateExtracted?: boolean;
+  /** Underliggende signal: kanal + frist + svarhandling + tid/dato. */
+  deadlineResponseTaskSignalMatched?: boolean;
+  /** Årsak hvis svarfrist-kandidat ble forkastet (reservert). */
+  deadlineResponseTaskDroppedReason?: string | null;
 };
 
 type PortalTaskItem = {
@@ -1064,7 +1072,7 @@ function splitTaskCandidates(raw: string | null): string[] {
 
 /** Del lange linjer på typiske startfraser for egne gjøremål (én oppgave per del). */
 const EXPLICIT_TASK_ANCHOR_SPLIT_RE =
-  /(?=\b(?:gi\s+beskjed|meld\s+fra|svar\s+(?:i\s+)?spond|svar\s+innen|vi\s+trenger|det\s+trengs|vi\s+søker|(?:to|tre|fire|fem|\d+)\s+voksne|kan\s+noen|bekreft\b|ta\s+ansvar\s+for|dere\s+må\s+svar|foreldre\s+må)\b)/gi;
+  /(?=\b(?:gi\s+beskjed|meld\s+fra|svar(?:er)?\s+(?:i\s+)?spond|svar\s+innen|vi\s+(?:ønsker|ber)|det\s+er\s+viktig|vi\s+trenger|det\s+trengs|vi\s+søker|(?:to|tre|fire|fem|\d+)\s+voksne|kan\s+noen|bekreft\b|ta\s+ansvar\s+for|dere\s+må\s+svar|foreldre\s+må)\b)/gi;
 
 function splitByExplicitTaskAnchors(chunk: string): string[] {
   const t = normalizeSpace(chunk);
@@ -1105,6 +1113,36 @@ function splitTaskCandidatesForCup(raw: string | null): string[] {
   return out;
 }
 
+const SPOND_RESPONSE_VERB_RE =
+  /\b(svarer|svar|svare|besvar|besvare|bekreft|melde|tilbakemelding|påmelding|registrer|sjekk|fyll\s+ut)\b/;
+
+/** Smalt, høyprioritets mønster: svarhandling + Spond + frist + tid/dato. */
+function isDeadlineResponseSpondTaskLine(line: string): boolean {
+  const t = normalizeSpace(line);
+  if (!t || t.length > 560) return false;
+  const n = normalizeNorwegianLetters(t);
+  if (!/\bspond\b/.test(n)) return false;
+  if (!/\b(senest|innen|frist)\b/.test(n)) return false;
+  if (!SPOND_RESPONSE_VERB_RE.test(n)) return false;
+  const hasTimeOrDate =
+    /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|\d{1,2}\.\s*\d{1,2}|\d{1,2}\.\s*juni)\b/i.test(
+      t,
+    );
+  if (!hasTimeOrDate) return false;
+  return true;
+}
+
+function compactDeadlineResponseTaskTitle(raw: string): string {
+  const n = normalizeNorwegianLetters(raw);
+  if (/\bp[aå]melding\b/.test(n)) return "Svar / påmelding i Spond";
+  if (/\bbekreft\b/.test(n) && !/\bsvarer\b/.test(n)) return "Bekreft i Spond";
+  if (/\btilbakemelding\b/.test(n)) return "Gi tilbakemelding i Spond";
+  if (/\bkan\s+delta\b/.test(n) || /\bdeltakelse\b/.test(n) || /\btilgjengelighet\b/.test(n))
+    return "Svar i Spond om deltakelse";
+  if (/\bkan\s+ikke\b/.test(n) || /\brekker\b/.test(n)) return "Svar i Spond om deltakelse og kamper";
+  return "Svar i Spond";
+}
+
 function inferTaskExtractionDebug(taskText: string): Pick<
   TaskProposalDebug,
   | "explicitTaskCandidateMatched"
@@ -1112,15 +1150,21 @@ function inferTaskExtractionDebug(taskText: string): Pick<
   | "deadlineTaskCandidateExtracted"
   | "voluntaryTaskCandidateExtracted"
   | "taskExtractionFromRawTextApplied"
+  | "deadlineResponseTaskMatched"
+  | "deadlineResponseTaskCandidateExtracted"
+  | "deadlineResponseTaskSignalMatched"
+  | "deadlineResponseTaskDroppedReason"
 > {
   const t = normalizeSpace(taskText);
   const n = normalizeNorwegianLetters(t);
   const explicit = isParentCoordinatorTaskLine(t);
+  const responseDeadline = isDeadlineResponseSpondTaskLine(t);
   const deadline =
-    /\b(senest|innen|frist|svar\s+i\s+spond|svar\s+innen|påmelding|pameldings)\b/.test(n) &&
-    /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|\d{1,2}\.\s*juni|\d{1,2}\/\d{1,2})\b/i.test(
-      t,
-    );
+    responseDeadline ||
+    (/\b(senest|innen|frist|svar\s+i\s+spond|svar\s+innen|påmelding|pameldings)\b/.test(n) &&
+      /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|\d{1,2}\.\s*juni|\d{1,2}\/\d{1,2})\b/i.test(
+        t,
+      ));
   const voluntary =
     /\bgi\s+beskjed\b/.test(n) ||
     /\bkan\s+noen\b/.test(n) ||
@@ -1134,6 +1178,10 @@ function inferTaskExtractionDebug(taskText: string): Pick<
     deadlineTaskCandidateExtracted: Boolean(deadline),
     voluntaryTaskCandidateExtracted: voluntary && !deadline,
     taskExtractionFromRawTextApplied: true,
+    deadlineResponseTaskMatched: responseDeadline,
+    deadlineResponseTaskCandidateExtracted: responseDeadline,
+    deadlineResponseTaskSignalMatched: responseDeadline,
+    deadlineResponseTaskDroppedReason: null,
   };
 }
 
@@ -1519,26 +1567,26 @@ function isParentCoordinatorTaskLine(line: string): boolean {
   const t = normalizeSpace(line);
   if (!t) return false;
   const n = normalizeNorwegianLetters(t);
+  if (isDeadlineResponseSpondTaskLine(t)) return true;
   const deadlineLike =
     /\bspond\b/.test(n) &&
-    /\b(svar|svare|besvar|besvare|melde|registrer|bekreft|sjekk|fyll\s+ut)\b/.test(n);
+    SPOND_RESPONSE_VERB_RE.test(n);
   const longOk =
     /\b(senest|innen|frist|svar\s+i\s+spond|svar\s+innen)\b/.test(n) ||
     deadlineLike ||
     /\bgi\s+beskjed\b/.test(n) ||
     /\bkan\s+noen\b/.test(n);
   if (t.length > (longOk ? 520 : 380)) return false;
-  if (/\bspond\b/.test(n) && /\b(svar|svare|besvar|besvare|melde|registrer|bekreft|sjekk|fyll\s+ut)\b/.test(n))
-    return true;
-  if (/\b(svar|svare|besvar|besvare)\s+(i\s+)?spond\b/.test(n)) return true;
+  if (/\bspond\b/.test(n) && SPOND_RESPONSE_VERB_RE.test(n)) return true;
+  if (/\b(svarer|svar|svare|besvar|besvare)\s+(i\s+)?spond\b/.test(n)) return true;
   if (
-    /\b(svar|besvar|bekreft)\b/.test(n) &&
+    /\b(svarer|svar|besvar|bekreft)\b/.test(n) &&
     /\b(innen|f[oø]r|senest|kl\.?|frist)\b/.test(n) &&
     /\bspond\b/.test(n)
   )
     return true;
   if (
-    /\bsvar\b/.test(n) &&
+    /\b(svarer|svar)\b/.test(n) &&
     /\b(senest|innen|f[oø]r|frist)\b/.test(n) &&
     /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|\d{1,2}\.\s*juni|\d{1,2}\/\d{1,2})\b/i.test(
       t,
@@ -2910,6 +2958,10 @@ function buildProposalItems(
           }
         } else if (!cupLike && isParentCoordinatorTaskLine(taskText)) {
           taskBody = normalizeTaskTitle(normalizeCupParentTaskBodyForTitle(taskText));
+        }
+
+        if (isDeadlineResponseSpondTaskLine(taskText)) {
+          taskBody = compactDeadlineResponseTaskTitle(taskText);
         }
 
         const taskProposalDebug: TaskProposalDebug = {
