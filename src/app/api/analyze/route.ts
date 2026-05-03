@@ -1014,6 +1014,18 @@ type TaskProposalDebug = {
   deadlineResponseTaskSignalMatched?: boolean;
   /** Årsak hvis svarfrist-kandidat ble forkastet (reservert). */
   deadlineResponseTaskDroppedReason?: string | null;
+  /** Matchet i råtekst (description/OCR) før dag-loop. */
+  deadlineResponseTaskRawTextMatched?: boolean;
+  /** Løftet inn via global svarfrist-scan (ikke bare per-dag split). */
+  deadlineResponseTaskPromotedEarly?: boolean;
+  /** Passerte dedupe / filtrering i global path. */
+  deadlineResponseTaskSurvivedFiltering?: boolean;
+  /** Task bygget direkte fra global snippet (kort tittel + frist-metadata). */
+  deadlineResponseTaskBuiltDirectly?: boolean;
+  /** Falt ut etter matching (f.eks. dedupe med eksisterende task). */
+  deadlineResponseTaskDroppedLate?: boolean;
+  /** Årsak ved sent bortfall (dedupe_key_hit, should_count_false, …). */
+  deadlineResponseTaskDropReason?: string | null;
 };
 
 type PortalTaskItem = {
@@ -1119,7 +1131,7 @@ const SPOND_RESPONSE_VERB_RE =
 /** Smalt, høyprioritets mønster: svarhandling + Spond + frist + tid/dato. */
 function isDeadlineResponseSpondTaskLine(line: string): boolean {
   const t = normalizeSpace(line);
-  if (!t || t.length > 560) return false;
+  if (!t || t.length > 980) return false;
   const n = normalizeNorwegianLetters(t);
   if (!/\bspond\b/.test(n)) return false;
   if (!/\b(senest|innen|frist)\b/.test(n)) return false;
@@ -1302,6 +1314,104 @@ function stripCupNoteLikePrefixes(line: string): string {
 /** Kanonisk nøkkel for foreldre-handlingsoppgaver (cup/Spond). */
 function cupParentTaskDedupeKey(line: string): string {
   return cupLineNormKey(stripCupNoteLikePrefixes(line));
+}
+
+/** Kjerne av portal-task-tittel etter «Dag – …»-prefiks (for dedupe mot global path). */
+function portalTaskTitleAfterDayPrefix(title: string): string {
+  const t = normalizeSpace(title);
+  const idx = t.indexOf(" – ");
+  if (idx <= 0) return t;
+  return normalizeSpace(t.slice(idx + 3)) || t;
+}
+
+function collectAnalyzeTextBlobsForDeadlineScan(result: AIAnalysisResult): string {
+  const parts: string[] = [
+    result.description ?? "",
+    result.extractedText?.raw ?? "",
+    result.title ?? "",
+    ...result.schedule.flatMap((s) => {
+      const bits = [s.label, s.date, s.time].filter(
+        (x): x is string => typeof x === "string" && normalizeSpace(x).length > 0,
+      );
+      return bits.length ? [bits.join(" ")] : [];
+    }),
+    ...result.scheduleByDay.flatMap((d) => [
+      d.details ?? "",
+      ...d.notes,
+      ...d.highlights,
+      ...d.rememberItems,
+      ...d.deadlines,
+    ]),
+  ];
+  return parts.map((p) => normalizeSpace(String(p))).filter((p) => p.length > 0).join("\n\n");
+}
+
+function splitBlobIntoDeadlineScanChunks(blob: string): string[] {
+  const out: string[] = [];
+  const pushChunk = (raw: string) => {
+    const t = normalizeSpace(raw);
+    if (t.length < 24) return;
+    out.push(t);
+  };
+  for (const para of blob.split(/\n{2,}/)) {
+    const trimmed = normalizeSpace(para);
+    if (!trimmed) continue;
+    if (trimmed.length >= 64 && /[.!?]\s+\S/.test(trimmed)) {
+      const sentences = trimmed.split(/(?<=[.!?])\s+/).map(normalizeSpace).filter(Boolean);
+      if (sentences.length >= 2) {
+        for (const s of sentences) pushChunk(s);
+        continue;
+      }
+    }
+    for (const line of trimmed.split(/\n/)) pushChunk(line);
+  }
+  return out;
+}
+
+/**
+ * Svar-/bekreftelsesfrist i fri tekst (description, OCR, lange linjer).
+ * Egen path fordi modellen ofte legger slike setninger utenfor scheduleByDay-delfelt.
+ */
+function isGlobalDeadlineResponseSnippet(text: string): boolean {
+  if (isDeadlineResponseSpondTaskLine(text)) return true;
+  const t = normalizeSpace(text);
+  const n = normalizeNorwegianLetters(t);
+  if (t.length < 24 || t.length > 980) return false;
+  if (!/\b(senest|innen|frist)\b/.test(n)) return false;
+  const hasTimeOrDate =
+    /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|\d{1,2}\.\s*juni|\d{1,2}\.\s*\d{1,2})\b/i.test(
+      t,
+    );
+  if (!hasTimeOrDate) return false;
+  if (/\bspond\b/.test(n) && /\b(svarer|svar|svare|melde|bekreft|registrer|besvar)\b/.test(n))
+    return true;
+  if (
+    /\b(bekreft|bekrefte|tilbakemelding|gi\s+tilbakemelding|p[aå]melding)\b/.test(n) &&
+    /\b(deltakelse|deltak|oppm[oø]te|plass|tilstedeværelse|tilstedevaerelse)\b/.test(n)
+  )
+    return true;
+  if (/\b(bekreft|tilbakemelding|p[aå]melding)\b/.test(n) && /\b(alle|foreldre|dere)\b/.test(n))
+    return true;
+  if (
+    /\b(gi\s+tilbakemelding|tilbakemelding|p[aå]melding|bekreft(?:e)?\s+deltakelse)\b/.test(n)
+  )
+    return true;
+  return false;
+}
+
+function extractGlobalDeadlineResponseSnippets(result: AIAnalysisResult): string[] {
+  const blob = collectAnalyzeTextBlobsForDeadlineScan(result);
+  if (!blob) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const chunk of splitBlobIntoDeadlineScanChunks(blob)) {
+    if (!isGlobalDeadlineResponseSnippet(chunk)) continue;
+    const k = cupParentTaskDedupeKey(chunk);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(chunk);
+  }
+  return out;
 }
 
 function cupTaskStripKey(text: string): string {
@@ -3140,6 +3250,83 @@ function buildProposalItems(
         if (it.kind !== "event" || !it.event.metadata?.cupProposalDebug) continue;
         it.event.metadata.cupProposalDebug.actionableParentTasksDeduped =
           actionableParentTasksDeduped;
+      }
+    }
+  }
+
+  {
+    const globalSnips = extractGlobalDeadlineResponseSnippets(result);
+    if (globalSnips.length > 0) {
+      const blob = collectAnalyzeTextBlobsForDeadlineScan(result);
+      let fallbackIso =
+        result.scheduleByDay
+          .map((d) => resolveDate(d.date, d.dayLabel))
+          .find((x): x is string => x !== null) ??
+        result.schedule
+          .map((s) => resolveDate(s.date, s.label))
+          .find((x): x is string => x !== null) ??
+        new Date().toISOString().slice(0, 10);
+
+      const keyHit = new Set<string>();
+      for (const it of items) {
+        if (it.kind !== "task") continue;
+        keyHit.add(cupParentTaskDedupeKey(it.task.title));
+        keyHit.add(cupLineNormKey(it.task.title));
+        keyHit.add(cupLineNormKey(portalTaskTitleAfterDayPrefix(it.task.title)));
+      }
+
+      for (const snip of globalSnips) {
+        const dedupeSnip = cupParentTaskDedupeKey(snip);
+        const tentativeTitle = (() => {
+          if (isDeadlineResponseSpondTaskLine(snip)) return compactDeadlineResponseTaskTitle(snip);
+          const n = normalizeNorwegianLetters(snip);
+          if (/\bp[aå]melding\b/.test(n)) return "Påmelding / svar";
+          if (/\bbekreft(?:e)?\s+deltakelse\b/.test(n) || /\bbekreft\b/.test(n))
+            return "Bekreft deltakelse";
+          if (/\btilbakemelding\b/.test(n) || /\bgi\s+tilbakemelding\b/.test(n))
+            return "Gi tilbakemelding";
+          return normalizeTaskTitle(stripCupNoteLikePrefixes(snip));
+        })();
+        const titleKey = cupLineNormKey(tentativeTitle);
+
+        if (
+          keyHit.has(dedupeSnip) ||
+          keyHit.has(cupLineNormKey(snip)) ||
+          keyHit.has(titleKey) ||
+          keyHit.has(cupParentTaskDedupeKey(tentativeTitle))
+        ) {
+          if (process.env.NODE_ENV === "development") {
+            console.debug("[analyze] deadlineResponseGlobalPath skipped", {
+              reason: "dedupe_key_hit",
+              titleKey,
+            });
+          }
+          continue;
+        }
+
+        const resolved = resolveCupTaskDeadlineAndMeta(snip, blob, resolvedYear, fallbackIso);
+        const baseDebug = inferTaskExtractionDebug(snip);
+        const taskProposalDebug: TaskProposalDebug = {
+          ...baseDebug,
+          ...resolved.debug,
+          deadlineResponseTaskRawTextMatched: true,
+          deadlineResponseTaskPromotedEarly: true,
+          deadlineResponseTaskSurvivedFiltering: true,
+          deadlineResponseTaskBuiltDirectly: true,
+          deadlineResponseTaskDroppedLate: false,
+          deadlineResponseTaskDropReason: null,
+        };
+
+        const tk = buildTaskItem(resolved.taskDate, null, tentativeTitle, {
+          dueTime: resolved.dueTime ?? undefined,
+          metadata: { taskProposalDebug },
+        });
+        items.push(tk);
+        keyHit.add(dedupeSnip);
+        keyHit.add(cupLineNormKey(snip));
+        keyHit.add(titleKey);
+        keyHit.add(cupParentTaskDedupeKey(tentativeTitle));
+        keyHit.add(cupLineNormKey(portalTaskTitleAfterDayPrefix(tk.task.title)));
       }
     }
   }
