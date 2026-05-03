@@ -994,6 +994,18 @@ type TaskProposalDebug = {
   taskTitleContextSource?: "resultTitle" | "description" | null;
   taskDeadlineIso?: string | null;
   taskDueTime?: string | null;
+  /** Eksplisitt foreldre-/koordineringsoppgave (heuristikk). */
+  explicitTaskCandidateMatched?: boolean;
+  /** Lang avsnittsdel — sannsynlig split før klassifisering. */
+  explicitTaskCandidateSplitFromParagraph?: boolean;
+  /** Inneholder svarfrist / senest / Spond-svar e.l. */
+  deadlineTaskCandidateExtracted?: boolean;
+  /** Frivillig hjelp / behov uten klassisk «frist». */
+  voluntaryTaskCandidateExtracted?: boolean;
+  /** Kort årsak dersom en kandidat ble filtrert (intern verifisering). */
+  taskCandidateDroppedReason?: string | null;
+  /** Utvidet råtekst-split / eksplisitte mønstre ble vurdert for denne oppgaven. */
+  taskExtractionFromRawTextApplied?: boolean;
 };
 
 type PortalTaskItem = {
@@ -1050,27 +1062,79 @@ function splitTaskCandidates(raw: string | null): string[] {
     .filter((part) => part.length > 0);
 }
 
+/** Del lange linjer på typiske startfraser for egne gjøremål (én oppgave per del). */
+const EXPLICIT_TASK_ANCHOR_SPLIT_RE =
+  /(?=\b(?:gi\s+beskjed|meld\s+fra|svar\s+(?:i\s+)?spond|svar\s+innen|vi\s+trenger|det\s+trengs|vi\s+søker|(?:to|tre|fire|fem|\d+)\s+voksne|kan\s+noen|bekreft\b|ta\s+ansvar\s+for|dere\s+må\s+svar|foreldre\s+må)\b)/gi;
+
+function splitByExplicitTaskAnchors(chunk: string): string[] {
+  const t = normalizeSpace(chunk);
+  if (!t) return [];
+  if (t.length < 44) return [t];
+  const bits = t.split(EXPLICIT_TASK_ANCHOR_SPLIT_RE).map(normalizeSpace).filter(Boolean);
+  return bits.length >= 2 ? bits : [t];
+}
+
 /**
- * Ekstra oppdeling for lange Spond-/cup-avsnitt uten linjeskift, slik at
- * «Svar i Spond …» og «Gi beskjed om …» kan bli egne tasks.
+ * Aggressiv oppdeling av avsnitt slik at «Svar i Spond …», «Gi beskjed …»,
+ * «To voksne trengs …» m.m. blir egne task-kandidater (cup, tur, dugnad, skole).
  */
 function splitTaskCandidatesForCup(raw: string | null): string[] {
   if (!raw) return [];
   const base = splitTaskCandidates(raw);
   const out: string[] = [];
-  for (const part of base) {
-    const p = normalizeSpace(part);
-    if (!p) continue;
-    if (p.length >= 110 && /[.!?]\s+\S/.test(p)) {
-      const chunks = p.split(/(?<=[.!?])\s+/).map(normalizeSpace).filter(Boolean);
+  const flushPart = (p: string) => {
+    const n = normalizeSpace(p);
+    if (!n) return;
+    if (n.length >= 72 && /[.!?]\s+\S/.test(n)) {
+      const chunks = n.split(/(?<=[.!?])\s+/).map(normalizeSpace).filter(Boolean);
       if (chunks.length >= 2) {
-        out.push(...chunks);
-        continue;
+        for (const c of chunks) out.push(...splitByExplicitTaskAnchors(c));
+        return;
       }
     }
-    out.push(p);
-  }
+    if (n.length >= 72 && /[;:]\s+\S/.test(n)) {
+      const chunks = n.split(/(?<=[;:])\s+/).map(normalizeSpace).filter(Boolean);
+      if (chunks.length >= 2) {
+        for (const c of chunks) out.push(...splitByExplicitTaskAnchors(c));
+        return;
+      }
+    }
+    out.push(...splitByExplicitTaskAnchors(n));
+  };
+  for (const part of base) flushPart(part);
   return out;
+}
+
+function inferTaskExtractionDebug(taskText: string): Pick<
+  TaskProposalDebug,
+  | "explicitTaskCandidateMatched"
+  | "explicitTaskCandidateSplitFromParagraph"
+  | "deadlineTaskCandidateExtracted"
+  | "voluntaryTaskCandidateExtracted"
+  | "taskExtractionFromRawTextApplied"
+> {
+  const t = normalizeSpace(taskText);
+  const n = normalizeNorwegianLetters(t);
+  const explicit = isParentCoordinatorTaskLine(t);
+  const deadline =
+    /\b(senest|innen|frist|svar\s+i\s+spond|svar\s+innen|påmelding|pameldings)\b/.test(n) &&
+    /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|\d{1,2}\.\s*juni|\d{1,2}\/\d{1,2})\b/i.test(
+      t,
+    );
+  const voluntary =
+    /\bgi\s+beskjed\b/.test(n) ||
+    /\bkan\s+noen\b/.test(n) ||
+    /\b(to|tre|fire|\d+)\s+voksne\b/.test(n) ||
+    /\bvi\s+trenger\b/.test(n) ||
+    /\bbidra\b/.test(n) ||
+    /\bta\s+ansvar\s+for\b/.test(n);
+  return {
+    explicitTaskCandidateMatched: explicit,
+    explicitTaskCandidateSplitFromParagraph: t.length > 88,
+    deadlineTaskCandidateExtracted: Boolean(deadline),
+    voluntaryTaskCandidateExtracted: voluntary && !deadline,
+    taskExtractionFromRawTextApplied: true,
+  };
 }
 
 /**
@@ -1453,8 +1517,17 @@ function looksLikeCupOrSpondBroadcast(result: AIAnalysisResult): boolean {
  */
 function isParentCoordinatorTaskLine(line: string): boolean {
   const t = normalizeSpace(line);
-  if (!t || t.length > 380) return false;
+  if (!t) return false;
   const n = normalizeNorwegianLetters(t);
+  const deadlineLike =
+    /\bspond\b/.test(n) &&
+    /\b(svar|svare|besvar|besvare|melde|registrer|bekreft|sjekk|fyll\s+ut)\b/.test(n);
+  const longOk =
+    /\b(senest|innen|frist|svar\s+i\s+spond|svar\s+innen)\b/.test(n) ||
+    deadlineLike ||
+    /\bgi\s+beskjed\b/.test(n) ||
+    /\bkan\s+noen\b/.test(n);
+  if (t.length > (longOk ? 520 : 380)) return false;
   if (/\bspond\b/.test(n) && /\b(svar|svare|besvar|besvare|melde|registrer|bekreft|sjekk|fyll\s+ut)\b/.test(n))
     return true;
   if (/\b(svar|svare|besvar|besvare)\s+(i\s+)?spond\b/.test(n)) return true;
@@ -1464,16 +1537,35 @@ function isParentCoordinatorTaskLine(line: string): boolean {
     /\bspond\b/.test(n)
   )
     return true;
+  if (
+    /\bsvar\b/.test(n) &&
+    /\b(senest|innen|f[oø]r|frist)\b/.test(n) &&
+    /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|\d{1,2}\.\s*juni|\d{1,2}\/\d{1,2})\b/i.test(
+      t,
+    ) &&
+    t.length >= 22
+  )
+    return true;
+  if (/\bsvar\s+innen\b/.test(n)) return true;
   if (/\bmeld\s+fra\b/.test(n) && /\b(medisin|medisiner|allergi|trener|trenere)\b/.test(n)) return true;
   if (/\bgi\s+beskjed\b/.test(n) && /\b(medisin|bruker\s+medisin|resept|medisinbruk)\b/.test(n)) return true;
   if (/\bmedisin/.test(n) && /\b(trener|trenere|vite\s+om|m[aå]\s+vite)\b/.test(n)) return true;
   if (
     /\bgi\s+beskjed\b/.test(n) &&
-    /\b(hjelpe?|frukt|utstyr|kjøring|kjore|samlingspunkt|opprigging|rigge|bære|baere|still\s+opp|kan\s+ta|still\s+deg)\b/.test(
+    /\b(hjelpe?|frukt|utstyr|kjøring|kjore|samlingspunkt|opprigging|rigge|bære|baere|still\s+opp|kan\s+ta|still\s+deg|bidra|telt|stol|camping|party|fest)\b/.test(
       n,
     )
   )
     return true;
+  if (/\bgi\s+beskjed\b/.test(n) && /\bhvis\b/.test(n) && /\bkan\s+(noen|du|dere)\b/.test(n)) return true;
+  if (/\bgi\s+beskjed\b/.test(n) && /\bbidra\b/.test(n)) return true;
+  if (/\bkan\s+(noen|du|dere)\s+(hjelpe|bidra|stille|ta)\b/.test(n)) return true;
+  if (
+    /\bvi\s+trenger\b/.test(n) &&
+    /\b(hjelp|voksne|foreldre|noen|kjøring|kjore|utstyr|grill|frukt|telt|koordinering|dugnad)\b/.test(n)
+  )
+    return true;
+  if (/\bta\s+ansvar\s+for\b/.test(n)) return true;
   if (
     /\bmeld\s+fra\b/.test(n) &&
     /\b(fravær|fravar|tilgjengelighet|tilbakemelding|kan\s+ikke|rekke\s+ikke)\b/.test(n)
@@ -1515,6 +1607,8 @@ function isParentCoordinatorTaskLine(line: string): boolean {
     return true;
   if (/\bpåmelding\b/.test(n) && /\b(innen|f[oø]r|senest)\b/.test(n)) return true;
   if (/\bbekreft\b/.test(n) && /\b(deltakelse|oppm[oø]te|påmelding)\b/.test(n)) return true;
+  if (/\bdere\s+må\s+(svar|melde|bekreft)\b/.test(n)) return true;
+  if (/\bforeldre\s+må\s+/.test(n) && /\b(svar|melde|bekreft|gi\s+beskjed)\b/.test(n)) return true;
   return false;
 }
 
@@ -1640,8 +1734,8 @@ function mergeCupFooterLines(primary: string[], extra: string[]): string[] {
 function shouldCountAsPortalTask(text: string, cupLike: boolean): boolean {
   const t = normalizeSpace(text);
   if (!t) return false;
-  if (cupLike && isParentCoordinatorTaskLine(t)) return true;
-  if (isGeneralCupPracticalBulkLine(t)) return false;
+  if (isParentCoordinatorTaskLine(t)) return true;
+  if (cupLike && isGeneralCupPracticalBulkLine(t)) return false;
   return isStandaloneTaskCandidate(t);
 }
 
@@ -2505,8 +2599,7 @@ function buildProposalItems(
     const cupFooterForParentNotes = cupParentMergeEligible ? cupFooterOnce : null;
     const seenCupTaskKey = new Set<string>();
     let actionableParentTasksDeduped = 0;
-    const splitTasks = (raw: string | null) =>
-      cupLike ? splitTaskCandidatesForCup(raw) : splitTaskCandidates(raw);
+    const splitTasks = (raw: string | null) => splitTaskCandidatesForCup(raw);
     const cupEmbeddedScheduleSegments: EmbeddedScheduleSegment[] | null =
       cupLike && result.scheduleByDay.length >= 2 ? [] : null;
 
@@ -2815,11 +2908,18 @@ function buildProposalItems(
             taskDebug.taskTitleEnrichedWithContext = enc.enriched;
             taskDebug.taskTitleContextSource = enc.enriched ? taskCtxLabel.source : null;
           }
+        } else if (!cupLike && isParentCoordinatorTaskLine(taskText)) {
+          taskBody = normalizeTaskTitle(normalizeCupParentTaskBodyForTitle(taskText));
         }
+
+        const taskProposalDebug: TaskProposalDebug = {
+          ...inferTaskExtractionDebug(taskText),
+          ...(taskDebug ?? {}),
+        };
 
         const tk = buildTaskItem(taskDate, day.dayLabel, taskBody, {
           dueTime: dueTime ?? undefined,
-          metadata: cupLike && taskDebug ? { taskProposalDebug: taskDebug } : undefined,
+          metadata: { taskProposalDebug },
         });
         if (pendingCupFooter) {
           tk.task.notes = tk.task.notes
