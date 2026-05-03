@@ -841,6 +841,33 @@ type EventSchoolContext = {
   sourceKind: string;
 };
 
+/**
+ * Flere dager i samme cup-/Spond-forslag (Foreldre-App kan vise som underblokker).
+ * Notater her er bevisst smalere enn hele `event.notes` på hovedkortet.
+ */
+type EmbeddedScheduleSegment = {
+  date: string;
+  dayLabel?: string | null;
+  start: string;
+  end: string;
+  title: string;
+  notes?: string;
+  isConditional?: boolean;
+  /** Valgfri sporbarhet for segmentnotater (trygg å ignorere for eldre klienter). */
+  embeddedScheduleSegmentNotesDerived?: boolean;
+  embeddedScheduleSegmentNotesSource?:
+    | "details"
+    | "highlights"
+    | "remember"
+    | "notes"
+    | "deadlines"
+    | "conditional"
+    | "mixed"
+    | "none";
+  embeddedScheduleSegmentNotesTrimmed?: boolean;
+  embeddedScheduleSegmentNotesOmitted?: string[];
+};
+
 type PortalEventItem = {
   proposalId: string;
   kind: "event";
@@ -865,6 +892,13 @@ type PortalEventItem = {
       schoolDayOverride?: SchoolDayOverride;
       /** Valgfri diagnostikk for cup/Spond-forslag (ignoreres av klienter som ikke leser feltet). */
       cupProposalDebug?: CupProposalItemDebug;
+      /** Flerdagers underblokker med dagspesifikke titler/tider/notater (cup, stevne, idrettshelg). */
+      embeddedSchedule?: EmbeddedScheduleSegment[];
+      /**
+       * Kort forklaring på hva som bevisst ligger på hovedhendelsen fremfor i hvert segment
+       * (f.eks. felles utstyr/Spond-info én gang).
+       */
+      embeddedScheduleParentNotesRetained?: string;
     };
   };
 };
@@ -1630,6 +1664,110 @@ function filterDetailsHoisted(details: string | null, hoistedKeys: Set<string>):
   return out.length ? out.join("\n") : null;
 }
 
+const EMBEDDED_SEGMENT_NOTES_MAX_CHARS = 480;
+const EMBEDDED_SEGMENT_NOTES_MAX_LINES = 6;
+
+function buildCupEmbeddedScheduleSegment(args: {
+  result: AIAnalysisResult;
+  day: DayScheduleEntry;
+  isoDate: string;
+  titleSuffix: string | null;
+  explicitStartEnd: { start: string; end: string } | null;
+  detailsForEvent: string | null;
+  highlightsForEventFinal: string[];
+  rememberForEvent: string[];
+  notesOnlyForEvent: string[];
+  deadlinesForEvent: string[];
+  conditionalDay: boolean;
+}): EmbeddedScheduleSegment {
+  const { start, end } = args.explicitStartEnd ?? extractStartEnd(args.day.time);
+  const title = buildEventProposalTitle(args.result, args.titleSuffix, {
+    rememberItems: args.rememberForEvent,
+    deadlines: args.deadlinesForEvent,
+    notes: args.notesOnlyForEvent,
+    highlights: args.highlightsForEventFinal,
+    details: args.detailsForEvent,
+  });
+
+  const seen = new Set<string>();
+  const linesOut: string[] = [];
+  const omitted: string[] = [];
+  const sourcesHit = new Set<
+    "details" | "highlights" | "remember" | "notes" | "deadlines"
+  >();
+
+  const considerRaw = (
+    raw: string,
+    src: "details" | "highlights" | "remember" | "notes" | "deadlines",
+  ) => {
+    for (const p of splitTaskCandidatesForCup(raw)) {
+      const t = normalizeSpace(p);
+      if (!t) continue;
+      if (shouldCountAsPortalTask(t, true)) continue;
+      const k = cupLineNormKey(t);
+      if (seen.has(k)) continue;
+      if (linesOut.length >= EMBEDDED_SEGMENT_NOTES_MAX_LINES) {
+        const short = t.length > 96 ? `${t.slice(0, 93)}…` : t;
+        if (omitted.length < 10 && !omitted.includes(short)) omitted.push(short);
+        continue;
+      }
+      seen.add(k);
+      linesOut.push(t);
+      sourcesHit.add(src);
+    }
+  };
+
+  if (args.detailsForEvent?.trim()) {
+    for (const ln of args.detailsForEvent.split(/\n/)) {
+      const s = normalizeSpace(ln);
+      if (!s) continue;
+      considerRaw(s, "details");
+    }
+  }
+  for (const h of args.highlightsForEventFinal) considerRaw(h, "highlights");
+  for (const r of args.rememberForEvent) considerRaw(r, "remember");
+  for (const n of args.notesOnlyForEvent) considerRaw(n, "notes");
+  for (const d of args.deadlinesForEvent) considerRaw(d, "deadlines");
+
+  let notesBody = linesOut.join("\n").trim();
+  let trimmed = false;
+  if (notesBody.length > EMBEDDED_SEGMENT_NOTES_MAX_CHARS) {
+    notesBody = `${notesBody.slice(0, EMBEDDED_SEGMENT_NOTES_MAX_CHARS - 1).trimEnd()}…`;
+    trimmed = true;
+  }
+
+  let notes: string | undefined;
+  if (args.conditionalDay) {
+    const cond =
+      "Betinget opplegg — avhengig av resultat eller tid som ikke er endelig.";
+    notes = notesBody ? `${cond}\n${notesBody}` : cond;
+  } else if (notesBody) {
+    notes = notesBody;
+  }
+
+  let source: EmbeddedScheduleSegment["embeddedScheduleSegmentNotesSource"];
+  if (args.conditionalDay && linesOut.length === 0) source = "conditional";
+  else if (sourcesHit.size === 0) source = "none";
+  else if (sourcesHit.size === 1) source = sourcesHit.values().next().value!;
+  else source = "mixed";
+
+  const derived = Boolean(notes && notes.length > 0);
+
+  return {
+    date: args.isoDate,
+    dayLabel: args.day.dayLabel,
+    start,
+    end,
+    title,
+    ...(notes ? { notes } : {}),
+    ...(args.conditionalDay ? { isConditional: true } : {}),
+    embeddedScheduleSegmentNotesDerived: derived,
+    embeddedScheduleSegmentNotesSource: source,
+    ...(trimmed ? { embeddedScheduleSegmentNotesTrimmed: true } : {}),
+    ...(omitted.length > 0 ? { embeddedScheduleSegmentNotesOmitted: omitted } : {}),
+  };
+}
+
 function slugifySubjectKey(raw: string): string | null {
   const s = normalizeSpace(raw);
   if (s.length < 2) return null;
@@ -2306,6 +2444,8 @@ function buildProposalItems(
     let actionableParentTasksDeduped = 0;
     const splitTasks = (raw: string | null) =>
       cupLike ? splitTaskCandidatesForCup(raw) : splitTaskCandidates(raw);
+    const cupEmbeddedScheduleSegments: EmbeddedScheduleSegment[] | null =
+      cupLike && result.scheduleByDay.length >= 2 ? [] : null;
 
     for (const day of result.scheduleByDay) {
       const isoDate = resolveDate(day.date, day.dayLabel);
@@ -2442,6 +2582,24 @@ function buildProposalItems(
         detailsForEvent = rdet.text;
         promotedFromSource.details = rdet.removed;
         totalStripped += rdet.removed;
+      }
+
+      if (cupEmbeddedScheduleSegments) {
+        cupEmbeddedScheduleSegments.push(
+          buildCupEmbeddedScheduleSegment({
+            result,
+            day,
+            isoDate,
+            titleSuffix,
+            explicitStartEnd,
+            detailsForEvent,
+            highlightsForEventFinal,
+            rememberForEvent,
+            notesOnlyForEvent,
+            deadlinesForEvent,
+            conditionalDay,
+          }),
+        );
       }
 
       const notesForCtx = [...notesOnlyForEvent];
@@ -2614,6 +2772,27 @@ function buildProposalItems(
         if (it.kind !== "event" || !it.event.metadata?.cupProposalDebug) continue;
         it.event.metadata.cupProposalDebug.actionableParentTasksDeduped =
           actionableParentTasksDeduped;
+      }
+    }
+
+    if (cupEmbeddedScheduleSegments && cupEmbeddedScheduleSegments.length >= 2) {
+      const firstSegDate = cupEmbeddedScheduleSegments[0]!.date;
+      const host =
+        items.find(
+          (it): it is PortalEventItem =>
+            it.kind === "event" &&
+            Boolean(it.event.metadata?.cupProposalDebug) &&
+            it.event.date === firstSegDate,
+        ) ??
+        items.find(
+          (it): it is PortalEventItem =>
+            it.kind === "event" && Boolean(it.event.metadata?.cupProposalDebug),
+        );
+      if (host?.event.metadata) {
+        host.event.metadata.embeddedSchedule = cupEmbeddedScheduleSegments;
+        host.event.metadata.embeddedScheduleParentNotesRetained = sharedCupInfoLiftedOut
+          ? "Felles praktisk info og «Felles for cup/helg»-blokken ligger bevisst bare i hovedhendelsens notat (én gang), ikke i hvert segment."
+          : "Strukturerte seksjoner (dagens innhold, husk, frister) og eventuelle NB om tid/usikkerhet ligger på hovedkortet; segmentnotatene er kompakte og dag-spesifikke.";
       }
     }
   }
