@@ -928,6 +928,16 @@ type CupProposalItemDebug = {
   cupDuplicateParentTaskSuppressed?: number;
   /** Kort utdrag av ferdige hendelsesnotater etter task-stripping (verifisering). */
   cupEventNotesAfterTaskStripping?: string | null;
+  /** Flerdagers cup ble slått sammen til ett parent-event med embeddedSchedule. */
+  embeddedScheduleParentMergeRestored?: boolean;
+  /** Hvorfor parent-merge ble hoppet over (når relevant). */
+  embeddedScheduleParentMergeSkippedReason?: string | null;
+  /** embeddedSchedule ligger på parent (merge) eller på verts-dagshendelse (fallback). */
+  embeddedScheduleAttachedToParentEvent?: boolean;
+  /** Antall daglige hendelser som ble utelatt som toppnivå ved vellykket merge. */
+  embeddedScheduleDailyTopLevelSuppressed?: number;
+  /** Segment-bygging med egne korte notater er beholdt. */
+  embeddedScheduleSegmentNotesRetained?: boolean;
 };
 
 /** Diagnostikk for portal-task (Spond/cup-frist og tittelkontekst). */
@@ -2439,7 +2449,16 @@ function buildProposalItems(
       sharedCupInfoLiftedOut
         ? `Felles for cup/helg (samme info flere dager eller generelt utstyr):\n${mergedFooterLines.map((l) => `- ${l}`).join("\n")}`
         : null;
-    let pendingCupFooter = cupFooterOnce;
+    const resolvedCupDayCount = result.scheduleByDay.filter(
+      (d) => resolveDate(d.date, d.dayLabel) !== null,
+    ).length;
+    const cupParentMergeEligible =
+      cupLike &&
+      resolvedCupDayCount >= 2 &&
+      !isSchoolPlanBundleContext(result, weekPlanLike);
+    const cupMergeBuffer: PortalProposalItem[] | null = cupParentMergeEligible ? [] : null;
+    let pendingCupFooter = cupParentMergeEligible ? null : cupFooterOnce;
+    const cupFooterForParentNotes = cupParentMergeEligible ? cupFooterOnce : null;
     const seenCupTaskKey = new Set<string>();
     let actionableParentTasksDeduped = 0;
     const splitTasks = (raw: string | null) =>
@@ -2702,7 +2721,8 @@ function buildProposalItems(
           ev.event.metadata.cupProposalDebug.cupEventNotesAfterTaskStripping =
             n.length > 520 ? `${n.slice(0, 520)}…` : n;
         }
-        items.push(ev);
+        if (cupMergeBuffer) cupMergeBuffer.push(ev);
+        else items.push(ev);
       }
 
       const deadlineBlobForDay = [
@@ -2763,19 +2783,156 @@ function buildProposalItems(
             : pendingCupFooter;
           pendingCupFooter = null;
         }
-        items.push(tk);
+        if (cupMergeBuffer) cupMergeBuffer.push(tk);
+        else items.push(tk);
       }
     }
 
-    if (cupLike) {
-      for (const it of items) {
-        if (it.kind !== "event" || !it.event.metadata?.cupProposalDebug) continue;
-        it.event.metadata.cupProposalDebug.actionableParentTasksDeduped =
-          actionableParentTasksDeduped;
+    const attachEmbeddedScheduleToHostEvent = (
+      host: PortalEventItem,
+      attachedToParent: boolean,
+    ) => {
+      if (!host.event.metadata || !cupEmbeddedScheduleSegments) return;
+      host.event.metadata.embeddedSchedule = cupEmbeddedScheduleSegments;
+      host.event.metadata.embeddedScheduleParentNotesRetained = sharedCupInfoLiftedOut
+        ? "Felles praktisk info og «Felles for cup/helg»-blokken ligger bevisst bare i hovedhendelsens notat (én gang), ikke i hvert segment."
+        : "Strukturerte seksjoner (dagens innhold, husk, frister) og eventuelle NB om tid/usikkerhet ligger på hovedkortet; segmentnotatene er kompakte og dag-spesifikke.";
+      if (host.event.metadata.cupProposalDebug) {
+        host.event.metadata.cupProposalDebug.embeddedScheduleAttachedToParentEvent =
+          attachedToParent;
+        host.event.metadata.cupProposalDebug.embeddedScheduleSegmentNotesRetained = true;
       }
-    }
+    };
 
-    if (cupEmbeddedScheduleSegments && cupEmbeddedScheduleSegments.length >= 2) {
+    const mergeSkipped = (reason: string) => {
+      if (!cupMergeBuffer?.length) return;
+      items.push(...cupMergeBuffer);
+      const host = items.find(
+        (it): it is PortalEventItem =>
+          it.kind === "event" && Boolean(it.event.metadata?.cupProposalDebug),
+      );
+      if (host?.event.metadata?.cupProposalDebug) {
+        host.event.metadata.cupProposalDebug.embeddedScheduleParentMergeSkippedReason = reason;
+        host.event.metadata.cupProposalDebug.embeddedScheduleAttachedToParentEvent = false;
+        host.event.metadata.cupProposalDebug.embeddedScheduleSegmentNotesRetained = true;
+      }
+      if (
+        cupEmbeddedScheduleSegments &&
+        cupEmbeddedScheduleSegments.length >= 2 &&
+        host?.event.metadata
+      ) {
+        attachEmbeddedScheduleToHostEvent(host, false);
+      }
+    };
+
+    if (
+      cupParentMergeEligible &&
+      cupEmbeddedScheduleSegments &&
+      cupEmbeddedScheduleSegments.length >= 2
+    ) {
+      const firstSeg = cupEmbeddedScheduleSegments[0]!;
+      const lastSeg = cupEmbeddedScheduleSegments[cupEmbeddedScheduleSegments.length - 1]!;
+      let anchorDay: DayScheduleEntry = result.scheduleByDay[0]!;
+      for (const d of result.scheduleByDay) {
+        if (resolveDate(d.date, d.dayLabel) === firstSeg.date) {
+          anchorDay = d;
+          break;
+        }
+      }
+
+      const parentTitleSuffix =
+        firstSeg.dayLabel &&
+        lastSeg.dayLabel &&
+        normalizeSpace(firstSeg.dayLabel) !== normalizeSpace(lastSeg.dayLabel)
+          ? `${firstSeg.dayLabel}–${lastSeg.dayLabel}`
+          : firstSeg.dayLabel ?? null;
+
+      const parentExplicitStartEnd = cupEmbeddedScheduleSegments.every(
+        (s) =>
+          s.start === CUP_UNCERTAIN_DAY_WINDOW.start && s.end === CUP_UNCERTAIN_DAY_WINDOW.end,
+      )
+        ? { ...CUP_UNCERTAIN_DAY_WINDOW }
+        : { start: firstSeg.start, end: firstSeg.end };
+
+      const parentNoteParts: string[] = [];
+      const desc = normalizeSpace(result.description || "");
+      if (desc) parentNoteParts.push(desc);
+      if (cupFooterForParentNotes) parentNoteParts.push(cupFooterForParentNotes);
+      const parentNoteBase = parentNoteParts.length ? parentNoteParts.join("\n\n") : null;
+
+      const anyConditional = cupEmbeddedScheduleSegments.some((s) => s.isConditional);
+      const parentCupDbg: CupProposalItemDebug = {
+        sharedCupInfoLiftedOut,
+        conditionalDayDetected: anyConditional,
+        conditionalDayRenderedAsSoftEvent: anyConditional,
+        defaultTimeSuppressed: true,
+        daySpecificContentAfterSharedLift: true,
+        embeddedScheduleParentMergeRestored: true,
+        embeddedScheduleAttachedToParentEvent: true,
+        embeddedScheduleDailyTopLevelSuppressed: cupMergeBuffer
+          ? cupMergeBuffer.filter((it) => it.kind === "event").length
+          : 0,
+        embeddedScheduleSegmentNotesRetained: true,
+      };
+
+      const schoolCtx = buildEventSchoolContext(
+        anchorDay,
+        result,
+        sourceType,
+        weekPlanLike,
+        anchorDay.time,
+      );
+
+      const cupParentEvent = buildEventItem(
+        firstSeg.date,
+        anchorDay.time,
+        parentTitleSuffix,
+        parentNoteBase,
+        undefined,
+        schoolCtx,
+        null,
+        parentExplicitStartEnd,
+        parentCupDbg,
+      );
+
+      const multiDayIntro =
+        "NB: Hendelsen dekker flere dager – tider og innhold per dag står i underblokkene.\n\n";
+      cupParentEvent.event.notes = cupParentEvent.event.notes
+        ? `${multiDayIntro}${cupParentEvent.event.notes}`
+        : multiDayIntro.trim();
+
+      if (anyConditional) {
+        cupParentEvent.confidence = Math.min(cupParentEvent.confidence, 0.52);
+        const prefix =
+          "NB: Minst én dag har usikkert eller betinget opplegg. Ikke behandle alt som fast avtale.\n\n";
+        cupParentEvent.event.notes = `${prefix}${cupParentEvent.event.notes}`;
+      }
+
+      if (cupParentEvent.event.metadata?.cupProposalDebug && cupParentEvent.event.notes) {
+        const n = cupParentEvent.event.notes;
+        cupParentEvent.event.metadata.cupProposalDebug.cupEventNotesAfterTaskStripping =
+          n.length > 520 ? `${n.slice(0, 520)}…` : n;
+      }
+
+      attachEmbeddedScheduleToHostEvent(cupParentEvent, true);
+      items.unshift(cupParentEvent);
+      if (cupMergeBuffer) {
+        for (const it of cupMergeBuffer) {
+          if (it.kind === "task") items.push(it);
+        }
+      }
+    } else if (cupParentMergeEligible && cupMergeBuffer) {
+      mergeSkipped(
+        cupEmbeddedScheduleSegments && cupEmbeddedScheduleSegments.length < 2
+          ? "embedded_segments_lt_2"
+          : "embedded_segments_missing",
+      );
+    } else if (
+      cupLike &&
+      result.scheduleByDay.length >= 2 &&
+      cupEmbeddedScheduleSegments &&
+      cupEmbeddedScheduleSegments.length >= 2
+    ) {
       const firstSegDate = cupEmbeddedScheduleSegments[0]!.date;
       const host =
         items.find(
@@ -2788,11 +2945,21 @@ function buildProposalItems(
           (it): it is PortalEventItem =>
             it.kind === "event" && Boolean(it.event.metadata?.cupProposalDebug),
         );
-      if (host?.event.metadata) {
-        host.event.metadata.embeddedSchedule = cupEmbeddedScheduleSegments;
-        host.event.metadata.embeddedScheduleParentNotesRetained = sharedCupInfoLiftedOut
-          ? "Felles praktisk info og «Felles for cup/helg»-blokken ligger bevisst bare i hovedhendelsens notat (én gang), ikke i hvert segment."
-          : "Strukturerte seksjoner (dagens innhold, husk, frister) og eventuelle NB om tid/usikkerhet ligger på hovedkortet; segmentnotatene er kompakte og dag-spesifikke.";
+      if (host?.event.metadata?.cupProposalDebug) {
+        let skipReason = "daily_events_remain_top_level";
+        if (resolvedCupDayCount < 2) skipReason = "single_resolved_calendar_day";
+        else if (isSchoolPlanBundleContext(result, weekPlanLike))
+          skipReason = "school_plan_bundle_context";
+        host.event.metadata.cupProposalDebug.embeddedScheduleParentMergeSkippedReason = skipReason;
+      }
+      if (host) attachEmbeddedScheduleToHostEvent(host, false);
+    }
+
+    if (cupLike) {
+      for (const it of items) {
+        if (it.kind !== "event" || !it.event.metadata?.cupProposalDebug) continue;
+        it.event.metadata.cupProposalDebug.actionableParentTasksDeduped =
+          actionableParentTasksDeduped;
       }
     }
   }
