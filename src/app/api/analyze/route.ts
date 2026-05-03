@@ -651,6 +651,41 @@ function buildCalendarEventTitle(
   return baseTitle ? `${baseTitle} – ${suffix}` : suffix;
 }
 
+const NORWEGIAN_MONTH_NAMES = [
+  "januar",
+  "februar",
+  "mars",
+  "april",
+  "mai",
+  "juni",
+  "juli",
+  "august",
+  "september",
+  "oktober",
+  "november",
+  "desember",
+] as const;
+
+/** Kompakt norsk datointervall for flerdagers parent (f.eks. «12.–14. juni 2026»). */
+function formatNorwegianShortDateRange(startIso: string, endIso: string): string {
+  const parts = (iso: string) => {
+    const [y, m, d] = iso.split("-").map((x) => Number(x));
+    return { y, m: m - 1, d };
+  };
+  const a = parts(startIso);
+  const b = parts(endIso);
+  const ma = NORWEGIAN_MONTH_NAMES[a.m] ?? "ukjent";
+  const mb = NORWEGIAN_MONTH_NAMES[b.m] ?? "ukjent";
+  if (a.y === b.y && a.m === b.m) {
+    if (a.d === b.d) return `${a.d}. ${ma} ${a.y}`;
+    return `${a.d}.–${b.d}. ${ma} ${a.y}`;
+  }
+  if (a.y === b.y) {
+    return `${a.d}. ${ma}–${b.d}. ${mb} ${a.y}`;
+  }
+  return `${a.d}. ${ma} ${a.y}–${b.d}. ${mb} ${b.y}`;
+}
+
 function trimSentence(raw: string, maxLen = 56): string {
   const firstChunk = raw.split(/[.;\n]/)[0] ?? raw;
   const cleaned = normalizeSpace(firstChunk).replace(/^[-:]\s*/, "");
@@ -899,6 +934,15 @@ type PortalEventItem = {
        * (f.eks. felles utstyr/Spond-info én gang).
        */
       embeddedScheduleParentNotesRetained?: string;
+      /**
+       * Siste kalenderdag (ISO yyyy-mm-dd) for flerdagers parent — Foreldre-App bruker ofte dette
+       * sammen med `embeddedSchedule` for container/nested review (ikke én enkelt dags hendelse).
+       */
+      endDate?: string;
+      /** Parent er heldags over intervallet; unngå at klient tolker første dags klokkeslett som hovedtid. */
+      multiDayAllDay?: boolean;
+      /** Antall programpunkter / underblokker (samsvarer typisk med lengden på `embeddedSchedule`). */
+      embeddedSchedulePointCount?: number;
     };
   };
 };
@@ -2791,12 +2835,18 @@ function buildProposalItems(
     const attachEmbeddedScheduleToHostEvent = (
       host: PortalEventItem,
       attachedToParent: boolean,
+      multiDayContainer?: { endDateIso: string },
     ) => {
       if (!host.event.metadata || !cupEmbeddedScheduleSegments) return;
       host.event.metadata.embeddedSchedule = cupEmbeddedScheduleSegments;
       host.event.metadata.embeddedScheduleParentNotesRetained = sharedCupInfoLiftedOut
         ? "Felles praktisk info og «Felles for cup/helg»-blokken ligger bevisst bare i hovedhendelsens notat (én gang), ikke i hvert segment."
         : "Strukturerte seksjoner (dagens innhold, husk, frister) og eventuelle NB om tid/usikkerhet ligger på hovedkortet; segmentnotatene er kompakte og dag-spesifikke.";
+      host.event.metadata.embeddedSchedulePointCount = cupEmbeddedScheduleSegments.length;
+      if (multiDayContainer) {
+        host.event.metadata.endDate = multiDayContainer.endDateIso;
+        host.event.metadata.multiDayAllDay = true;
+      }
       if (host.event.metadata.cupProposalDebug) {
         host.event.metadata.cupProposalDebug.embeddedScheduleAttachedToParentEvent =
           attachedToParent;
@@ -2832,27 +2882,11 @@ function buildProposalItems(
     ) {
       const firstSeg = cupEmbeddedScheduleSegments[0]!;
       const lastSeg = cupEmbeddedScheduleSegments[cupEmbeddedScheduleSegments.length - 1]!;
-      let anchorDay: DayScheduleEntry = result.scheduleByDay[0]!;
-      for (const d of result.scheduleByDay) {
-        if (resolveDate(d.date, d.dayLabel) === firstSeg.date) {
-          anchorDay = d;
-          break;
-        }
-      }
 
-      const parentTitleSuffix =
-        firstSeg.dayLabel &&
-        lastSeg.dayLabel &&
-        normalizeSpace(firstSeg.dayLabel) !== normalizeSpace(lastSeg.dayLabel)
-          ? `${firstSeg.dayLabel}–${lastSeg.dayLabel}`
-          : firstSeg.dayLabel ?? null;
+      const parentTitleSuffix = formatNorwegianShortDateRange(firstSeg.date, lastSeg.date);
 
-      const parentExplicitStartEnd = cupEmbeddedScheduleSegments.every(
-        (s) =>
-          s.start === CUP_UNCERTAIN_DAY_WINDOW.start && s.end === CUP_UNCERTAIN_DAY_WINDOW.end,
-      )
-        ? { ...CUP_UNCERTAIN_DAY_WINDOW }
-        : { start: firstSeg.start, end: firstSeg.end };
+      /** Heldags-container: ikke bruk første dags kamp-tid som parent-meta (Foreldre nested review). */
+      const parentExplicitStartEnd = { start: "00:00", end: "23:59" } as const;
 
       const parentNoteParts: string[] = [];
       const desc = normalizeSpace(result.description || "");
@@ -2865,7 +2899,7 @@ function buildProposalItems(
         sharedCupInfoLiftedOut,
         conditionalDayDetected: anyConditional,
         conditionalDayRenderedAsSoftEvent: anyConditional,
-        defaultTimeSuppressed: true,
+        defaultTimeSuppressed: false,
         daySpecificContentAfterSharedLift: true,
         embeddedScheduleParentMergeRestored: true,
         embeddedScheduleAttachedToParentEvent: true,
@@ -2875,21 +2909,13 @@ function buildProposalItems(
         embeddedScheduleSegmentNotesRetained: true,
       };
 
-      const schoolCtx = buildEventSchoolContext(
-        anchorDay,
-        result,
-        sourceType,
-        weekPlanLike,
-        anchorDay.time,
-      );
-
       const cupParentEvent = buildEventItem(
         firstSeg.date,
-        anchorDay.time,
+        null,
         parentTitleSuffix,
         parentNoteBase,
         undefined,
-        schoolCtx,
+        null,
         null,
         parentExplicitStartEnd,
         parentCupDbg,
@@ -2914,7 +2940,9 @@ function buildProposalItems(
           n.length > 520 ? `${n.slice(0, 520)}…` : n;
       }
 
-      attachEmbeddedScheduleToHostEvent(cupParentEvent, true);
+      attachEmbeddedScheduleToHostEvent(cupParentEvent, true, {
+        endDateIso: lastSeg.date,
+      });
       items.unshift(cupParentEvent);
       if (cupMergeBuffer) {
         for (const it of cupMergeBuffer) {
