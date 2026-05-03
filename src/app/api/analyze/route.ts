@@ -753,6 +753,335 @@ function normalizeTaskTitle(taskText: string, maxLen = 54): string {
   return compact || "Oppgave";
 }
 
+const PORTAL_TASK_TITLE_SOFT_MAX = 60;
+const PORTAL_TASK_TITLE_HARD_MAX = 78;
+
+function clampPortalTaskTitleLength(
+  title: string,
+  softMax = PORTAL_TASK_TITLE_SOFT_MAX,
+  hardMax = PORTAL_TASK_TITLE_HARD_MAX,
+): string {
+  const t = normalizeSpace(title);
+  if (!t) return t;
+  if (t.length <= hardMax) return t;
+  return `${t.slice(0, Math.max(0, softMax - 1)).trimEnd()}…`;
+}
+
+function clampTitleMiddleWords(phrase: string, maxWords: number): string {
+  const w = normalizeSpace(phrase).split(/\s+/).filter(Boolean);
+  if (w.length <= maxWords) return w.join(" ");
+  return `${w.slice(0, maxWords).join(" ")}…`;
+}
+
+function titleLooksCorrupted(title: string): boolean {
+  const t = normalizeSpace(title);
+  if (!t) return true;
+  if (/�|\uFFFD/.test(t)) return true;
+  const letters = (t.match(/[a-zA-ZæøåÆØÅ]/g) ?? []).length;
+  if (t.length >= 14 && letters / t.length < 0.32) return true;
+  if (/[\uE000-\uF8FF]/.test(t)) return true;
+  if (/\{[^}]*\}\s*\{/.test(t)) return true;
+  return false;
+}
+
+/** Forsøk latin1→UTF-8-reparasjon (vanlige norske tegn). */
+function tryRepairUtf8Mojibake(input: string): string {
+  if (!/[ÃÂâ€ï¿½]/.test(input) && !/Ã¥|Ã¸|Ã¦|Ã…|Ã˜|Ã†/.test(input)) return input;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- bevisst for enkel mojibake-fiks
+    const repaired = decodeURIComponent(escape(input));
+    if (repaired && repaired !== input && !titleLooksCorrupted(repaired)) return repaired;
+  } catch {
+    /* ignore */
+  }
+  return input
+    .replace(/Ã¥/g, "å")
+    .replace(/Ã¸/g, "ø")
+    .replace(/Ã¦/g, "æ")
+    .replace(/Ã…/g, "Å")
+    .replace(/Ã˜/g, "Ø")
+    .replace(/Ã†/g, "Æ")
+    .replace(/â€"/g, "–")
+    .replace(/â€™/g, "'")
+    .replace(/â€œ|â€/g, '"');
+}
+
+type SanitizeUserTitleResult = {
+  title: string;
+  debug: Pick<
+    TaskProposalDebug,
+    "taskTitleEncodingNoiseRemoved" | "taskTitleSanitizedToNorwegian" | "taskTitleFallbackUsed"
+  >;
+};
+
+function sanitizeUserFacingTaskTitle(
+  raw: string,
+  safeFallback?: string,
+): SanitizeUserTitleResult {
+  let encodingNoiseRemoved = false;
+  let s = raw.normalize("NFKC");
+  const beforeM = s;
+  s = tryRepairUtf8Mojibake(s);
+  if (s !== beforeM) encodingNoiseRemoved = true;
+  s = s
+    .replace(/[\u00A0\u202F\u2007]/g, " ")
+    .replace(/[‐‑‒−]/g, "-")
+    .replace(/[–—]/g, "–");
+  const beforeCtrl = s;
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\uFEFF]/g, "");
+  s = s.replace(/\uFFFD/g, "");
+  if (s !== beforeCtrl) encodingNoiseRemoved = true;
+  s = normalizeSpace(s);
+  s = s.replace(/\bTBA\b/gi, "kommer");
+  let sanitizedToNorwegian = encodingNoiseRemoved;
+  let fallbackUsed = false;
+  if (!s || titleLooksCorrupted(s)) {
+    s = safeFallback ?? "Oppgave";
+    fallbackUsed = true;
+    sanitizedToNorwegian = true;
+  }
+  return {
+    title: clampPortalTaskTitleLength(s),
+    debug: {
+      taskTitleEncodingNoiseRemoved: encodingNoiseRemoved,
+      taskTitleSanitizedToNorwegian: sanitizedToNorwegian,
+      taskTitleFallbackUsed: fallbackUsed,
+    },
+  };
+}
+
+/** Kort arrangementsnavn til «… i Vårcupen» e.l. (unngår generiske ukeplantitler). */
+function extractEventNameForTaskContext(result: AIAnalysisResult): string | null {
+  const title = normalizeSpace(result.title || "");
+  if (title.length < 4) return null;
+  const n = normalizeNorwegianLetters(title);
+  if (/\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) return null;
+  const cupWord = title.match(
+    /\b([A-ZÆØÅa-zæøå0-9]{2,}\s+cup|[A-ZÆØÅa-zæøå0-9]+cup[a-zæøå0-9]*)\b/,
+  );
+  if (cupWord) return clampPortalTaskTitleLength(cupWord[0]!, 36, 44);
+  if (/\bcup\b/i.test(title) || /\bturnering\b/i.test(n) || /\bstevne\b/i.test(n)) {
+    const head = title.split(/[–—|]/)[0]?.trim() ?? title;
+    if (head.length >= 5 && head.length <= 42) return head;
+  }
+  if (/\btur\b/.test(n)) {
+    const head = title.split(/[–—|]/)[0]?.trim() ?? title;
+    if (head.length >= 5 && head.length <= 40) return head;
+  }
+  const head = title.split(/[–—|]/)[0]?.trim() ?? title;
+  if (head.length >= 6 && head.length <= 36) return head;
+  return null;
+}
+
+type ContextualTitleResult = {
+  title: string;
+  contextApplied: boolean;
+  kind: TaskProposalDebug["taskTitleContextKind"];
+  eventUsed: string | null;
+};
+
+function buildContextualPortalTaskTitle(
+  sourceLine: string,
+  draftTitle: string,
+  result: AIAnalysisResult,
+): ContextualTitleResult {
+  const raw = normalizeSpace(sourceLine);
+  const n = normalizeNorwegianLetters(raw);
+  const eventName = extractEventNameForTaskContext(result);
+  const eventInSource = (ev: string | null) =>
+    Boolean(ev && normalizeNorwegianLetters(raw).includes(normalizeNorwegianLetters(ev).slice(0, 10)));
+
+  if (isDeadlineResponseSpondTaskLine(raw) || (/\bspond\b/.test(n) && /\b(senest|innen|frist)\b/.test(n))) {
+    let title: string;
+    let eventUsed: string | null = null;
+    if (/\bp[aå]melding\b/.test(n)) {
+      title = "Svar og påmelding i Spond";
+    } else if (/\btilbakemelding\b/.test(n) || /\bgi\s+tilbakemelding\b/.test(n)) {
+      title = "Gi tilbakemelding om deltakelse";
+    } else if (/\bbekreft\b/.test(n) && !/\bsvarer\b/.test(n)) {
+      title =
+        eventName && !eventInSource(eventName)
+          ? `Bekreft deltakelse i ${eventName}`
+          : "Bekreft deltakelse";
+      if (eventName && title.includes(eventName)) eventUsed = eventName;
+    } else if (/\bkamper?\b/.test(n) && /\b(rekker|ikke\s+rekker|kan\s+ikke)\b/.test(n)) {
+      title = "Svar i Spond om deltakelse og kamper";
+    } else if (
+      /\bbarnet\s+kan\s+delta\b/i.test(raw) ||
+      /\bkan\s+delta\s+hele\s+helg/i.test(raw) ||
+      (/\bhele\s+helgen\b/i.test(raw) && /\bdelta\b/.test(n))
+    ) {
+      title = "Svar i Spond om barnet kan delta hele helgen";
+    } else if (/\bhvilke\s+dager\b/i.test(n)) {
+      title = "Svar i Spond om hvilke dager barnet kan";
+    } else if (/\bdeltakelse\b/.test(n) || /\btilgjengelighet\b/.test(n) || /\bkan\s+delta\b/.test(n)) {
+      title =
+        eventName && !eventInSource(eventName)
+          ? `Svar i Spond om deltakelse i ${eventName}`
+          : "Svar i Spond om deltakelse";
+      if (eventName && title.includes(eventName)) eventUsed = eventName;
+    } else {
+      title =
+        eventName && !eventInSource(eventName)
+          ? `Svar i Spond om deltakelse i ${eventName}`
+          : "Svar i Spond om deltakelse";
+      if (eventName && title.includes(eventName)) eventUsed = eventName;
+    }
+    return {
+      title: clampPortalTaskTitleLength(title),
+      contextApplied: true,
+      kind: "deadline_spond",
+      eventUsed,
+    };
+  }
+
+  if (
+    /\bbekreft\b/.test(n) &&
+    /\b(deltakelse|oppm[oø]te|p[aå]melding)\b/.test(n) &&
+    !/\bspond\b/.test(n)
+  ) {
+    const title =
+      eventName && !eventInSource(eventName)
+        ? `Bekreft deltakelse i ${eventName}`
+        : "Bekreft deltakelse";
+    return {
+      title: clampPortalTaskTitleLength(title),
+      contextApplied: true,
+      kind: "deadline_other",
+      eventUsed: eventName && title.includes(eventName) ? eventName : null,
+    };
+  }
+
+  if (
+    /\bmedisin/.test(n) ||
+    (/\ballergi\b/.test(n) && /\b(epi|helse|medisin)\b/.test(n)) ||
+    (/\bhelseopplysning/.test(n) && /\b(trener|lag)\b/.test(n))
+  ) {
+    let title = "Gi beskjed om medisiner";
+    if (/\b(informer|varsle)\b/.test(n) && /\b(trener|trenere)\b/.test(n))
+      title = "Informer trenerne om medisiner";
+    else if (/\b(barnet|deres\s+barn)\b/.test(n) && /\b(bruker|får\s+medisin|tar\s+medisin)\b/.test(n))
+      title = "Gi beskjed om barnet bruker medisiner";
+    return {
+      title: clampPortalTaskTitleLength(title),
+      contextApplied: true,
+      kind: "medicine",
+      eventUsed: null,
+    };
+  }
+
+  const voksne = /\b(to|tre|fire|fem|seks|syv|\d{1,2})\s+voksne\b/i.exec(raw);
+  if (voksne && /\b(hjelp|trengs|behov|til|f[oø]r)\b/.test(n)) {
+    const til = /\b(to|tre|fire|fem|seks|syv|\d{1,2})\s+voksne\s+til\s+(.+)/i.exec(raw);
+    if (til?.[2]) {
+      const topic = clampTitleMiddleWords(
+        til[2].replace(/\b(senest|innen|frist|kl\.?).*$/i, "").trim(),
+        9,
+      );
+      const num = til[1].toLowerCase();
+      const label = num === "to" ? "To" : num === "tre" ? "Tre" : num === "fire" ? "Fire" : num === "fem" ? "Fem" : num;
+      const title = topic ? `${label} voksne til ${topic}` : `${label} voksne trengs`;
+      return {
+        title: clampPortalTaskTitleLength(title),
+        contextApplied: true,
+        kind: "volunteer",
+        eventUsed: null,
+      };
+    }
+  }
+
+  if (/^gi\s+beskjed\b/i.test(raw) || /\bgi\s+beskjed\b/.test(n)) {
+    const om = /\bgi\s+beskjed\s+om\s+(.+)/i.exec(raw);
+    if (om?.[1]) {
+      let rest = om[1].trim().replace(/\b(senest|innen|frist|kl\.?).*$/i, "").trim();
+      rest = rest.replace(/^[.:;\-–—]\s*/, "").trim();
+      const short = clampTitleMiddleWords(rest, 12);
+      if (short.length >= 6) {
+        return {
+          title: clampPortalTaskTitleLength(`Gi beskjed om ${short}`),
+          contextApplied: true,
+          kind: "gi_beskjed",
+          eventUsed: null,
+        };
+      }
+    }
+  }
+
+  if (/\bmeld\s+fra\b/.test(n) && !/\bmedisin|allergi\b/.test(n)) {
+    const om = /\bmeld\s+fra\s+(?:til\s+(?:oss|laget)\s+)?(?:om\s+)?(.+)/i.exec(raw);
+    if (om?.[1]) {
+      let rest = om[1].trim().replace(/\b(senest|innen|frist|kl\.?).*$/i, "").trim();
+      rest = rest.replace(/^[.:;\-–—]\s*/, "").trim();
+      const short = clampTitleMiddleWords(rest, 12);
+      if (short.length >= 6) {
+        return {
+          title: clampPortalTaskTitleLength(`Meld fra om ${short}`),
+          contextApplied: true,
+          kind: "meld_fra",
+          eventUsed: null,
+        };
+      }
+    }
+  }
+
+  if (
+    /\b(betaling|betal|vipps|kontingent|egenandel|deltakeravgift|p[aå]meldingsavgift)\b/.test(n) &&
+    /\b(innen|f[oø]r|senest|frist)\b/.test(n)
+  ) {
+    return {
+      title: clampPortalTaskTitleLength("Betal innen frist"),
+      contextApplied: true,
+      kind: "payment",
+      eventUsed: null,
+    };
+  }
+
+  if (isParentCoordinatorTaskLine(raw)) {
+    const cleaned = clampPortalTaskTitleLength(normalizeSpace(draftTitle));
+    return {
+      title: cleaned || clampPortalTaskTitleLength("Gi beskjed om deltakelse"),
+      contextApplied: false,
+      kind: "generic",
+      eventUsed: null,
+    };
+  }
+
+  return {
+    title: clampPortalTaskTitleLength(normalizeSpace(draftTitle)),
+    contextApplied: false,
+    kind: "generic",
+    eventUsed: null,
+  };
+}
+
+function finalizePortalTaskTitleForProposal(
+  sourceLine: string,
+  draftTitle: string,
+  result: AIAnalysisResult,
+): { title: string; taskProposalDebug: Partial<TaskProposalDebug> } {
+  const ctx = buildContextualPortalTaskTitle(sourceLine, draftTitle, result);
+  const fallback =
+    ctx.kind === "medicine"
+      ? "Gi beskjed om medisiner"
+      : ctx.kind === "deadline_spond" || ctx.kind === "deadline_other"
+        ? "Svar i Spond om deltakelse"
+        : ctx.kind === "payment"
+          ? "Betal innen frist"
+          : ctx.kind === "volunteer" || ctx.kind === "meld_fra"
+            ? "Praktisk hjelp til arrangementet"
+            : "Gi beskjed om deltakelse";
+  const san = sanitizeUserFacingTaskTitle(ctx.title, fallback);
+  return {
+    title: san.title,
+    taskProposalDebug: {
+      taskTitleContextApplied: ctx.contextApplied,
+      taskTitleContextKind: ctx.kind ?? null,
+      taskTitleEventContextUsed: ctx.eventUsed,
+      ...san.debug,
+    },
+  };
+}
+
 /** A-plan preserve: ikke klipp på `.`/`;` — bare whitespace + max-lengde. */
 function overlayPreserveTaskTitleTrim(taskText: string, maxLen: number): string {
   const stripped = normalizeSpace(taskText)
@@ -1026,6 +1355,27 @@ type TaskProposalDebug = {
   deadlineResponseTaskDroppedLate?: boolean;
   /** Årsak ved sent bortfall (dedupe_key_hit, should_count_false, …). */
   deadlineResponseTaskDropReason?: string | null;
+  /** Kontekstuell tittel (handling + tema) ble brukt i stedet for rå klipp. */
+  taskTitleContextApplied?: boolean;
+  /** Grov kategori for konteksttittel (debug). */
+  taskTitleContextKind?:
+    | "deadline_spond"
+    | "deadline_other"
+    | "medicine"
+    | "volunteer"
+    | "gi_beskjed"
+    | "meld_fra"
+    | "payment"
+    | "generic"
+    | null;
+  /** Arrangements-/cup-navn lagt inn i tittel (kort utdrag). */
+  taskTitleEventContextUsed?: string | null;
+  /** Teksten ble normalisert mot norsk bokmål-visning (tegn/whitespace). */
+  taskTitleSanitizedToNorwegian?: boolean;
+  /** Støy-/kontrolltegn eller åpenbar encoding-fiks ble fjernet. */
+  taskTitleEncodingNoiseRemoved?: boolean;
+  /** Trygg norsk fallback-tittel ble brukt (korrupt eller tom streng). */
+  taskTitleFallbackUsed?: boolean;
 };
 
 type PortalTaskItem = {
@@ -1142,17 +1492,6 @@ function isDeadlineResponseSpondTaskLine(line: string): boolean {
     );
   if (!hasTimeOrDate) return false;
   return true;
-}
-
-function compactDeadlineResponseTaskTitle(raw: string): string {
-  const n = normalizeNorwegianLetters(raw);
-  if (/\bp[aå]melding\b/.test(n)) return "Svar / påmelding i Spond";
-  if (/\bbekreft\b/.test(n) && !/\bsvarer\b/.test(n)) return "Bekreft i Spond";
-  if (/\btilbakemelding\b/.test(n)) return "Gi tilbakemelding i Spond";
-  if (/\bkan\s+delta\b/.test(n) || /\bdeltakelse\b/.test(n) || /\btilgjengelighet\b/.test(n))
-    return "Svar i Spond om deltakelse";
-  if (/\bkan\s+ikke\b/.test(n) || /\brekker\b/.test(n)) return "Svar i Spond om deltakelse og kamper";
-  return "Svar i Spond";
 }
 
 function inferTaskExtractionDebug(taskText: string): Pick<
@@ -2705,19 +3044,35 @@ function buildProposalItems(
     taskText: string,
     extras?: {
       dueTime?: string | null;
+      /** Tittel er allerede kontekstualisert og sanitert (finalizePortalTaskTitleForProposal). */
+      titleFullyPrepared?: boolean;
       metadata?: { taskProposalDebug?: TaskProposalDebug };
     },
   ): PortalTaskItem => {
-    const cleanTask = normalizeTaskTitle(taskText);
-    const day = normalizeSpace(dayLabel || "");
+    let cleanTask: string;
+    let sanitizeDebug: Partial<TaskProposalDebug> = {};
+    if (extras?.titleFullyPrepared) {
+      cleanTask = clampPortalTaskTitleLength(normalizeSpace(taskText));
+    } else {
+      const base = normalizeTaskTitle(taskText);
+      const san = sanitizeUserFacingTaskTitle(base);
+      cleanTask = san.title;
+      sanitizeDebug = san.debug;
+    }
+    const day = normalizeSpace(dayLabel || "").replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, "");
     const title = day ? `${day} – ${cleanTask}` : cleanTask;
+    const taskProposalDebug: TaskProposalDebug = {
+      ...(extras?.metadata?.taskProposalDebug ?? {}),
+      ...sanitizeDebug,
+    };
+    const hasDebug = Object.keys(taskProposalDebug).length > 0;
     return {
       proposalId: randomUUID(),
       kind: "task",
       sourceId,
       originalSourceType: sourceType,
       confidence: result.confidence,
-      ...(extras?.metadata ? { metadata: extras.metadata } : {}),
+      ...(hasDebug ? { metadata: { taskProposalDebug } } : {}),
       task: {
         date,
         personId: "pending",
@@ -3070,17 +3425,17 @@ function buildProposalItems(
           taskBody = normalizeTaskTitle(normalizeCupParentTaskBodyForTitle(taskText));
         }
 
-        if (isDeadlineResponseSpondTaskLine(taskText)) {
-          taskBody = compactDeadlineResponseTaskTitle(taskText);
-        }
+        const titleFin = finalizePortalTaskTitleForProposal(taskText, taskBody, result);
 
         const taskProposalDebug: TaskProposalDebug = {
           ...inferTaskExtractionDebug(taskText),
           ...(taskDebug ?? {}),
+          ...titleFin.taskProposalDebug,
         };
 
-        const tk = buildTaskItem(taskDate, day.dayLabel, taskBody, {
+        const tk = buildTaskItem(taskDate, day.dayLabel, titleFin.title, {
           dueTime: dueTime ?? undefined,
+          titleFullyPrepared: true,
           metadata: { taskProposalDebug },
         });
         if (pendingCupFooter) {
@@ -3277,23 +3632,16 @@ function buildProposalItems(
 
       for (const snip of globalSnips) {
         const dedupeSnip = cupParentTaskDedupeKey(snip);
-        const tentativeTitle = (() => {
-          if (isDeadlineResponseSpondTaskLine(snip)) return compactDeadlineResponseTaskTitle(snip);
-          const n = normalizeNorwegianLetters(snip);
-          if (/\bp[aå]melding\b/.test(n)) return "Påmelding / svar";
-          if (/\bbekreft(?:e)?\s+deltakelse\b/.test(n) || /\bbekreft\b/.test(n))
-            return "Bekreft deltakelse";
-          if (/\btilbakemelding\b/.test(n) || /\bgi\s+tilbakemelding\b/.test(n))
-            return "Gi tilbakemelding";
-          return normalizeTaskTitle(stripCupNoteLikePrefixes(snip));
-        })();
-        const titleKey = cupLineNormKey(tentativeTitle);
+        const draftTitle = normalizeTaskTitle(stripCupNoteLikePrefixes(snip));
+        const titleFin = finalizePortalTaskTitleForProposal(snip, draftTitle, result);
+        const finalTitle = titleFin.title;
+        const titleKey = cupLineNormKey(finalTitle);
 
         if (
           keyHit.has(dedupeSnip) ||
           keyHit.has(cupLineNormKey(snip)) ||
           keyHit.has(titleKey) ||
-          keyHit.has(cupParentTaskDedupeKey(tentativeTitle))
+          keyHit.has(cupParentTaskDedupeKey(finalTitle))
         ) {
           if (process.env.NODE_ENV === "development") {
             console.debug("[analyze] deadlineResponseGlobalPath skipped", {
@@ -3309,6 +3657,7 @@ function buildProposalItems(
         const taskProposalDebug: TaskProposalDebug = {
           ...baseDebug,
           ...resolved.debug,
+          ...titleFin.taskProposalDebug,
           deadlineResponseTaskRawTextMatched: true,
           deadlineResponseTaskPromotedEarly: true,
           deadlineResponseTaskSurvivedFiltering: true,
@@ -3317,15 +3666,16 @@ function buildProposalItems(
           deadlineResponseTaskDropReason: null,
         };
 
-        const tk = buildTaskItem(resolved.taskDate, null, tentativeTitle, {
+        const tk = buildTaskItem(resolved.taskDate, null, finalTitle, {
           dueTime: resolved.dueTime ?? undefined,
+          titleFullyPrepared: true,
           metadata: { taskProposalDebug },
         });
         items.push(tk);
         keyHit.add(dedupeSnip);
         keyHit.add(cupLineNormKey(snip));
         keyHit.add(titleKey);
-        keyHit.add(cupParentTaskDedupeKey(tentativeTitle));
+        keyHit.add(cupParentTaskDedupeKey(finalTitle));
         keyHit.add(cupLineNormKey(portalTaskTitleAfterDayPrefix(tk.task.title)));
       }
     }
