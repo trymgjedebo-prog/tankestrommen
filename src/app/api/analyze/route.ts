@@ -1376,6 +1376,16 @@ type TaskProposalDebug = {
   taskTitleEncodingNoiseRemoved?: boolean;
   /** Trygg norsk fallback-tittel ble brukt (korrupt eller tom streng). */
   taskTitleFallbackUsed?: boolean;
+  /** Linjen ble løftet inn som sekundær portal-kandidat (lavere sikkerhet enn hovedliste). */
+  secondaryTaskCandidatePromoted?: boolean;
+  /** Høysignal (svarfrist / tydelig frivillig hjelp) for sekundær kandidat. */
+  secondaryTaskCandidateHighSignalMatched?: boolean;
+  /** Intern poengsum brukt ved rangering av sekundærkandidat (debug). */
+  secondaryTaskCandidateScoreUsed?: number;
+  /** Sekundærkandidat forkastet som støy (kun ved sporingsflyt). */
+  secondaryTaskCandidateDroppedAsNoise?: boolean;
+  /** Svar-/fristlinje beholdt som sekundær fordi den ikke ble primær task. */
+  deadlineCandidateRetainedAsSecondary?: boolean;
 };
 
 type PortalTaskItem = {
@@ -1750,6 +1760,201 @@ function extractGlobalDeadlineResponseSnippets(result: AIAnalysisResult): string
     seen.add(k);
     out.push(chunk);
   }
+  return out;
+}
+
+const MAX_SECONDARY_PORTAL_TASK_CANDIDATES = 14;
+
+function buildPrimaryPortalTaskCoverageKeys(items: PortalProposalItem[]): Set<string> {
+  const s = new Set<string>();
+  for (const it of items) {
+    if (it.kind !== "task") continue;
+    s.add(cupLineNormKey(it.task.title));
+    s.add(cupParentTaskDedupeKey(it.task.title));
+    s.add(cupLineNormKey(portalTaskTitleAfterDayPrefix(it.task.title)));
+  }
+  return s;
+}
+
+function dedupeRawLinesByParentKey(lines: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of lines) {
+    const t = normalizeSpace(raw);
+    if (!t) continue;
+    const k = cupParentTaskDedupeKey(t);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
+
+/** Linjer som kan vurderes som sekundær task (samme kilder som svarfrist-scan + per-dag split). */
+function collectRawLinesForSecondaryPortalTaskScan(result: AIAnalysisResult): string[] {
+  const parts: string[] = [];
+  const blob = collectAnalyzeTextBlobsForDeadlineScan(result);
+  for (const chunk of splitBlobIntoDeadlineScanChunks(blob)) {
+    const t = normalizeSpace(chunk);
+    if (t.length >= 16) parts.push(t);
+  }
+  for (const d of result.scheduleByDay) {
+    const bags = [...d.deadlines, ...d.notes, ...d.highlights, ...d.rememberItems];
+    for (const c of bags) {
+      for (const p of splitTaskCandidatesForCup(c)) {
+        const t = normalizeSpace(p);
+        if (t.length >= 16) parts.push(t);
+      }
+    }
+    if (d.details) {
+      for (const ln of d.details.split(/\n/)) {
+        for (const p of splitTaskCandidatesForCup(ln)) {
+          const t = normalizeSpace(p);
+          if (t.length >= 16) parts.push(t);
+        }
+      }
+    }
+  }
+  return dedupeRawLinesByParentKey(parts);
+}
+
+function isHighSignalSecondaryDeadlineSnippet(text: string): boolean {
+  return isGlobalDeadlineResponseSnippet(text) || isDeadlineResponseSpondTaskLine(text);
+}
+
+function isHighSignalSecondaryVolunteerSnippet(text: string): boolean {
+  const t = normalizeSpace(text);
+  if (!t || t.length < 18) return false;
+  const n = normalizeNorwegianLetters(t);
+  if (/\b(to|tre|fire|fem|seks|syv|\d{1,2})\s+voksne\b/.test(n) && /\b(trengs|hjelp|behov|til|f[oø]r)\b/.test(n))
+    return true;
+  if (/\bkan\s+(noen|du|dere)\s+hjelpe\b/.test(n)) return true;
+  if (
+    /\bgi\s+beskjed\b/.test(n) &&
+    /\bhvis\b/.test(n) &&
+    /\b(noen\s+kan\s+hjelpe|kan\s+hjelpe|kan\s+bidra)\b/.test(n)
+  )
+    return true;
+  if (/\bkan\s+bidra\s+med\b/.test(n)) return true;
+  if (/\bvi\s+trenger\b/.test(n) && /\b(voksne|frivillig|hjelp|foreldre)\b/.test(n)) return true;
+  return false;
+}
+
+/** Støy / lav verdi — behold høy terskel for sekundærliste (vær, kiosk, pakkliste …). */
+function isSecondaryPortalTaskNoiseLine(text: string): boolean {
+  const t = normalizeSpace(text);
+  if (!t || t.length < 18) return true;
+  const n = normalizeNorwegianLetters(t);
+  if (/\b(vær|yr\.no|varsel|prognose)\b/.test(n) && !/\b(spond|frist|senest|bekreft|svar|medisin)\b/.test(n))
+    return true;
+  if (/\bkiosk\b/.test(n)) return true;
+  if (/\bles\s+(nøye|noye)\b/.test(n)) return true;
+  if (/\b(generelle?\s+r[aå]d)\b/.test(n) && !/\b(spond|frist|medisin|hjelpe|deltakelse)\b/.test(n))
+    return true;
+  if (isPacklistOrRememberSuppliesOnly(t)) return true;
+  if (isGeneralCupPracticalBulkLine(t) && !isParentCoordinatorTaskLine(t)) return true;
+  return false;
+}
+
+function scoreSecondaryPortalTaskLine(text: string, cupLike: boolean): number {
+  let s = 0;
+  if (isHighSignalSecondaryDeadlineSnippet(text)) s += 88;
+  if (cupLike && isHighSignalSecondaryVolunteerSnippet(text)) s += 62;
+  return Math.min(100, s);
+}
+
+function isRawLineCoveredByPrimaryPortalTasks(
+  line: string,
+  primaryKeys: Set<string>,
+  result: AIAnalysisResult,
+): boolean {
+  const t = normalizeSpace(line);
+  if (!t) return true;
+  if (primaryKeys.has(cupParentTaskDedupeKey(t)) || primaryKeys.has(cupLineNormKey(t))) return true;
+  const draft = normalizeTaskTitle(stripCupNoteLikePrefixes(t));
+  const fin = finalizePortalTaskTitleForProposal(t, draft, result);
+  if (primaryKeys.has(cupLineNormKey(fin.title)) || primaryKeys.has(cupParentTaskDedupeKey(fin.title)))
+    return true;
+  return false;
+}
+
+/**
+ * Sekundære task-kandidater («Kanskje også relevant»): høysignal svarfrist / frivillig hjelp
+ * som ikke allerede er dekket av primær `items`, uten å senke global terskel for vanlige tasks.
+ */
+function buildSecondaryPortalTaskCandidates(
+  result: AIAnalysisResult,
+  items: PortalProposalItem[],
+  resolveDate: (rawDate: string | null, rawLabel: string | null) => string | null,
+  resolvedYear: number,
+  sourceType: string,
+): PortalTaskItem[] {
+  const lines = collectRawLinesForSecondaryPortalTaskScan(result);
+  if (lines.length === 0) return [];
+
+  const cupLike = looksLikeCupOrSpondBroadcast(result);
+  const primaryKeys = buildPrimaryPortalTaskCoverageKeys(items);
+  const blob = collectAnalyzeTextBlobsForDeadlineScan(result);
+  let fallbackIso =
+    result.scheduleByDay
+      .map((d) => resolveDate(d.date, d.dayLabel))
+      .find((x): x is string => x !== null) ??
+    result.schedule.map((s) => resolveDate(s.date, s.label)).find((x): x is string => x !== null) ??
+    new Date().toISOString().slice(0, 10);
+
+  const secondaryKeys = new Set<string>();
+  const out: PortalTaskItem[] = [];
+
+  for (const line of lines) {
+    if (out.length >= MAX_SECONDARY_PORTAL_TASK_CANDIDATES) break;
+    if (isSecondaryPortalTaskNoiseLine(line)) continue;
+
+    const deadlineSig = isHighSignalSecondaryDeadlineSnippet(line);
+    const volunteerSig = cupLike && isHighSignalSecondaryVolunteerSnippet(line);
+    if (!deadlineSig && !volunteerSig) continue;
+
+    if (isRawLineCoveredByPrimaryPortalTasks(line, primaryKeys, result)) continue;
+
+    const score = scoreSecondaryPortalTaskLine(line, cupLike);
+    const lineKey = cupParentTaskDedupeKey(line);
+    if (secondaryKeys.has(lineKey)) continue;
+
+    const resolved = resolveCupTaskDeadlineAndMeta(line, blob, resolvedYear, fallbackIso);
+    const draftTitle = normalizeTaskTitle(stripCupNoteLikePrefixes(line));
+    const titleFin = finalizePortalTaskTitleForProposal(line, draftTitle, result);
+    const titleKey = cupParentTaskDedupeKey(titleFin.title);
+    if (secondaryKeys.has(titleKey)) continue;
+
+    secondaryKeys.add(lineKey);
+    secondaryKeys.add(titleKey);
+
+    const taskProposalDebug: TaskProposalDebug = {
+      ...resolved.debug,
+      ...titleFin.taskProposalDebug,
+      secondaryTaskCandidatePromoted: true,
+      secondaryTaskCandidateHighSignalMatched: deadlineSig || volunteerSig,
+      secondaryTaskCandidateScoreUsed: score,
+      secondaryTaskCandidateDroppedAsNoise: false,
+      deadlineCandidateRetainedAsSecondary: deadlineSig,
+    };
+
+    out.push({
+      proposalId: randomUUID(),
+      kind: "task",
+      sourceId: randomUUID(),
+      originalSourceType: sourceType,
+      confidence: Math.min(0.52, Math.max(0.35, result.confidence * 0.82)),
+      metadata: { taskProposalDebug },
+      task: {
+        date: resolved.taskDate,
+        personId: "pending",
+        title: titleFin.title,
+        notes: `Kanskje også relevant (sekundær forslagskandidat)\n\nKilde: ${trimSentence(line, 280)}`,
+        ...(resolved.dueTime ? { dueTime: resolved.dueTime } : {}),
+      },
+    });
+  }
+
   return out;
 }
 
@@ -6708,6 +6913,14 @@ function toPortalBundle(
       }
     : decideSchoolWeekOverlayProposal(result, sourceType, documentKind);
   const resolveDate = createPortalWeekDateResolver(result);
+  const weekContextForYear = [
+    result.title,
+    result.description,
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+    ...result.schedule.map((s) => `${s.label ?? ""} ${s.date ?? ""}`),
+  ].join(" ");
+  const weekNumberForYear = parseWeekNumber(weekContextForYear);
+  const resolvedYear = inferRealisticYear(collectYearCandidates(result), weekNumberForYear);
   const overlayHomeworkDebug: OverlayHomeworkTasksDebug | undefined = includeDebug
     ? { accepted: [], rejected: [] }
     : undefined;
@@ -6726,12 +6939,17 @@ function toPortalBundle(
     : schoolWeekOverlayProposal
       ? overlayHomeworkItems
       : buildProposalItems(result, sourceType);
+  const secondaryTaskCandidates =
+    !schoolProfileProposal && !schoolWeekOverlayProposal
+      ? buildSecondaryPortalTaskCandidates(result, items, resolveDate, resolvedYear, sourceType)
+      : [];
   const pipelineSnapshot = {
     extractedTextLength: result.extractedText?.raw?.length ?? 0,
     documentKind: documentKind ?? null,
     hasSchoolWeeklyProfile: Boolean(result.schoolWeeklyProfile),
     schoolWeekOverlayBuilt: Boolean(schoolWeekOverlayProposal),
     itemsLength: items.length,
+    secondaryTaskCandidatesLength: secondaryTaskCandidates.length,
     schoolProfileDecision: schoolProfileDecision.reason,
     schoolWeekOverlayDecision: schoolWeekOverlayDecision.reason,
   };
@@ -6828,6 +7046,7 @@ function toPortalBundle(
       importRunId: randomUUID(),
     },
     items,
+    ...(secondaryTaskCandidates.length > 0 ? { secondaryTaskCandidates } : {}),
     ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
     ...(schoolWeekOverlayProposal ? { schoolWeekOverlayProposal } : {}),
     ...(Object.keys(debugPayload).length > 0 ? { debug: debugPayload } : {}),
