@@ -631,11 +631,24 @@ function getPlanPrefix(title: string): string | null {
   return null;
 }
 
+/** Fjerner typiske «oppfølgings»-prefiks slik at tittelkjerne blir mer stabil på tvers av meldinger. */
+function stripLeadingArrangementTitleNoise(title: string): string {
+  return normalizeSpace(
+    title
+      .replace(
+        /^(informasjon|info|beskjed|oppdatering|påminnelse|paminnelse|viktig|nytt)\s*[:\-–]\s*/i,
+        "",
+      )
+      .trim(),
+  );
+}
+
 function buildCalendarEventTitle(
   result: AIAnalysisResult,
   titleSuffix: string | null
 ): string {
-  const baseTitle = normalizeSpace(result.title || "").trim();
+  const rawBase = normalizeSpace(result.title || "").trim();
+  const baseTitle = rawBase ? stripLeadingArrangementTitleNoise(rawBase) : rawBase;
   const suffix = normalizeSpace(titleSuffix || "").trim();
   const targetGroup = normalizeSpace(result.targetGroup || "").trim();
 
@@ -742,6 +755,132 @@ function buildEventProposalTitle(
     return `${planHeadTitle(result)} – ${programHint}`;
   }
   return fallback;
+}
+
+function djb2Hex(input: string): string {
+  let h = 5381;
+  for (let i = 0; i < input.length; i++) {
+    h = (h * 33) ^ input.charCodeAt(i)!;
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+function slugifyArrangementStableSegment(raw: string): string {
+  const s = normalizeSpace(raw);
+  if (!s) return "x";
+  const slug = normalizeNorwegianLetters(s)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return slug || "x";
+}
+
+function deriveArrangementCoreTitleForLink(result: AIAnalysisResult): {
+  coreTitle: string;
+  titleNormalizedForFollowup: boolean;
+  coreStabilized: boolean;
+} {
+  const rawOriginal = normalizeSpace(result.title || "");
+  let t = rawOriginal;
+  let titleNormalizedForFollowup = false;
+  if (t) {
+    const stripped = stripLeadingArrangementTitleNoise(t);
+    if (stripped !== t) {
+      t = stripped;
+      titleNormalizedForFollowup = true;
+    }
+  }
+  if (!t && result.description?.trim()) {
+    const fromDesc = trimSentence(normalizeSpace(result.description), 52);
+    return {
+      coreTitle: fromDesc || "Hendelse",
+      titleNormalizedForFollowup: true,
+      coreStabilized: true,
+    };
+  }
+  if (!t) {
+    return { coreTitle: "Hendelse", titleNormalizedForFollowup: false, coreStabilized: false };
+  }
+  if (isGenericWeekPlanTitle(t)) {
+    return {
+      coreTitle: planHeadTitle(result),
+      titleNormalizedForFollowup,
+      coreStabilized: true,
+    };
+  }
+  const head = t.split(/\s*[–—|]\s*/)[0]?.trim() ?? t;
+  const coreTitle = clampPortalTaskTitleLength(head, 56, 78);
+  const coreStabilized = titleNormalizedForFollowup || head !== rawOriginal;
+  return { coreTitle, titleNormalizedForFollowup, coreStabilized };
+}
+
+function detectArrangementFollowupImportLikely(result: AIAnalysisResult): boolean {
+  const blob = normalizeNorwegianLetters(
+    [result.title, result.description, result.extractedText?.raw ?? ""].join("\n"),
+  );
+  if (
+    /\b(oppdatering|oppdatert|mer\s+info|tilleggsinfo|presisering|presiserer|ny\s+versjon|revidert|utkast|korrektur|vedlegg\s+oppdatert)\b/.test(
+      blob,
+    )
+  )
+    return true;
+  if (
+    /\b(som\s+nevnt|som\s+sa|gjelder\s+fortsatt|samme\s+(cup|turnering|tur|leir|arrangement|stevne))\b/.test(
+      blob,
+    )
+  )
+    return true;
+  if (/\b(husk\s+at|minner\s+om|minner\s+om\s+at)\b/.test(blob) && /\b(cup|turnering|tur|leir)\b/.test(blob))
+    return true;
+  return false;
+}
+
+function buildArrangementImportLinkMetadata(
+  result: AIAnalysisResult,
+  dateIso: string,
+  endDateIso: string | null | undefined,
+): {
+  arrangementStableKey: string;
+  arrangementCoreTitle: string;
+  arrangementBlockGroupId: string;
+  arrangementFollowupImportLikely: boolean;
+  arrangementImportHint?: string;
+  arrangementLinkDebug: ArrangementLinkDebug;
+} {
+  const { coreTitle, titleNormalizedForFollowup, coreStabilized } =
+    deriveArrangementCoreTitleForLink(result);
+  const tgt = normalizeSpace(result.targetGroup || "");
+  const anchor =
+    endDateIso && endDateIso !== dateIso ? `${dateIso}_${endDateIso}` : dateIso;
+  const yearHint = dateIso.slice(0, 4);
+  const keyBody = [coreTitle, tgt, yearHint, anchor.replace(/_/g, "-")].filter(Boolean).join("|");
+  const slug = slugifyArrangementStableSegment(keyBody);
+  let arrangementStableKey = `tg-arr-${slug}`;
+  const titleWasEmpty = !normalizeSpace(result.title || "");
+  let blockGroupReused = !titleWasEmpty && slug.length >= 8;
+  if (arrangementStableKey.length < 14) {
+    arrangementStableKey = `tg-arr-h${djb2Hex(keyBody + (result.description ?? "").slice(0, 120))}`;
+    blockGroupReused = false;
+  }
+  const followup = detectArrangementFollowupImportLikely(result);
+  const arrangementImportHint = followup
+    ? "Oppfølgingsmelding: sannsynlig videre info til arrangement med samme koblings-ID (arrangementStableKey / arrangementBlockGroupId)."
+    : undefined;
+
+  return {
+    arrangementStableKey,
+    arrangementCoreTitle: coreTitle,
+    arrangementBlockGroupId: arrangementStableKey,
+    arrangementFollowupImportLikely: followup,
+    ...(arrangementImportHint ? { arrangementImportHint } : {}),
+    arrangementLinkDebug: {
+      arrangementCoreStabilized: coreStabilized,
+      arrangementFollowupSignalAdded: followup,
+      arrangementBlockGroupIdReused: blockGroupReused,
+      arrangementTitleNormalizedForFollowup: titleNormalizedForFollowup,
+      arrangementExistingLinkHintPrepared: Boolean(arrangementImportHint),
+    },
+  };
 }
 
 function normalizeTaskTitle(taskText: string, maxLen = 54): string {
@@ -1232,6 +1371,15 @@ type EmbeddedScheduleSegment = {
   embeddedScheduleSegmentNotesOmitted?: string[];
 };
 
+/** Diagnostikk for arrangementskobling (oppfølgingsmeldinger / stabil kjerne). */
+type ArrangementLinkDebug = {
+  arrangementCoreStabilized?: boolean;
+  arrangementFollowupSignalAdded?: boolean;
+  arrangementBlockGroupIdReused?: boolean;
+  arrangementTitleNormalizedForFollowup?: boolean;
+  arrangementExistingLinkHintPrepared?: boolean;
+};
+
 type PortalEventItem = {
   proposalId: string;
   kind: "event";
@@ -1272,6 +1420,20 @@ type PortalEventItem = {
       multiDayAllDay?: boolean;
       /** Antall programpunkter / underblokker (samsvarer typisk med lengden på `embeddedSchedule`). */
       embeddedSchedulePointCount?: number;
+      /**
+       * Stabil koblingsnøkkel på tvers av importer (samme kilde-tittel/målgruppe/dato → samme ID).
+       * Foreldre-App kan matche oppfølgingsmeldinger mot eksisterende kalenderblokk.
+       */
+      arrangementStableKey?: string;
+      /** Kompakt, normalisert arrangementsnavn (kobling + visningshint). */
+      arrangementCoreTitle?: string;
+      /** Alias for `arrangementStableKey` — egnet som blockGroupId i klient. */
+      arrangementBlockGroupId?: string;
+      /** Teksten tyder på oppfølgingsinfo til eksisterende arrangement. */
+      arrangementFollowupImportLikely?: boolean;
+      /** Kort maskinlesbar veiledning for import-matching (valgfri). */
+      arrangementImportHint?: string;
+      arrangementLinkDebug?: ArrangementLinkDebug;
     };
   };
 };
@@ -3214,6 +3376,8 @@ function buildProposalItems(
     schoolDayOverride?: SchoolDayOverride | null,
     explicitStartEnd?: { start: string; end: string } | null,
     cupProposalDebug?: CupProposalItemDebug | null,
+    /** Siste kalenderdag (ISO) for flerdagers parent — brukes i stabil arrangementsnøkkel. */
+    arrangementEndDateIso?: string | null,
   ): PortalEventItem => {
     const { start, end } = explicitStartEnd ?? extractStartEnd(time);
     const item: PortalEventItem = {
@@ -3233,13 +3397,20 @@ function buildProposalItems(
     const n = buildStructuredNotes(notes, dayContext);
     if (n) item.event.notes = n;
     if (result.location) item.event.location = result.location;
-    if (schoolContext || schoolDayOverride || cupProposalDebug) {
-      item.event.metadata = {
-        ...(schoolContext ? { schoolContext } : {}),
-        ...(schoolDayOverride ? { schoolDayOverride } : {}),
-        ...(cupProposalDebug ? { cupProposalDebug } : {}),
-      };
-    }
+    const arrLink = buildArrangementImportLinkMetadata(result, date, arrangementEndDateIso ?? null);
+    item.event.metadata = {
+      arrangementStableKey: arrLink.arrangementStableKey,
+      arrangementCoreTitle: arrLink.arrangementCoreTitle,
+      arrangementBlockGroupId: arrLink.arrangementBlockGroupId,
+      arrangementFollowupImportLikely: arrLink.arrangementFollowupImportLikely,
+      ...(arrLink.arrangementImportHint
+        ? { arrangementImportHint: arrLink.arrangementImportHint }
+        : {}),
+      arrangementLinkDebug: arrLink.arrangementLinkDebug,
+      ...(schoolContext ? { schoolContext } : {}),
+      ...(schoolDayOverride ? { schoolDayOverride } : {}),
+      ...(cupProposalDebug ? { cupProposalDebug } : {}),
+    };
     return item;
   };
 
@@ -3741,6 +3912,7 @@ function buildProposalItems(
         null,
         parentExplicitStartEnd,
         parentCupDbg,
+        lastSeg.date,
       );
 
       const multiDayIntro =
