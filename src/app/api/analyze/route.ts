@@ -7677,29 +7677,36 @@ function detectPortalMode(request: NextRequest): boolean {
   return false;
 }
 
-export async function POST(request: NextRequest) {
-  const corsPolicy = resolveCorsForRequest(request);
-  console.log("[api/analyze] cors", {
-    method: request.method,
-    origin: corsPolicy.origin,
-    allowed: corsPolicy.allowed,
-    allowAll: corsPolicy.allowAll,
-    allowOriginValue: corsPolicy.allowOriginValue,
-  });
-  const withCors = (res: NextResponse, path = "unspecified") => {
+async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse> {
+  let stage = "start";
+  let lastPortalMode = false;
+  let lastFileName: string | null = null;
+
+  const withCors = (res: NextResponse, path = "unspecified", policy?: ReturnType<typeof resolveCorsForRequest>) => {
+    const p = policy ?? resolveCorsForRequest(request);
     const wrapped = applyCorsHeaders(request, res);
     console.log("[api/analyze] response", {
       path,
       status: wrapped.status,
-      origin: corsPolicy.origin,
-      corsAllowed: corsPolicy.allowed,
-      allowOriginValue: corsPolicy.allowOriginValue,
+      origin: p.origin,
+      corsAllowed: p.allowed,
+      allowOriginValue: p.allowOriginValue,
     });
     return wrapped;
   };
-  let lastPortalMode = false;
-  let lastFileName: string | null = null;
+
   try {
+    stage = "cors_policy";
+    const corsPolicy = resolveCorsForRequest(request);
+    console.log("[api/analyze] cors", {
+      method: request.method,
+      origin: corsPolicy.origin,
+      allowed: corsPolicy.allowed,
+      allowAll: corsPolicy.allowAll,
+      allowOriginValue: corsPolicy.allowOriginValue,
+    });
+
+    stage = "check_openai_key";
     if (!process.env.OPENAI_API_KEY?.trim()) {
       return withCors(NextResponse.json(
         {
@@ -7710,11 +7717,13 @@ export async function POST(request: NextRequest) {
       ), "missing_openai_api_key");
     }
 
+    stage = "detect_multipart";
     const multipart = isMultipart(request);
     let portalMode = detectPortalMode(request);
     lastPortalMode = portalMode;
     const debug = isDebugRequest(request);
 
+    stage = multipart ? "parse_multipart" : "parse_json_body";
     const body: ParsedBody = multipart
       ? await parseMultipartBody(request)
       : await request.json();
@@ -7750,6 +7759,7 @@ export async function POST(request: NextRequest) {
     });
 
     if (text && typeof text === "string") {
+      stage = "analyze_text";
       const trimmed = text.trim();
       if (trimmed.length === 0) {
         return withCors(
@@ -7762,6 +7772,7 @@ export async function POST(request: NextRequest) {
           { status: 413 }
         ));
       }
+      stage = "analyze_text_openai";
       const routing = await analyzeTextWithRouting(trimmed, {
         documentKind: documentKind ?? undefined,
         sourceRoute: "text",
@@ -7770,6 +7781,7 @@ export async function POST(request: NextRequest) {
         ...routing.result,
         analysisModelTrace: routing.modelTrace,
       };
+      stage = "wrap_portal_bundle_text";
       return withCors(
         wrapResponse(result, portalMode, "text", documentKind, undefined, debug, portalImport, {
           fileName: typeof fileName === "string" ? fileName : null,
@@ -7779,6 +7791,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (pdf && typeof pdf === "string") {
+      stage = "process_pdf";
       if (pdf.length > 18_000_000) {
         return withCors(NextResponse.json(
           { error: "PDF-filen er for stor. Maks ca. 12 MB." },
@@ -7803,6 +7816,7 @@ export async function POST(request: NextRequest) {
 
       let extracted: { text: string; numpages: number };
       try {
+        stage = "pdf_extract_text";
         extracted = await extractTextFromPdfBuffer(buffer);
       } catch (e) {
         console.error("[api/analyze pdf-parse]", e);
@@ -7822,6 +7836,7 @@ export async function POST(request: NextRequest) {
       );
       const pageCount = Math.max(1, extracted.numpages);
 
+      stage = "pdf_visual_merge";
       const visual = await buildPdfDocumentVisualMerge(
         buffer,
         rawText,
@@ -7846,6 +7861,7 @@ export async function POST(request: NextRequest) {
           : `Dette er tekst uttrekk fra PDF-filen «${safeName}» (${pageCount} sider). Tolke og strukturer innholdet som beskrevet.\n\n`
         : `PDF-filen «${safeName}» (${pageCount} sider) har lite eller ingen maskinlesbar tekst. Hovedinnholdet kommer fra transkripsjon av sider som bilder (se «VISUELL PDF-DATA»). Tolke og strukturer som vanlig.\n\n`;
 
+      stage = "pdf_analyze_text_route";
       return withCors(
         await analyzeFromExtractedText(
           hasText ? rawText : "",
@@ -7869,6 +7885,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (docx && typeof docx === "string") {
+      stage = "process_docx";
       if (docx.length > 18_000_000) {
         return withCors(NextResponse.json(
           { error: "Word-filen er for stor. Maks ca. 12 MB." },
@@ -7900,6 +7917,7 @@ export async function POST(request: NextRequest) {
 
       let rawText: string;
       try {
+        stage = "docx_extract_text";
         rawText = await extractTextFromDocxBuffer(buffer);
       } catch (e) {
         console.error("[api/analyze mammoth]", e);
@@ -7917,6 +7935,7 @@ export async function POST(request: NextRequest) {
         "dokument.docx",
       );
 
+      stage = "docx_visual_merge";
       const visual = await buildDocxDocumentVisualMerge(
         buffer,
         rawText ?? "",
@@ -7940,6 +7959,7 @@ export async function POST(request: NextRequest) {
           : `Dette er tekst uttrekk fra Word-filen «${safeName}» (.docx). Tolke og strukturer innholdet som beskrevet (ukeplan, datoer, kontakt osv. når det finnes).\n\n`
         : `Word-filen «${safeName}» (.docx) har lite maskinlesbar tekst. Hovedinnholdet kan komme fra innsatte bilder (se «VISUELL WORD-DATA»). Tolke og strukturer som vanlig.\n\n`;
 
+      stage = "docx_analyze_text_route";
       return withCors(
         await analyzeFromExtractedText(
           hasText ? rawText : "",
@@ -7963,6 +7983,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (image && typeof image === "string") {
+      stage = "validate_image_payload";
       if (!image.startsWith("data:image/")) {
         return withCors(NextResponse.json(
           { error: "Ugyldig bildeformat. Last opp en gyldig bildefil." },
@@ -7975,6 +7996,7 @@ export async function POST(request: NextRequest) {
           { status: 413 }
         ));
       }
+      stage = "analyze_image_openai";
       const routing = await analyzeImageWithRouting(image, {
         documentKind: documentKind ?? undefined,
         sourceRoute: "image",
@@ -7983,6 +8005,7 @@ export async function POST(request: NextRequest) {
         ...routing.result,
         analysisModelTrace: routing.modelTrace,
       };
+      stage = "wrap_portal_bundle_image";
       return withCors(
         wrapResponse(result, portalMode, "image", documentKind, undefined, debug, portalImport, {
           fileName: typeof fileName === "string" ? fileName : null,
@@ -7996,7 +8019,9 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     ), "missing_input");
   } catch (err) {
-    console.error("[api/analyze]", err);
+    console.error("[api/analyze]", { stage, err });
+    const debugDetail =
+      err instanceof Error ? err.stack || err.message : String(err);
     if (lastPortalMode) {
       return withCors(
         NextResponse.json(
@@ -8004,8 +8029,8 @@ export async function POST(request: NextRequest) {
             ok: false,
             errorCode: "ANALYZE_INTERNAL_ERROR",
             message: "Kunne ikke analysere dokumentet.",
-            debugMessage: err instanceof Error ? err.message : String(err),
-            stage: "request",
+            debugMessage: debugDetail,
+            stage,
             schemaVersion: "1.0.0",
             provenance: {
               sourceSystem: "tankestrom",
@@ -8017,9 +8042,10 @@ export async function POST(request: NextRequest) {
             fileErrors: [
               {
                 fileName: lastFileName ?? "ukjent",
-                errorCode: "FILE_ANALYSIS_FAILED",
-                message: "Kunne ikke analysere denne filen.",
-                debugMessage: err instanceof Error ? err.message : String(err),
+                errorCode: "ANALYZE_INTERNAL_ERROR",
+                message: "Kunne ikke analysere dokumentet.",
+                debugMessage: debugDetail,
+                stage,
               },
             ],
           },
@@ -8035,6 +8061,40 @@ export async function POST(request: NextRequest) {
       ),
       "catch_500",
     );
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    return await handleAnalyzeRequest(request);
+  } catch (error) {
+    console.error("[Tankestrom POST fatal]", error);
+    const debugMessage =
+      error instanceof Error ? error.stack || error.message : String(error);
+    const res = NextResponse.json(
+      {
+        ok: false,
+        schemaVersion: "portal-import-v1",
+        items: [],
+        fileErrors: [
+          {
+            fileName: "unknown",
+            errorCode: "ANALYZE_INTERNAL_ERROR",
+            message: "Kunne ikke analysere dokumentet.",
+            debugMessage,
+            stage: "POST_FATAL",
+          },
+        ],
+        provenance: [],
+      },
+      { status: 500 },
+    );
+    try {
+      return applyCorsHeaders(request, res);
+    } catch (corsErr) {
+      console.error("[api/analyze] CORS on POST_FATAL failed", corsErr);
+      return res;
+    }
   }
 }
 
