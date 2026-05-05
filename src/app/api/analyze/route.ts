@@ -814,25 +814,57 @@ function deriveArrangementCoreTitleForLink(result: AIAnalysisResult): {
   return { coreTitle, titleNormalizedForFollowup, coreStabilized };
 }
 
-function detectArrangementFollowupImportLikely(result: AIAnalysisResult): boolean {
+type ArrangementUpdateIntent = {
+  likelyFollowup: boolean;
+  confidence: "low" | "medium" | "high";
+  signals: string[];
+};
+
+function detectArrangementFollowupImportIntent(
+  result: AIAnalysisResult,
+): ArrangementUpdateIntent {
   const blob = normalizeNorwegianLetters(
     [result.title, result.description, result.extractedText?.raw ?? ""].join("\n"),
   );
+  const signals: string[] = [];
   if (
-    /\b(oppdatering|oppdatert|mer\s+info|tilleggsinfo|presisering|presiserer|ny\s+versjon|revidert|utkast|korrektur|vedlegg\s+oppdatert)\b/.test(
+    /\b(her\s+kommer\s+mer\s+info|mer\s+informasjon|mer\s+info|tilleggsinfo|oppdatert\s+program|kampoppsett)\b/.test(
       blob,
     )
-  )
-    return true;
+  ) {
+    signals.push("more_info_or_program_update");
+  }
   if (
-    /\b(som\s+nevnt|som\s+sa|gjelder\s+fortsatt|samme\s+(cup|turnering|tur|leir|arrangement|stevne))\b/.test(
+    /\b(oppdatering|oppdatert|endring|ny\s+tid|revidert|presisering|ny\s+versjon)\b/.test(
       blob,
     )
-  )
-    return true;
-  if (/\b(husk\s+at|minner\s+om|minner\s+om\s+at)\b/.test(blob) && /\b(cup|turnering|tur|leir)\b/.test(blob))
-    return true;
-  return false;
+  ) {
+    signals.push("explicit_update_change");
+  }
+  if (/\b(som\s+nevnt|gjelder\s+fortsatt|samme\s+(cup|turnering|tur|leir|arrangement|stevne))\b/.test(blob)) {
+    signals.push("references_existing_arrangement");
+  }
+  if (/\b(husk\s+at|minner\s+om|minner\s+om\s+at)\b/.test(blob)) {
+    signals.push("reminder_language");
+  }
+  if (/\b(pa|på)\s+(fredag|lordag|l[oø]rdag|sondag|s[oø]ndag)\b/.test(blob)) {
+    signals.push("weekday_reference_without_new_intro");
+  }
+  const n = signals.length;
+  if (n >= 3) return { likelyFollowup: true, confidence: "high", signals };
+  if (n >= 2) return { likelyFollowup: true, confidence: "medium", signals };
+  if (n >= 1) return { likelyFollowup: true, confidence: "low", signals };
+  return { likelyFollowup: false, confidence: "low", signals: [] };
+}
+
+function inferArrangementActivityTypeHint(result: AIAnalysisResult): string {
+  const n = normalizeNorwegianLetters([result.title, result.description].join(" "));
+  if (/\bcup|turnering|stevne\b/.test(n)) return "cup";
+  if (/\bleir\b/.test(n)) return "leir";
+  if (/\btur|skoletur\b/.test(n)) return "tur";
+  if (/\bskoleavslutning|avslutning|sommeravslutning|juleavslutning\b/.test(n)) return "skolearrangement";
+  if (/\btrening\b/.test(n)) return "trening";
+  return "arrangement";
 }
 
 function buildArrangementImportLinkMetadata(
@@ -844,16 +876,19 @@ function buildArrangementImportLinkMetadata(
   arrangementCoreTitle: string;
   arrangementBlockGroupId: string;
   arrangementFollowupImportLikely: boolean;
+  updateIntent: ArrangementUpdateIntent;
   arrangementImportHint?: string;
   arrangementLinkDebug: ArrangementLinkDebug;
 } {
   const { coreTitle, titleNormalizedForFollowup, coreStabilized } =
     deriveArrangementCoreTitleForLink(result);
   const tgt = normalizeSpace(result.targetGroup || "");
-  const anchor =
-    endDateIso && endDateIso !== dateIso ? `${dateIso}_${endDateIso}` : dateIso;
-  const yearHint = dateIso.slice(0, 4);
-  const keyBody = [coreTitle, tgt, yearHint, anchor.replace(/_/g, "-")].filter(Boolean).join("|");
+  const period =
+    endDateIso && endDateIso !== dateIso
+      ? `${dateIso.slice(0, 7)}_${endDateIso.slice(0, 7)}`
+      : dateIso.slice(0, 7);
+  const activityHint = inferArrangementActivityTypeHint(result);
+  const keyBody = [coreTitle, tgt, period, activityHint].filter(Boolean).join("|");
   const slug = slugifyArrangementStableSegment(keyBody);
   let arrangementStableKey = `tg-arr-${slug}`;
   const titleWasEmpty = !normalizeSpace(result.title || "");
@@ -862,20 +897,21 @@ function buildArrangementImportLinkMetadata(
     arrangementStableKey = `tg-arr-h${djb2Hex(keyBody + (result.description ?? "").slice(0, 120))}`;
     blockGroupReused = false;
   }
-  const followup = detectArrangementFollowupImportLikely(result);
-  const arrangementImportHint = followup
-    ? "Oppfølgingsmelding: sannsynlig videre info til arrangement med samme koblings-ID (arrangementStableKey / arrangementBlockGroupId)."
+  const updateIntent = detectArrangementFollowupImportIntent(result);
+  const arrangementImportHint = updateIntent.likelyFollowup
+    ? "Oppfølgingsmelding: sannsynlig videre info til eksisterende arrangement. Match mot arrangementStableKey / arrangementBlockGroupId."
     : undefined;
 
   return {
     arrangementStableKey,
     arrangementCoreTitle: coreTitle,
     arrangementBlockGroupId: arrangementStableKey,
-    arrangementFollowupImportLikely: followup,
+    arrangementFollowupImportLikely: updateIntent.likelyFollowup,
+    updateIntent,
     ...(arrangementImportHint ? { arrangementImportHint } : {}),
     arrangementLinkDebug: {
       arrangementCoreStabilized: coreStabilized,
-      arrangementFollowupSignalAdded: followup,
+      arrangementFollowupSignalAdded: updateIntent.likelyFollowup,
       arrangementBlockGroupIdReused: blockGroupReused,
       arrangementTitleNormalizedForFollowup: titleNormalizedForFollowup,
       arrangementExistingLinkHintPrepared: Boolean(arrangementImportHint),
@@ -1262,6 +1298,16 @@ function extractStartEnd(time: string | null): { start: string; end: string } {
   return fallback;
 }
 
+function extractAttendanceTimeFromDay(day: DayScheduleEntry): string | null {
+  const pool = [day.time ?? "", day.details ?? "", ...day.highlights, ...day.notes].join("\n");
+  const m = /\boppm[oø]te(?:\s*kl\.?)?\s*(\d{1,2})[.:](\d{2})\b/i.exec(pool);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mm = Number(m[2]);
+  if (h < 0 || h > 23 || mm < 0 || mm > 59) return null;
+  return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
 function composeDayNotes(
   day: DayScheduleEntry,
   fallbackDescription: string | null
@@ -1351,9 +1397,16 @@ type EventSchoolContext = {
 type EmbeddedScheduleSegment = {
   date: string;
   dayLabel?: string | null;
+  /** Bakoverkompat: eksisterende feltnavn brukt av dagens klient. */
   start: string;
   end: string;
+  /** Foretrukket feltnavn for import av segmenter. */
+  startTime?: string;
+  endTime?: string;
+  /** Oppmøtetid når eksplisitt oppgitt (ellers utelates). */
+  attendanceTime?: string;
   title: string;
+  location?: string;
   notes?: string;
   isConditional?: boolean;
   /** Valgfri sporbarhet for segmentnotater (trygg å ignorere for eldre klienter). */
@@ -1431,6 +1484,12 @@ type PortalEventItem = {
       arrangementBlockGroupId?: string;
       /** Teksten tyder på oppfølgingsinfo til eksisterende arrangement. */
       arrangementFollowupImportLikely?: boolean;
+      /** Tydning av om meldingen virker som oppfølging/endring av eksisterende arrangement. */
+      updateIntent?: {
+        likelyFollowup: boolean;
+        confidence: "low" | "medium" | "high";
+        signals: string[];
+      };
       /** Kort maskinlesbar veiledning for import-matching (valgfri). */
       arrangementImportHint?: string;
       arrangementLinkDebug?: ArrangementLinkDebug;
@@ -2764,13 +2823,18 @@ function buildCupEmbeddedScheduleSegment(args: {
   else source = "mixed";
 
   const derived = Boolean(notes && notes.length > 0);
+  const attendanceTime = extractAttendanceTimeFromDay(args.day);
 
   return {
     date: args.isoDate,
     dayLabel: args.day.dayLabel,
     start,
     end,
+    startTime: start,
+    endTime: end,
+    ...(attendanceTime ? { attendanceTime } : {}),
     title,
+    ...(args.result.location ? { location: args.result.location } : {}),
     ...(notes ? { notes } : {}),
     ...(args.conditionalDay ? { isConditional: true } : {}),
     embeddedScheduleSegmentNotesDerived: derived,
@@ -3403,6 +3467,7 @@ function buildProposalItems(
       arrangementCoreTitle: arrLink.arrangementCoreTitle,
       arrangementBlockGroupId: arrLink.arrangementBlockGroupId,
       arrangementFollowupImportLikely: arrLink.arrangementFollowupImportLikely,
+      updateIntent: arrLink.updateIntent,
       ...(arrLink.arrangementImportHint
         ? { arrangementImportHint: arrLink.arrangementImportHint }
         : {}),
@@ -3838,7 +3903,6 @@ function buildProposalItems(
       host.event.metadata.embeddedSchedulePointCount = cupEmbeddedScheduleSegments.length;
       if (multiDayContainer) {
         host.event.metadata.endDate = multiDayContainer.endDateIso;
-        host.event.metadata.multiDayAllDay = true;
       }
       if (host.event.metadata.cupProposalDebug) {
         host.event.metadata.cupProposalDebug.embeddedScheduleAttachedToParentEvent =
@@ -3878,8 +3942,8 @@ function buildProposalItems(
 
       const parentTitleSuffix = formatNorwegianShortDateRange(firstSeg.date, lastSeg.date);
 
-      /** Heldags-container: ikke bruk første dags kamp-tid som parent-meta (Foreldre nested review). */
-      const parentExplicitStartEnd = { start: "00:00", end: "23:59" } as const;
+      /** Parent skal ikke være syntetisk heldagsblokk; bruk første segments tid som nøytral anchor. */
+      const parentExplicitStartEnd = { start: firstSeg.start, end: firstSeg.end } as const;
 
       const parentNoteParts: string[] = [];
       const desc = normalizeSpace(result.description || "");
