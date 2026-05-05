@@ -702,10 +702,17 @@ function sanitizeCalendarImportTitlePhrase(raw: string): string {
   t = t.replace(/\b(fra|i)\s+Spond\b/gi, "").trim();
   t = t.replace(/\bSpond\b/gi, "").trim();
   t = t.replace(/\bboarding\s*pass\b/gi, "").trim();
+  t = t.replace(/\bboardingpass\b/gi, "").trim();
+  t = t.replace(/\bfly\s*billett(er)?\b/gi, "").trim();
   t = t.replace(/\bflybillett(er)?\b/gi, "").trim();
+  t = t.replace(/\bbillett(er)?\b/gi, "").trim();
   t = t.replace(/\bskjema\b/gi, "").trim();
   t = t.replace(/\bmelding(en)?\s+om\b/gi, "").trim();
   t = t.replace(/\banalyse\b/gi, "").trim();
+  t = t.replace(/\s*[–—-]\s*Ankomst(\s+til\s+[A-Z]{3})?\b.*$/i, "").trim();
+  t = t.replace(/\s*[–—-]\s*Avreise\b.*$/i, "").trim();
+  t = t.replace(/\bAnkomst\s+til\s+[A-Z]{3}\b/gi, "").trim();
+  t = t.replace(/\bAvreise\s+til\s+[A-Z]{3}\b/gi, "").trim();
   t = normalizeSpace(t).replace(/^[\s:–\-]+|[\s:–\-]+$/g, "").trim();
   return t;
 }

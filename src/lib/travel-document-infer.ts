@@ -93,14 +93,140 @@ function extractPassengerName(blob: string): string | null {
 
 type AirportRow = { code: string; city: string };
 
-/** Byer som bare er tall / klokkeslett / for korte — ikke bruk i kalendertittel. */
+/**
+ * Tre-bokstavers koder som ofte feiltolkes som flyplass (måned/ukedag/kolonneoverskrifter).
+ * Ekte IATA kan teoretisk kollidere (sjelden); da faller vi tilbake til «Flyreise».
+ */
+const PSEUDO_IATA_THREE_LETTER = new Set([
+  "JAN",
+  "FEB",
+  "MAR",
+  "APR",
+  "MAY",
+  "JUN",
+  "JUL",
+  "AUG",
+  "SEP",
+  "OCT",
+  "NOV",
+  "DEC",
+  "MON",
+  "TUE",
+  "WED",
+  "THU",
+  "FRI",
+  "SAT",
+  "SUN",
+  "DEP",
+  "ARR",
+  "ETD",
+  "ETA",
+  "STD",
+  "ATD",
+  "ATA",
+]);
+
+/** Måneds-/kalenderord (norsk/engelsk) som ikke skal brukes som stedsnavn i tittel. */
+const CALENDAR_PLACE_STOPWORDS = new Set(
+  [
+    "jan",
+    "januar",
+    "feb",
+    "februar",
+    "mar",
+    "mars",
+    "apr",
+    "april",
+    "mai",
+    "may",
+    "jun",
+    "juni",
+    "june",
+    "jul",
+    "juli",
+    "july",
+    "aug",
+    "august",
+    "sep",
+    "sept",
+    "september",
+    "okt",
+    "oktober",
+    "oct",
+    "october",
+    "nov",
+    "november",
+    "des",
+    "desember",
+    "dec",
+    "december",
+    "mandag",
+    "monday",
+    "tirsdag",
+    "tuesday",
+    "onsdag",
+    "wednesday",
+    "torsdag",
+    "thursday",
+    "fredag",
+    "friday",
+    "lørdag",
+    "saturday",
+    "søndag",
+    "sunday",
+    "man",
+    "tir",
+    "ons",
+    "tor",
+    "fre",
+    "lør",
+    "søn",
+  ].map((w) => w.toLowerCase()),
+);
+
+export function isPseudoCalendarIataToken(code: string): boolean {
+  const u = normalizeSpace(code).toUpperCase();
+  return u.length === 3 && /^[A-Z]{3}$/.test(u) && PSEUDO_IATA_THREE_LETTER.has(u);
+}
+
+/** IATA som kan vises i kalendertittel (ikke måned/ukedag/pseudo). */
+export function isUsableIataForFlightTitle(code: string): boolean {
+  if (!code || code === "Ukjent") return false;
+  if (!/^[A-Z]{3}$/.test(code)) return false;
+  if (isPseudoCalendarIataToken(code)) return false;
+  return true;
+}
+
+function placeStopwordKey(s: string): string {
+  return s
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\./g, "")
+    .trim();
+}
+
+/** Renser byfelt fra typisk boardingpass-/OCR-støy før validering. */
+function sanitizeAirportCityLabel(city: string): string {
+  let c = normalizeSpace(city.replace(/[,;].*$/, "").trim());
+  c = c.replace(/\s*[–—-]\s*Ankomst(\s+til\s+[A-Z]{3})?.*$/i, "").trim();
+  c = c.replace(/\s*[–—-]\s*Avreise\b.*$/i, "").trim();
+  c = c.replace(/\bAnkomst\s+til\s+[A-Z]{3}\b.*$/i, "").trim();
+  c = c.replace(/\bAvreise\s+til\s+[A-Z]{3}\b.*$/i, "").trim();
+  return normalizeSpace(c);
+}
+
+/** Byer som bare er tall / klokkeslett / måneder / pseudo-IATA — ikke bruk i kalendertittel. */
 export function isUsableCalendarPlaceLabel(raw: string | null | undefined): boolean {
   if (raw === null || raw === undefined) return false;
   const s = normalizeSpace(raw);
   if (s.length < 2) return false;
   if (/^\d+$/.test(s)) return false;
+  if (/^\d{4}$/.test(s)) return false;
   if (/^\d{1,2}[.:]\d{2}$/.test(s)) return false;
   if (/^\d{1,2}\s*$/i.test(s)) return false;
+  const asWord = placeStopwordKey(s);
+  if (CALENDAR_PLACE_STOPWORDS.has(asWord)) return false;
+  if (s.length === 3 && /^[A-Z]{3}$/.test(s) && isPseudoCalendarIataToken(s)) return false;
   return true;
 }
 
@@ -116,11 +242,17 @@ export function buildCalendarFlightTitle(
 ): string {
   const oc = isUsableCalendarPlaceLabel(originCity) ? normalizeSpace(originCity!) : null;
   const dc = isUsableCalendarPlaceLabel(destCity) ? normalizeSpace(destCity!) : null;
-  const oIata = /^[A-Z]{3}$/.test(originCode) && originCode !== "Ukjent" ? originCode : null;
-  const dIata = /^[A-Z]{3}$/.test(destCode) && destCode !== "Ukjent" ? destCode : null;
+  const oIata = isUsableIataForFlightTitle(originCode) ? originCode : null;
+  const dIata = isUsableIataForFlightTitle(destCode) ? destCode : null;
 
-  if (oc && dc) return `Flyreise ${oc}–${dc}`;
-  if (oIata && dIata) return `Flyreise ${oIata}–${dIata}`;
+  if (oc && dc) {
+    if (oc.toLowerCase() === dc.toLowerCase()) return "Flyreise";
+    return `Flyreise ${oc}–${dc}`;
+  }
+  if (oIata && dIata) {
+    if (oIata === dIata) return "Flyreise";
+    return `Flyreise ${oIata}–${dIata}`;
+  }
   if (dc) return `Flyreise til ${dc}`;
   if (dIata) return `Flyreise til ${dIata}`;
   if (oc) return `Flyreise fra ${oc}`;
@@ -134,13 +266,15 @@ function extractAllAirportRows(blob: string): AirportRow[] {
     const line = rawLine.trim();
     if (!line) continue;
     const m = /^(?:[-•*\u2022]\s*)?([A-Z]{3})\s+(.{2,80})$/u.exec(line);
-    if (m && /^[A-Z]{3}$/.test(m[1]!)) {
-      const city = normalizeSpace(m[2]!.replace(/[,;].*$/, "").trim());
+    if (m && /^[A-Z]{3}$/.test(m[1]!) && !isPseudoCalendarIataToken(m[1]!)) {
+      const city = sanitizeAirportCityLabel(m[2]!);
       if (city.length >= 2) rows.push({ code: m[1]!, city });
     }
   }
   if (rows.length >= 2) return rows;
-  const codes = Array.from(blob.matchAll(/\b([A-Z]{3})\b/g)).map((x) => x[1]!);
+  const codes = Array.from(blob.matchAll(/\b([A-Z]{3})\b/g))
+    .map((x) => x[1]!)
+    .filter((c) => !isPseudoCalendarIataToken(c));
   const uniq: string[] = [];
   for (const c of codes) {
     if (!uniq.includes(c)) uniq.push(c);
@@ -272,8 +406,10 @@ function buildLegInference(
     startTimeSource === "missing_or_unreadable" ||
     endTimeSource === "missing_or_unreadable";
 
-  const originCity = isUsableCalendarPlaceLabel(leg.from.city) ? leg.from.city : null;
-  const destCity = isUsableCalendarPlaceLabel(leg.to.city) ? leg.to.city : null;
+  const fromCityRaw = sanitizeAirportCityLabel(leg.from.city);
+  const toCityRaw = sanitizeAirportCityLabel(leg.to.city);
+  const originCity = isUsableCalendarPlaceLabel(fromCityRaw) ? fromCityRaw : null;
+  const destCity = isUsableCalendarPlaceLabel(toCityRaw) ? toCityRaw : null;
 
   const proposedTitle = buildCalendarFlightTitle(
     originCity,

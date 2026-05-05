@@ -1,8 +1,30 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCalendarFlightTitle,
   inferTravelFlightFromBlob,
   inferTravelFlightsFromBlob,
 } from "./travel-document-infer";
+
+describe("buildCalendarFlightTitle", () => {
+  it("never uses month/weekday pseudo-IATA as route (JUN–JUN → Flyreise)", () => {
+    expect(buildCalendarFlightTitle(null, null, "JUN", "JUN")).toBe("Flyreise");
+    expect(buildCalendarFlightTitle(null, null, "MON", "TUE")).toBe("Flyreise");
+  });
+
+  it("uses real IATA when codes are safe", () => {
+    expect(buildCalendarFlightTitle(null, null, "JFK", "LHR")).toBe("Flyreise JFK–LHR");
+  });
+
+  it("same city both sides → Flyreise", () => {
+    expect(buildCalendarFlightTitle("London", "London", "LHR", "LHR")).toBe("Flyreise");
+  });
+
+  it("prefers cities over IATA when both usable", () => {
+    expect(buildCalendarFlightTitle("New York", "London", "JFK", "LHR")).toBe(
+      "Flyreise New York–London",
+    );
+  });
+});
 
 describe("inferTravelFlightsFromBlob / inferTravelFlightFromBlob", () => {
   it("Test 1: én etappe — én hendelse, by–by-tittel, avgang→ankomst som start/slutt", () => {
@@ -123,5 +145,34 @@ arrival 11:30
     expect(r).not.toBeNull();
     expect(r!.endTime).toBe("11:30");
     expect(r!.inferredEndTime).toBe(false);
+  });
+
+  it("ignores pseudo-IATA month tokens in glob — ikke Flyreise JUN–JUN", () => {
+    const blob = `
+Boarding pass
+e-ticket
+JUN JUN
+departure 08:30
+arrival 11:30
+flight F100
+`;
+    const legs = inferTravelFlightsFromBlob(blob);
+    expect(legs).toHaveLength(1);
+    expect(legs[0]!.proposedTitle).toBe("Flyreise");
+    expect(legs[0]!.proposedTitle).not.toMatch(/JUN/i);
+  });
+
+  it("saniterer byfelt: London – Ankomst til LHR → tittel med London", () => {
+    const blob = `
+Boarding pass
+- JFK New York
+- LHR London – Ankomst til LHR
+departure 09:00
+arrival 12:00
+`;
+    const r = inferTravelFlightFromBlob(blob);
+    expect(r).not.toBeNull();
+    expect(r!.proposedTitle).toBe("Flyreise New York–London");
+    expect(r!.proposedTitle).not.toMatch(/ankomst|billett|boarding/i);
   });
 });
