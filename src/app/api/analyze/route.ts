@@ -44,6 +44,10 @@ import {
   asNullableString,
   coerceAIAnalysisResultForPortal,
 } from "@/lib/analysis-null-safety";
+import {
+  applyTankestromAnalyzeHeaders,
+  getTankestromApiVersion,
+} from "@/lib/tankestrom-api-version";
 
 /**
  * A-plan (`activity_plan`): mer tekstbevarende overlay — høyere linjetak, behold seksjonsledd,
@@ -131,7 +135,7 @@ function resolveCorsForRequest(request: NextRequest): {
   return { origin, allowAll, allowed, allowOriginValue };
 }
 
-function applyCorsHeaders(request: NextRequest, response: NextResponse): NextResponse {
+function applyCorsOnly(request: NextRequest, response: NextResponse): NextResponse {
   const policy = resolveCorsForRequest(request);
   if (policy.allowOriginValue) {
     response.headers.set("Access-Control-Allow-Origin", policy.allowOriginValue);
@@ -144,6 +148,11 @@ function applyCorsHeaders(request: NextRequest, response: NextResponse): NextRes
   );
   response.headers.set("Access-Control-Max-Age", "86400");
   return response;
+}
+
+function applyCorsHeaders(request: NextRequest, response: NextResponse): NextResponse {
+  applyCorsOnly(request, response);
+  return applyTankestromAnalyzeHeaders(response);
 }
 
 function mapAnalyzeTextError(err: unknown): {
@@ -7684,6 +7693,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
 
   const withCors = (res: NextResponse, path = "unspecified", policy?: ReturnType<typeof resolveCorsForRequest>) => {
     const p = policy ?? resolveCorsForRequest(request);
+    /** CORS + Tankestrom identity (applyCorsHeaders kaller applyTankestromAnalyzeHeaders). */
     const wrapped = applyCorsHeaders(request, res);
     console.log("[api/analyze] response", {
       path,
@@ -8065,6 +8075,13 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
 }
 
 export async function POST(request: NextRequest) {
+  const version = getTankestromApiVersion();
+  console.info("[Tankestrom analyze entered]", {
+    version,
+    method: request.method,
+    url: request.url,
+    contentType: request.headers.get("content-type"),
+  });
   try {
     return await handleAnalyzeRequest(request);
   } catch (error) {
@@ -8089,12 +8106,13 @@ export async function POST(request: NextRequest) {
       },
       { status: 500 },
     );
+    applyTankestromAnalyzeHeaders(res);
     try {
-      return applyCorsHeaders(request, res);
+      applyCorsOnly(request, res);
     } catch (corsErr) {
       console.error("[api/analyze] CORS on POST_FATAL failed", corsErr);
-      return res;
     }
+    return res;
   }
 }
 

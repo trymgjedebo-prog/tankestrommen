@@ -1,20 +1,22 @@
 import { NextResponse } from "next/server";
-import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
+import {
+  applyTankestromAnalyzeHeaders,
+  getTankestromApiVersion,
+  TANKESTROM_ANALYZE_WRAPPER,
+} from "@/lib/tankestrom-api-version";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** GET /api/health — kort status + samme fingerprint som /api/version (for overvåking). */
+/** GET /api/health — enkel JSON for Foreldre-app / drift (samme versjon som /api/analyze-headers). */
 export async function GET() {
-  const fp = getDeployFingerprint();
-  return NextResponse.json({
-    status: "ok",
-    app: fp.app,
-    packageVersion: fp.packageVersion,
-    appVersionLabel: fp.appVersionLabel,
-    gitCommitSha: fp.gitCommitSha,
-    vercelDeploymentId: fp.vercelDeploymentId,
-    vercelEnv: fp.vercelEnv,
-    generatedAt: fp.generatedAt,
+  const res = NextResponse.json({
+    ok: true,
+    service: "tankestrommen",
+    version: getTankestromApiVersion(),
+    analyzeWrapper: TANKESTROM_ANALYZE_WRAPPER,
+    runtime: "nodejs",
   });
+  applyTankestromAnalyzeHeaders(res);
+  return res;
 }
