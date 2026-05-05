@@ -1,20 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import {
-  analyzeImageWithRouting,
-  analyzeTextWithRouting,
-} from "@/lib/ai/analyze-image";
-import {
   parseDocumentKind,
   type AnalysisDocumentKind,
 } from "@/lib/ai/analysis-model-router";
 import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
-import {
-  buildDocxDocumentVisualMerge,
-  buildPdfDocumentVisualMerge,
-} from "@/lib/document/document-visual-merge";
-import { extractTextFromPdfBuffer } from "@/lib/pdf/extract-pdf-text";
-import { extractTextFromDocxBuffer } from "@/lib/docx/extract-docx-text";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import type {
   AnalysisSourceHint,
@@ -27,11 +17,7 @@ import type {
   SchoolWeekOverlaySubjectUpdate,
   SchoolWeeklyProfile,
 } from "@/lib/types";
-import {
-  inferTravelFlightsFromBlob,
-  type TravelFlightInference,
-} from "@/lib/travel-document-infer";
-import { dedupePortalFlightDepartureArrivalEvents } from "@/lib/portal-flight-dedupe";
+import type { TravelFlightInference } from "@/lib/travel-document-infer";
 import {
   normalizePortalProposalEventItem,
   parseKnownPersonsFromBody,
@@ -257,6 +243,7 @@ async function analyzeFromExtractedText(
 
   let result;
   try {
+    const { analyzeTextWithRouting } = await import("@/lib/ai/analyze-image");
     const routing = await analyzeTextWithRouting(preamble + textForModel, {
       documentKind: documentKind ?? undefined,
       sourceRoute: sourceHint.type === "pdf" ? "pdf" : "docx",
@@ -285,7 +272,7 @@ async function analyzeFromExtractedText(
     };
   }
 
-  return wrapResponse(
+  return await wrapResponse(
     result,
     portalMode,
     sourceHint.type,
@@ -3519,11 +3506,11 @@ function createPortalWeekDateResolver(result: AIAnalysisResult): (
   };
 }
 
-function buildProposalItems(
+async function buildProposalItems(
   result: AIAnalysisResult,
   sourceType: string,
   portalImport: PortalImportContext = { knownPersons: [] },
-): PortalProposalItem[] {
+): Promise<PortalProposalItem[]> {
   const items: PortalProposalItem[] = [];
 
   const sourceId = randomUUID();
@@ -3544,6 +3531,7 @@ function buildProposalItems(
   const travelBlob = collectTextBlobForTravelInference(result);
   let travelFlightLegs: TravelFlightInference[] = [];
   if (!isSchoolPlanBundleContext(result, weekPlanLike) && !looksLikeCupOrSpondBroadcast(result)) {
+    const { inferTravelFlightsFromBlob } = await import("@/lib/travel-document-infer");
     travelFlightLegs = inferTravelFlightsFromBlob(travelBlob);
   }
   const preferredDateForTravel =
@@ -7363,13 +7351,13 @@ function decideSchoolWeekOverlayProposal(
   };
 }
 
-function toPortalBundle(
+async function toPortalBundle(
   resultIn: AIAnalysisResult,
   sourceType: string,
   documentKind: AnalysisDocumentKind | undefined,
   includeDebug: boolean,
   portalImport: PortalImportContext = { knownPersons: [] },
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const result = coerceAIAnalysisResultForPortal(resultIn);
   const { proposal: schoolProfileProposal, decision: schoolProfileDecision } = decideSchoolProfileProposal(
     result,
@@ -7416,7 +7404,8 @@ function toPortalBundle(
     ? []
     : schoolWeekOverlayProposal
       ? overlayHomeworkItems
-      : buildProposalItems(result, sourceType, portalImport);
+      : await buildProposalItems(result, sourceType, portalImport);
+  const { dedupePortalFlightDepartureArrivalEvents } = await import("@/lib/portal-flight-dedupe");
   const travelDeduped = dedupePortalFlightDepartureArrivalEvents(rawProposalItems);
   const fileErrors: Array<{
     fileName?: string | null;
@@ -7580,7 +7569,7 @@ function resolvePortalFileNameFromExtra(
   return null;
 }
 
-function wrapResponse(
+async function wrapResponse(
   result: AIAnalysisResult,
   portalMode: boolean,
   sourceType: string,
@@ -7589,11 +7578,11 @@ function wrapResponse(
   includeDebug: boolean = false,
   portalImport: PortalImportContext = { knownPersons: [] },
   portalMeta?: { fileName?: string | null },
-): NextResponse {
+): Promise<NextResponse> {
   if (portalMode) {
     const fileName = resolvePortalFileNameFromExtra(extra, portalMeta);
     try {
-      const bundle = toPortalBundle(
+      const bundle = await toPortalBundle(
         includeDebug ? result : stripInternalAnalysisDebug(result),
         sourceType,
         documentKind,
@@ -7783,6 +7772,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
         ));
       }
       stage = "analyze_text_openai";
+      const { analyzeTextWithRouting } = await import("@/lib/ai/analyze-image");
       const routing = await analyzeTextWithRouting(trimmed, {
         documentKind: documentKind ?? undefined,
         sourceRoute: "text",
@@ -7793,7 +7783,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
       };
       stage = "wrap_portal_bundle_text";
       return withCors(
-        wrapResponse(result, portalMode, "text", documentKind, undefined, debug, portalImport, {
+        await wrapResponse(result, portalMode, "text", documentKind, undefined, debug, portalImport, {
           fileName: typeof fileName === "string" ? fileName : null,
         }),
         "text_success",
@@ -7827,6 +7817,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
       let extracted: { text: string; numpages: number };
       try {
         stage = "pdf_extract_text";
+        const { extractTextFromPdfBuffer } = await import("@/lib/pdf/extract-pdf-text");
         extracted = await extractTextFromPdfBuffer(buffer);
       } catch (e) {
         console.error("[api/analyze pdf-parse]", e);
@@ -7847,6 +7838,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
       const pageCount = Math.max(1, extracted.numpages);
 
       stage = "pdf_visual_merge";
+      const { buildPdfDocumentVisualMerge } = await import("@/lib/document/document-visual-merge");
       const visual = await buildPdfDocumentVisualMerge(
         buffer,
         rawText,
@@ -7928,6 +7920,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
       let rawText: string;
       try {
         stage = "docx_extract_text";
+        const { extractTextFromDocxBuffer } = await import("@/lib/docx/extract-docx-text");
         rawText = await extractTextFromDocxBuffer(buffer);
       } catch (e) {
         console.error("[api/analyze mammoth]", e);
@@ -7946,6 +7939,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
       );
 
       stage = "docx_visual_merge";
+      const { buildDocxDocumentVisualMerge } = await import("@/lib/document/document-visual-merge");
       const visual = await buildDocxDocumentVisualMerge(
         buffer,
         rawText ?? "",
@@ -8007,6 +8001,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
         ));
       }
       stage = "analyze_image_openai";
+      const { analyzeImageWithRouting } = await import("@/lib/ai/analyze-image");
       const routing = await analyzeImageWithRouting(image, {
         documentKind: documentKind ?? undefined,
         sourceRoute: "image",
@@ -8017,7 +8012,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
       };
       stage = "wrap_portal_bundle_image";
       return withCors(
-        wrapResponse(result, portalMode, "image", documentKind, undefined, debug, portalImport, {
+        await wrapResponse(result, portalMode, "image", documentKind, undefined, debug, portalImport, {
           fileName: typeof fileName === "string" ? fileName : null,
         }),
         "image_success",
