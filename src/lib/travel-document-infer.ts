@@ -3,13 +3,24 @@
  * semantisk departure/arrival-tid, fly-metadata og passasjernavn (uten app-kobling).
  */
 
+export type TravelFlightStartTimeSource = "explicit" | "missing_or_unreadable";
+
+export type TravelFlightEndTimeSource =
+  | "explicit_arrival_time"
+  | "missing_or_unreadable";
+
 export type TravelFlightInference = {
-  departureTime: string;
-  /** Kalender `event.end` (ankomst eller fallback-slutt). */
-  endTime: string;
+  /** Avgang / departure — `null` når uleselig eller mangler. */
+  departureTime: string | null;
+  /** Ankomst-slutt (samme som `arrivalTime` når satt) — `null` uten eksplisitt ankomst (ingen gjetning). */
+  endTime: string | null;
   arrivalTime: string | null;
+  startTimeSource: TravelFlightStartTimeSource;
+  endTimeSource: TravelFlightEndTimeSource;
+  /** Alltid `false` når vi ikke har satt slutt fra eksplisitt ankomst (inkl. manglende slutt). */
   inferredEndTime: boolean;
-  endTimeSource: "explicit_arrival_time" | "fallback_duration";
+  /** True når minst ett av start/slutt mangler eller er uleselig. */
+  requiresManualTimeReview: boolean;
   /** IATA eller beste tilgjengelige stedsstreng */
   origin: string;
   destination: string;
@@ -19,8 +30,6 @@ export type TravelFlightInference = {
   flightNumber: string | null;
   proposedTitle: string;
 };
-
-const FLIGHT_FALLBACK_DURATION_MIN = 90;
 
 const REJECT_END_CONTEXT =
   /\b(boarding|gate\s+closes?|check[\s-]?in|innsjekk|oppm[oø]te|deadline|senest\s+innen)\b/i;
@@ -57,16 +66,6 @@ function collectHHMMInOrder(line: string): string[] {
     out.push(normalizeHHMM(m[1]!, m[2]!));
   }
   return out;
-}
-
-function addMinutesToHHMM(hhmm: string, add: number): string {
-  const [h, m] = hhmm.split(":").map((x) => Number(x));
-  let t = h * 60 + m + add;
-  if (t < 0) t = 0;
-  if (t >= 24 * 60) t = 24 * 60 - 1;
-  const hh = Math.floor(t / 60);
-  const mm = t % 60;
-  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
 
 function lineRejectsAsArrivalTime(line: string): boolean {
@@ -241,21 +240,18 @@ export function inferTravelFlightFromBlob(rawBlob: string): TravelFlightInferenc
     arr = arr ?? hint.arr;
   }
 
-  if (!dep) return null;
+  const startTimeSource: TravelFlightStartTimeSource = dep
+    ? "explicit"
+    : "missing_or_unreadable";
+  const endTimeSource: TravelFlightEndTimeSource = arr
+    ? "explicit_arrival_time"
+    : "missing_or_unreadable";
+  const endTime: string | null = arr;
+  const inferredEndTime = false;
 
-  let inferredEndTime: boolean;
-  let endTimeSource: "explicit_arrival_time" | "fallback_duration";
-  let endTime: string;
-
-  if (arr) {
-    endTime = arr;
-    inferredEndTime = false;
-    endTimeSource = "explicit_arrival_time";
-  } else {
-    endTime = addMinutesToHHMM(dep, FLIGHT_FALLBACK_DURATION_MIN);
-    inferredEndTime = true;
-    endTimeSource = "fallback_duration";
-  }
+  const requiresManualTimeReview =
+    startTimeSource === "missing_or_unreadable" ||
+    endTimeSource === "missing_or_unreadable";
 
   const origin = originRow?.code ?? "Ukjent";
   const destination = destRow?.code ?? "Ukjent";
@@ -274,8 +270,10 @@ export function inferTravelFlightFromBlob(rawBlob: string): TravelFlightInferenc
     departureTime: dep,
     endTime,
     arrivalTime: arr,
-    inferredEndTime,
+    startTimeSource,
     endTimeSource,
+    inferredEndTime,
+    requiresManualTimeReview,
     origin,
     destination,
     originCity,

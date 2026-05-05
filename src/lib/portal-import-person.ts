@@ -108,12 +108,11 @@ export function travelFlightMetadataFromInference(tf: TravelFlightInference): {
   originCity: string | null;
   destination: string;
   destinationCity: string | null;
-  departureTime: string;
-  arrivalTime: string;
+  departureTime: string | null;
+  arrivalTime: string | null;
   passengerName: string | null;
   flightNumber: string | null;
 } {
-  const arrivalHHMM = tf.arrivalTime ?? tf.endTime;
   return {
     type: "flight",
     origin: tf.origin,
@@ -121,24 +120,33 @@ export function travelFlightMetadataFromInference(tf: TravelFlightInference): {
     destination: tf.destination,
     destinationCity: tf.destCity,
     departureTime: tf.departureTime,
-    arrivalTime: arrivalHHMM,
+    arrivalTime: tf.arrivalTime,
     passengerName: tf.passengerName,
     flightNumber: tf.flightNumber,
   };
 }
 
 /** Sikrer Foreldre-App-kontrakt: personId aldri «pending»/tom, ISO start/slutt, dokumentimport-felt. */
+function sanitizePortalTimeField(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  if (!t || /^unknown$/i.test(t)) return null;
+  return t;
+}
+
 export function normalizePortalProposalEventItem<
   T extends {
     kind: "event";
     event: {
       date: string;
-      start: string;
-      end: string;
+      start: string | null;
+      end: string | null;
       personId?: string | null;
       personMatchStatus?: PortalEventPersonMatchStatus;
       sourceKind?: string;
       requiresPerson?: boolean;
+      requiresManualTimeReview?: boolean;
       [key: string]: unknown;
     };
   },
@@ -147,10 +155,21 @@ export function normalizePortalProposalEventItem<
   let personId: string | null = e.personId ?? null;
   if (personId === "" || personId === "pending") personId = null;
 
-  const start = isLikelyHHMM(e.start)
-    ? portalEventDateTimeIso(e.date, e.start)
-    : e.start;
-  const end = isLikelyHHMM(e.end) ? portalEventDateTimeIso(e.date, e.end) : e.end;
+  const startRaw = sanitizePortalTimeField(e.start);
+  const endRaw = sanitizePortalTimeField(e.end);
+
+  const start =
+    startRaw === null
+      ? null
+      : isLikelyHHMM(startRaw)
+        ? portalEventDateTimeIso(e.date, startRaw)
+        : startRaw;
+  const end =
+    endRaw === null
+      ? null
+      : isLikelyHHMM(endRaw)
+        ? portalEventDateTimeIso(e.date, endRaw)
+        : endRaw;
 
   return {
     ...item,

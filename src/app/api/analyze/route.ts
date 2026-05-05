@@ -1518,9 +1518,14 @@ type PortalEventItem = {
     /** Navn fra dokument (passasjer e.l.) når det finnes. */
     documentExtractedPersonName?: string;
     title: string;
-    /** Portal-klient: ISO 8601 lokalt uten tidssone etter normalisering (`yyyy-mm-ddTHH:MM:00`). */
-    start: string;
-    end: string;
+    /**
+     * Start/slutt: `HH:MM` → normaliseres til ISO i bundle; `null` når tid mangler eller er uleselig
+     * (aldri tom streng / «unknown»).
+     */
+    start: string | null;
+    end: string | null;
+    /** True når minst én tidsverdi mangler — klient bør la brukeren fylle inn. */
+    requiresManualTimeReview?: boolean;
     notes?: string;
     location?: string;
     metadata?: {
@@ -1571,7 +1576,12 @@ type PortalEventItem = {
       arrangementLinkDebug?: ArrangementLinkDebug;
       /** Sluttid utledet uten eksplisitt ankomst (kun ved reisedokument-fly). */
       inferredEndTime?: boolean;
-      endTimeSource?: "explicit_arrival_time" | "fallback_duration";
+      startTimeSource?: "explicit" | "missing_or_unreadable";
+      endTimeSource?:
+        | "explicit_arrival_time"
+        | "missing_or_unreadable";
+      /** Speiler `event.requiresManualTimeReview` for metadata-lesere. */
+      requiresManualTimeReview?: boolean;
       documentExtractedPersonName?: string;
       passengerName?: string;
       travel?: {
@@ -1580,8 +1590,8 @@ type PortalEventItem = {
         originCity: string | null;
         destination: string;
         destinationCity: string | null;
-        departureTime: string;
-        arrivalTime: string;
+        departureTime: string | null;
+        arrivalTime: string | null;
         passengerName: string | null;
         flightNumber: string | null;
       };
@@ -3586,6 +3596,7 @@ function buildProposalItems(
         title: eventTitle,
         start,
         end,
+        ...(tf ? { requiresManualTimeReview: tf.requiresManualTimeReview } : {}),
       },
     };
     const n = buildStructuredNotes(notes, dayContext);
@@ -3608,7 +3619,9 @@ function buildProposalItems(
       ...(tf
         ? {
             inferredEndTime: tf.inferredEndTime,
+            startTimeSource: tf.startTimeSource,
             endTimeSource: tf.endTimeSource,
+            requiresManualTimeReview: tf.requiresManualTimeReview,
             travel: travelFlightMetadataFromInference(tf),
             ...(personResolution.documentExtractedPersonName
               ? {

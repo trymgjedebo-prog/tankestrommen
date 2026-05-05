@@ -52,7 +52,9 @@ describe("portal import event contract (boarding pass)", () => {
         end: tf!.endTime,
         metadata: {
           inferredEndTime: tf!.inferredEndTime,
+          startTimeSource: tf!.startTimeSource,
           endTimeSource: tf!.endTimeSource,
+          requiresManualTimeReview: tf!.requiresManualTimeReview,
           travel,
           documentExtractedPersonName: personResolution.documentExtractedPersonName!,
           passengerName: tf!.passengerName!,
@@ -65,8 +67,51 @@ describe("portal import event contract (boarding pass)", () => {
     expect(item.event.requiresPerson).toBe(false);
     expect(item.event.sourceKind).toBe("document_import");
     expect(item.event.metadata?.travel?.arrivalTime).toBe("11:30");
+    expect(item.event.metadata?.endTimeSource).toBe("explicit_arrival_time");
     expect(item.event.end).toBe(portalEventDateTimeIso(date, "11:30"));
     expect(item.event.end).not.toBe(portalEventDateTimeIso(date, "09:30"));
+  });
+
+  it("missing readable arrival: end stays null, endTimeSource missing_or_unreadable", () => {
+    const blob = `
+Boarding pass
+JFK Oslo
+LHR London
+departure 08:30
+flight SK99
+`;
+    const tf = inferTravelFlightFromBlob(blob);
+    expect(tf).not.toBeNull();
+    expect(tf!.endTime).toBeNull();
+    expect(tf!.endTimeSource).toBe("missing_or_unreadable");
+
+    const item = normalizePortalProposalEventItem({
+      kind: "event",
+      proposalId: "p",
+      sourceId: "s",
+      originalSourceType: "pdf",
+      confidence: 0.9,
+      event: {
+        date: "2025-06-10",
+        personId: null,
+        personMatchStatus: "not_specified",
+        sourceKind: "document_import",
+        requiresPerson: false,
+        title: tf!.proposedTitle,
+        start: tf!.departureTime,
+        end: tf!.endTime,
+        requiresManualTimeReview: tf!.requiresManualTimeReview,
+        metadata: {
+          endTimeSource: tf!.endTimeSource,
+          requiresManualTimeReview: tf!.requiresManualTimeReview,
+          travel: travelFlightMetadataFromInference(tf!),
+        },
+      },
+    });
+
+    expect(item.event.end).toBeNull();
+    expect(item.event.start).toBe(portalEventDateTimeIso("2025-06-10", "08:30"));
+    expect(item.event.requiresManualTimeReview).toBe(true);
   });
 
   it("matches known person when name equals displayName", () => {
