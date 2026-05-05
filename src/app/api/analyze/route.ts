@@ -27,6 +27,10 @@ import type {
   SchoolWeekOverlaySubjectUpdate,
   SchoolWeeklyProfile,
 } from "@/lib/types";
+import {
+  inferTravelFlightFromBlob,
+  type TravelFlightInference,
+} from "@/lib/travel-document-infer";
 
 /**
  * A-plan (`activity_plan`): mer tekstbevarende overlay — høyere linjetak, behold seksjonsledd,
@@ -1298,6 +1302,35 @@ function extractStartEnd(time: string | null): { start: string; end: string } {
   return fallback;
 }
 
+/** Tekstblob for fly/reise-heuristikk (modellfelt + rå OCR). */
+function collectTextBlobForTravelInference(result: AIAnalysisResult): string {
+  const parts: string[] = [
+    result.title,
+    result.description,
+    result.extractedText?.raw ?? "",
+  ];
+  for (const s of result.schedule) {
+    parts.push(`${s.label ?? ""} ${s.date ?? ""} ${s.time ?? ""}`);
+  }
+  for (const d of result.scheduleByDay) {
+    parts.push(
+      [
+        d.dayLabel,
+        d.date,
+        d.time,
+        d.details,
+        ...d.highlights,
+        ...d.notes,
+        ...d.rememberItems,
+        ...d.deadlines,
+      ]
+        .filter((x): x is string => Boolean(x && String(x).trim()))
+        .join("\n"),
+    );
+  }
+  return parts.join("\n");
+}
+
 function extractAttendanceTimeFromDay(day: DayScheduleEntry): string | null {
   const pool = [day.time ?? "", day.details ?? "", ...day.highlights, ...day.notes].join("\n");
   const m = /\boppm[oø]te(?:\s*kl\.?)?\s*(\d{1,2})[.:](\d{2})\b/i.exec(pool);
@@ -1433,6 +1466,8 @@ type ArrangementLinkDebug = {
   arrangementExistingLinkHintPrepared?: boolean;
 };
 
+type PortalEventPersonMatchStatus = "not_specified" | "unmatched_document_name";
+
 type PortalEventItem = {
   proposalId: string;
   kind: "event";
@@ -1441,7 +1476,9 @@ type PortalEventItem = {
   confidence: number;
   event: {
     date: string;
-    personId: string;
+    /** `null` når dokumentnavn ikke skal kobles til innlogget bruker (f.eks. flybillett). */
+    personId: string | null;
+    personMatchStatus?: PortalEventPersonMatchStatus;
     title: string;
     start: string;
     end: string;
@@ -1493,6 +1530,20 @@ type PortalEventItem = {
       /** Kort maskinlesbar veiledning for import-matching (valgfri). */
       arrangementImportHint?: string;
       arrangementLinkDebug?: ArrangementLinkDebug;
+      /** Sluttid utledet uten eksplisitt ankomst (kun ved reisedokument-fly). */
+      inferredEndTime?: boolean;
+      endTimeSource?: "explicit_arrival_time" | "fallback_duration";
+      documentPersonName?: string;
+      passengerName?: string;
+      travel?: {
+        type: "flight";
+        origin: string;
+        destination: string;
+        departureTime: string;
+        arrivalTime: string;
+        passengerName: string | null;
+        flightNumber: string | null;
+      };
     };
   };
 };
@@ -3388,6 +3439,19 @@ function buildProposalItems(
 
   const resolveDate = createPortalWeekDateResolver(result);
 
+  const travelBlob = collectTextBlobForTravelInference(result);
+  let travelFlightInfer: TravelFlightInference | null = null;
+  if (!isSchoolPlanBundleContext(result, weekPlanLike) && !looksLikeCupOrSpondBroadcast(result)) {
+    travelFlightInfer = inferTravelFlightFromBlob(travelBlob);
+  }
+  const preferredDateForTravel =
+    result.scheduleByDay
+      .map((d) => resolveDate(d.date, d.dayLabel))
+      .find((x): x is string => Boolean(x)) ??
+    result.schedule.map((s) => resolveDate(s.date, s.label)).find((x): x is string => Boolean(x)) ??
+    null;
+  let travelFlightConsumed = false;
+
   const asListSection = (heading: string, values: string[]): string | null => {
     const clean = values
       .map((v) => v.trim())
@@ -3443,7 +3507,26 @@ function buildProposalItems(
     /** Siste kalenderdag (ISO) for flerdagers parent — brukes i stabil arrangementsnøkkel. */
     arrangementEndDateIso?: string | null,
   ): PortalEventItem => {
-    const { start, end } = explicitStartEnd ?? extractStartEnd(time);
+    const travelHere =
+      Boolean(travelFlightInfer) &&
+      !travelFlightConsumed &&
+      (preferredDateForTravel === null || date === preferredDateForTravel);
+    if (travelHere) travelFlightConsumed = true;
+
+    const tf = travelHere ? travelFlightInfer! : null;
+    const { start, end } =
+      tf
+        ? { start: tf.departureTime, end: tf.endTime }
+        : explicitStartEnd ?? extractStartEnd(time);
+    const eventTitle =
+      tf?.proposedTitle ?? buildEventProposalTitle(result, titleSuffix, dayContext);
+    const personId: string | null = tf ? null : "pending";
+    const personMatchStatus: PortalEventPersonMatchStatus | undefined = tf
+      ? tf.passengerName
+        ? "unmatched_document_name"
+        : "not_specified"
+      : undefined;
+
     const item: PortalEventItem = {
       proposalId: randomUUID(),
       kind: "event",
@@ -3452,8 +3535,9 @@ function buildProposalItems(
       confidence: result.confidence,
       event: {
         date,
-        personId: "pending",
-        title: buildEventProposalTitle(result, titleSuffix, dayContext),
+        personId,
+        ...(personMatchStatus ? { personMatchStatus } : {}),
+        title: eventTitle,
         start,
         end,
       },
@@ -3475,6 +3559,27 @@ function buildProposalItems(
       ...(schoolContext ? { schoolContext } : {}),
       ...(schoolDayOverride ? { schoolDayOverride } : {}),
       ...(cupProposalDebug ? { cupProposalDebug } : {}),
+      ...(tf
+        ? {
+            inferredEndTime: tf.inferredEndTime,
+            endTimeSource: tf.endTimeSource,
+            travel: {
+              type: "flight" as const,
+              origin: tf.origin,
+              destination: tf.destination,
+              departureTime: tf.departureTime,
+              arrivalTime: tf.arrivalTime ?? tf.endTime,
+              passengerName: tf.passengerName,
+              flightNumber: tf.flightNumber,
+            },
+            ...(tf.passengerName
+              ? {
+                  documentPersonName: tf.passengerName,
+                  passengerName: tf.passengerName,
+                }
+              : {}),
+          }
+        : {}),
     };
     return item;
   };
