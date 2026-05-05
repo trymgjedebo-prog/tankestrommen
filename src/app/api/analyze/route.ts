@@ -31,6 +31,14 @@ import {
   inferTravelFlightFromBlob,
   type TravelFlightInference,
 } from "@/lib/travel-document-infer";
+import {
+  normalizePortalProposalEventItem,
+  parseKnownPersonsFromBody,
+  resolvePortalEventPersonMatch,
+  travelFlightMetadataFromInference,
+  type PortalEventPersonMatchStatus,
+  type PortalImportContext,
+} from "@/lib/portal-import-person";
 
 /**
  * A-plan (`activity_plan`): mer tekstbevarende overlay — høyere linjetak, behold seksjonsledd,
@@ -222,6 +230,7 @@ async function analyzeFromExtractedText(
     supplement: string;
     debug: DocumentVisualExtractionDebug;
   } | null,
+  portalImport: PortalImportContext = { knownPersons: [] },
 ) {
   const supplement = documentVisual?.supplement ?? "";
   const mergedRawForModel = (rawText || "") + supplement;
@@ -276,6 +285,7 @@ async function analyzeFromExtractedText(
       },
     },
     includeDebug,
+    portalImport,
   );
 }
 
@@ -287,6 +297,8 @@ interface ParsedBody {
   fileName?: string;
   /** Valgfri: timetable | activity_plan | event_doc | text | auto (streng fra JSON/multipart) */
   documentKind?: unknown;
+  /** Valgfri: [{ personId, displayName | name }] for dokumentimport-matching. */
+  knownPersons?: unknown;
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
@@ -300,12 +312,29 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
   const textField = form.get("text") as string | null;
   const documentKind = parseDocumentKind(form.get("documentKind"));
 
+  const knownPersonsField = form.get("knownPersons");
+  let knownPersons: unknown = undefined;
+  if (typeof knownPersonsField === "string" && knownPersonsField.trim()) {
+    try {
+      knownPersons = JSON.parse(knownPersonsField) as unknown;
+    } catch {
+      knownPersons = undefined;
+    }
+  }
+
   if (textField && typeof textField === "string") {
-    return { text: textField, ...(documentKind ? { documentKind } : {}) };
+    return {
+      text: textField,
+      ...(documentKind ? { documentKind } : {}),
+      ...(knownPersons !== undefined ? { knownPersons } : {}),
+    };
   }
 
   if (!file) {
-    return { ...(documentKind ? { documentKind } : {}) };
+    return {
+      ...(documentKind ? { documentKind } : {}),
+      ...(knownPersons !== undefined ? { knownPersons } : {}),
+    };
   }
 
   const name = file.name.toLowerCase();
@@ -317,6 +346,7 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
       pdf: dataUrl,
       fileName: file.name,
       ...(documentKind ? { documentKind } : {}),
+      ...(knownPersons !== undefined ? { knownPersons } : {}),
     };
   }
   if (
@@ -327,16 +357,22 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
       docx: dataUrl,
       fileName: file.name,
       ...(documentKind ? { documentKind } : {}),
+      ...(knownPersons !== undefined ? { knownPersons } : {}),
     };
   }
   if (mime.startsWith("image/")) {
-    return { image: dataUrl, ...(documentKind ? { documentKind } : {}) };
+    return {
+      image: dataUrl,
+      ...(documentKind ? { documentKind } : {}),
+      ...(knownPersons !== undefined ? { knownPersons } : {}),
+    };
   }
 
   return {
     pdf: dataUrl,
     fileName: file.name,
     ...(documentKind ? { documentKind } : {}),
+    ...(knownPersons !== undefined ? { knownPersons } : {}),
   };
 }
 
@@ -1466,8 +1502,6 @@ type ArrangementLinkDebug = {
   arrangementExistingLinkHintPrepared?: boolean;
 };
 
-type PortalEventPersonMatchStatus = "not_specified" | "unmatched_document_name";
-
 type PortalEventItem = {
   proposalId: string;
   kind: "event";
@@ -1476,10 +1510,15 @@ type PortalEventItem = {
   confidence: number;
   event: {
     date: string;
-    /** `null` når dokumentnavn ikke skal kobles til innlogget bruker (f.eks. flybillett). */
+    /** Alltid satt: kjent person-id eller `null` (aldri tom streng / utelatt / «pending»). */
     personId: string | null;
-    personMatchStatus?: PortalEventPersonMatchStatus;
+    personMatchStatus: PortalEventPersonMatchStatus;
+    sourceKind: "document_import";
+    requiresPerson: false;
+    /** Navn fra dokument (passasjer e.l.) når det finnes. */
+    documentExtractedPersonName?: string;
     title: string;
+    /** Portal-klient: ISO 8601 lokalt uten tidssone etter normalisering (`yyyy-mm-ddTHH:MM:00`). */
     start: string;
     end: string;
     notes?: string;
@@ -1533,12 +1572,14 @@ type PortalEventItem = {
       /** Sluttid utledet uten eksplisitt ankomst (kun ved reisedokument-fly). */
       inferredEndTime?: boolean;
       endTimeSource?: "explicit_arrival_time" | "fallback_duration";
-      documentPersonName?: string;
+      documentExtractedPersonName?: string;
       passengerName?: string;
       travel?: {
         type: "flight";
         origin: string;
+        originCity: string | null;
         destination: string;
+        destinationCity: string | null;
         departureTime: string;
         arrivalTime: string;
         passengerName: string | null;
@@ -3421,6 +3462,7 @@ function createPortalWeekDateResolver(result: AIAnalysisResult): (
 function buildProposalItems(
   result: AIAnalysisResult,
   sourceType: string,
+  portalImport: PortalImportContext = { knownPersons: [] },
 ): PortalProposalItem[] {
   const items: PortalProposalItem[] = [];
 
@@ -3520,12 +3562,11 @@ function buildProposalItems(
         : explicitStartEnd ?? extractStartEnd(time);
     const eventTitle =
       tf?.proposedTitle ?? buildEventProposalTitle(result, titleSuffix, dayContext);
-    const personId: string | null = tf ? null : "pending";
-    const personMatchStatus: PortalEventPersonMatchStatus | undefined = tf
-      ? tf.passengerName
-        ? "unmatched_document_name"
-        : "not_specified"
-      : undefined;
+    const documentExtractedName = tf?.passengerName?.trim() || null;
+    const personResolution = resolvePortalEventPersonMatch({
+      documentExtractedName,
+      knownPersons: portalImport.knownPersons,
+    });
 
     const item: PortalEventItem = {
       proposalId: randomUUID(),
@@ -3535,8 +3576,13 @@ function buildProposalItems(
       confidence: result.confidence,
       event: {
         date,
-        personId,
-        ...(personMatchStatus ? { personMatchStatus } : {}),
+        personId: personResolution.personId,
+        personMatchStatus: personResolution.personMatchStatus,
+        sourceKind: "document_import",
+        requiresPerson: false,
+        ...(personResolution.documentExtractedPersonName
+          ? { documentExtractedPersonName: personResolution.documentExtractedPersonName }
+          : {}),
         title: eventTitle,
         start,
         end,
@@ -3563,19 +3609,11 @@ function buildProposalItems(
         ? {
             inferredEndTime: tf.inferredEndTime,
             endTimeSource: tf.endTimeSource,
-            travel: {
-              type: "flight" as const,
-              origin: tf.origin,
-              destination: tf.destination,
-              departureTime: tf.departureTime,
-              arrivalTime: tf.arrivalTime ?? tf.endTime,
-              passengerName: tf.passengerName,
-              flightNumber: tf.flightNumber,
-            },
-            ...(tf.passengerName
+            travel: travelFlightMetadataFromInference(tf),
+            ...(personResolution.documentExtractedPersonName
               ? {
-                  documentPersonName: tf.passengerName,
-                  passengerName: tf.passengerName,
+                  documentExtractedPersonName: personResolution.documentExtractedPersonName,
+                  ...(tf.passengerName ? { passengerName: tf.passengerName } : {}),
                 }
               : {}),
           }
@@ -7233,6 +7271,7 @@ function toPortalBundle(
   sourceType: string,
   documentKind: AnalysisDocumentKind | undefined,
   includeDebug: boolean,
+  portalImport: PortalImportContext = { knownPersons: [] },
 ): Record<string, unknown> {
   const { proposal: schoolProfileProposal, decision: schoolProfileDecision } = decideSchoolProfileProposal(
     result,
@@ -7275,11 +7314,14 @@ function toPortalBundle(
           overlayHomeworkDebug,
         )
       : [];
-  const items = schoolProfileProposal
+  const rawProposalItems = schoolProfileProposal
     ? []
     : schoolWeekOverlayProposal
       ? overlayHomeworkItems
-      : buildProposalItems(result, sourceType);
+      : buildProposalItems(result, sourceType, portalImport);
+  const items = rawProposalItems.map((it) =>
+    it.kind === "event" ? normalizePortalProposalEventItem(it) : it,
+  );
   const secondaryTaskCandidates =
     !schoolProfileProposal && !schoolWeekOverlayProposal
       ? buildSecondaryPortalTaskCandidates(result, items, resolveDate, resolvedYear, sourceType)
@@ -7408,6 +7450,7 @@ function wrapResponse(
   documentKind: AnalysisDocumentKind | undefined,
   extra?: Record<string, unknown>,
   includeDebug: boolean = false,
+  portalImport: PortalImportContext = { knownPersons: [] },
 ): NextResponse {
   if (portalMode) {
     const bundle = toPortalBundle(
@@ -7415,6 +7458,7 @@ function wrapResponse(
       sourceType,
       documentKind,
       includeDebug,
+      portalImport,
     );
     console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
       schemaVersion: bundle.schemaVersion,
@@ -7505,6 +7549,9 @@ export async function POST(request: NextRequest) {
       : await request.json();
     const { image, text, pdf, docx, fileName } = body;
     const documentKind = parseDocumentKind(body.documentKind);
+    const portalImport: PortalImportContext = {
+      knownPersons: parseKnownPersonsFromBody(body.knownPersons),
+    };
 
     /**
      * JSON `{ text: "…" }` (lim inn) brukte tidligere rå analyse-JSON uten `schemaVersion`.
@@ -7550,7 +7597,7 @@ export async function POST(request: NextRequest) {
         analysisModelTrace: routing.modelTrace,
       };
       return withCors(
-        wrapResponse(result, portalMode, "text", documentKind, undefined, debug),
+        wrapResponse(result, portalMode, "text", documentKind, undefined, debug, portalImport),
         "text_success",
       );
     }
@@ -7639,6 +7686,7 @@ export async function POST(request: NextRequest) {
           (visual.debug.documentEmbeddedImagesDetected ?? 0) > 0
             ? visual
             : null,
+          portalImport,
         ),
         "pdf_success",
       );
@@ -7732,6 +7780,7 @@ export async function POST(request: NextRequest) {
           visual.debug.documentEmbeddedFileDetected
             ? visual
             : null,
+          portalImport,
         ),
         "docx_success",
       );
@@ -7759,7 +7808,7 @@ export async function POST(request: NextRequest) {
         analysisModelTrace: routing.modelTrace,
       };
       return withCors(
-        wrapResponse(result, portalMode, "image", documentKind, undefined, debug),
+        wrapResponse(result, portalMode, "image", documentKind, undefined, debug, portalImport),
         "image_success",
       );
     }
