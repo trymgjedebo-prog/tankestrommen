@@ -62,7 +62,12 @@ export function resolvePortalEventPersonMatch(opts: {
   personMatchStatus: PortalEventPersonMatchStatus;
   documentExtractedPersonName?: string;
 } {
-  const rawName = opts.documentExtractedName?.trim() || "";
+  const rawName =
+    opts.documentExtractedName == null || opts.documentExtractedName === undefined
+      ? ""
+      : typeof opts.documentExtractedName === "string"
+        ? opts.documentExtractedName.trim()
+        : "";
   if (!rawName) {
     return { personId: null, personMatchStatus: "not_specified" };
   }
@@ -87,19 +92,29 @@ export function resolvePortalEventPersonMatch(opts: {
 
 /** Kalender-ISO for Foreldre-App (`yyyy-mm-dd` + `HH:MM`). */
 export function portalEventDateTimeIso(dateYmd: string, hhmm: string): string {
+  const d = typeof dateYmd === "string" ? dateYmd.trim() : "";
+  if (typeof hhmm !== "string") {
+    return d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00` : "";
+  }
   const t = hhmm.trim();
   const m = /^(\d{1,2}):(\d{2})$/.exec(t);
   if (!m) {
     if (/^\d{4}-\d{2}-\d{2}T/.test(t)) return t;
-    return `${dateYmd}T00:00:00`;
+    return d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00` : "";
   }
   const h = Number(m[1]);
   const min = Number(m[2]);
-  return `${dateYmd}T${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}:00`;
+  if (!d || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return "";
+  return `${d}T${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}:00`;
 }
 
-export function isLikelyHHMM(timeField: string): boolean {
+export function isLikelyHHMM(timeField: string | null | undefined): boolean {
+  if (timeField == null || typeof timeField !== "string") return false;
   return /^\d{1,2}:\d{2}$/.test(timeField.trim());
+}
+
+function isValidPortalEventDateYmd(d: unknown): d is string {
+  return typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.trim());
 }
 
 export function travelFlightMetadataFromInference(tf: TravelFlightInference): {
@@ -157,18 +172,23 @@ export function normalizePortalProposalEventItem<
 
   const startRaw = sanitizePortalTimeField(e.start);
   const endRaw = sanitizePortalTimeField(e.end);
+  const dateOk = isValidPortalEventDateYmd(e.date);
 
   const start =
     startRaw === null
       ? null
       : isLikelyHHMM(startRaw)
-        ? portalEventDateTimeIso(e.date, startRaw)
+        ? dateOk
+          ? portalEventDateTimeIso(e.date.trim(), startRaw) || null
+          : null
         : startRaw;
   const end =
     endRaw === null
       ? null
       : isLikelyHHMM(endRaw)
-        ? portalEventDateTimeIso(e.date, endRaw)
+        ? dateOk
+          ? portalEventDateTimeIso(e.date.trim(), endRaw) || null
+          : null
         : endRaw;
 
   return {

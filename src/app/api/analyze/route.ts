@@ -40,6 +40,10 @@ import {
   type PortalEventPersonMatchStatus,
   type PortalImportContext,
 } from "@/lib/portal-import-person";
+import {
+  asNullableString,
+  coerceAIAnalysisResultForPortal,
+} from "@/lib/analysis-null-safety";
 
 /**
  * A-plan (`activity_plan`): mer tekstbevarende overlay — høyere linjetak, behold seksjonsledd,
@@ -287,6 +291,7 @@ async function analyzeFromExtractedText(
     },
     includeDebug,
     portalImport,
+    { fileName: sourceHint.fileName },
   );
 }
 
@@ -364,6 +369,7 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
   if (mime.startsWith("image/")) {
     return {
       image: dataUrl,
+      fileName: file.name,
       ...(documentKind ? { documentKind } : {}),
       ...(knownPersons !== undefined ? { knownPersons } : {}),
     };
@@ -1361,15 +1367,19 @@ function extractStartEnd(time: string | null): { start: string; end: string } {
 
 /** Tekstblob for fly/reise-heuristikk (modellfelt + rå OCR). */
 function collectTextBlobForTravelInference(result: AIAnalysisResult): string {
+  const schedule = Array.isArray(result.schedule) ? result.schedule : [];
+  const scheduleByDay = Array.isArray(result.scheduleByDay) ? result.scheduleByDay : [];
   const parts: string[] = [
-    result.title,
-    result.description,
-    result.extractedText?.raw ?? "",
+    typeof result.title === "string" ? result.title : "",
+    typeof result.description === "string" ? result.description : "",
+    result.extractedText && typeof result.extractedText.raw === "string"
+      ? result.extractedText.raw
+      : "",
   ];
-  for (const s of result.schedule) {
+  for (const s of schedule) {
     parts.push(`${s.label ?? ""} ${s.date ?? ""} ${s.time ?? ""}`);
   }
-  for (const d of result.scheduleByDay) {
+  for (const d of scheduleByDay) {
     parts.push(
       [
         d.dayLabel,
@@ -3600,7 +3610,7 @@ function buildProposalItems(
         : explicitStartEnd ?? extractStartEnd(time);
     const eventTitle =
       tf?.proposedTitle ?? buildEventProposalTitle(result, titleSuffix, dayContext);
-    const documentExtractedName = tf?.passengerName?.trim() || null;
+    const documentExtractedName = asNullableString(tf?.passengerName);
     const personResolution = resolvePortalEventPersonMatch({
       documentExtractedName,
       knownPersons: portalImport.knownPersons,
@@ -7338,12 +7348,13 @@ function decideSchoolWeekOverlayProposal(
 }
 
 function toPortalBundle(
-  result: AIAnalysisResult,
+  resultIn: AIAnalysisResult,
   sourceType: string,
   documentKind: AnalysisDocumentKind | undefined,
   includeDebug: boolean,
   portalImport: PortalImportContext = { knownPersons: [] },
 ): Record<string, unknown> {
+  const result = coerceAIAnalysisResultForPortal(resultIn);
   const { proposal: schoolProfileProposal, decision: schoolProfileDecision } = decideSchoolProfileProposal(
     result,
     sourceType,
@@ -7391,9 +7402,31 @@ function toPortalBundle(
       ? overlayHomeworkItems
       : buildProposalItems(result, sourceType, portalImport);
   const travelDeduped = dedupePortalFlightDepartureArrivalEvents(rawProposalItems);
-  const items = travelDeduped.map((it) =>
-    it.kind === "event" ? normalizePortalProposalEventItem(it) : it,
-  );
+  const fileErrors: Array<{
+    fileName?: string | null;
+    errorCode: string;
+    message: string;
+    debugMessage: string;
+    proposalId?: string;
+  }> = [];
+  const items: PortalProposalItem[] = [];
+  for (const it of travelDeduped) {
+    try {
+      if (it.kind === "event") {
+        items.push(normalizePortalProposalEventItem(it));
+      } else {
+        items.push(it);
+      }
+    } catch (err) {
+      console.error("[api/analyze] normalizePortalProposalEventItem failed", err);
+      fileErrors.push({
+        errorCode: "PROPOSAL_ITEM_NORMALIZE_FAILED",
+        message: "Kunne ikke normalisere et forslag fra dokumentet.",
+        debugMessage: err instanceof Error ? err.message : String(err),
+        proposalId: "proposalId" in it ? String(it.proposalId) : undefined,
+      });
+    }
+  }
   const secondaryTaskCandidates =
     !schoolProfileProposal && !schoolWeekOverlayProposal
       ? buildSecondaryPortalTaskCandidates(result, items, resolveDate, resolvedYear, sourceType)
@@ -7501,6 +7534,7 @@ function toPortalBundle(
       importRunId: randomUUID(),
     },
     items,
+    fileErrors,
     ...(secondaryTaskCandidates.length > 0 ? { secondaryTaskCandidates } : {}),
     ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
     ...(schoolWeekOverlayProposal ? { schoolWeekOverlayProposal } : {}),
@@ -7515,6 +7549,21 @@ function isDebugRequest(request: NextRequest): boolean {
   return h === "1" || h === "true";
 }
 
+function resolvePortalFileNameFromExtra(
+  extra: Record<string, unknown> | undefined,
+  portalMeta?: { fileName?: string | null },
+): string | null {
+  if (portalMeta?.fileName != null && String(portalMeta.fileName).trim()) {
+    return String(portalMeta.fileName).trim();
+  }
+  const hint = extra?.sourceHint;
+  if (hint && typeof hint === "object" && "fileName" in hint) {
+    const fn = (hint as AnalysisSourceHint).fileName;
+    if (typeof fn === "string" && fn.trim()) return fn.trim();
+  }
+  return null;
+}
+
 function wrapResponse(
   result: AIAnalysisResult,
   portalMode: boolean,
@@ -7523,29 +7572,69 @@ function wrapResponse(
   extra?: Record<string, unknown>,
   includeDebug: boolean = false,
   portalImport: PortalImportContext = { knownPersons: [] },
+  portalMeta?: { fileName?: string | null },
 ): NextResponse {
   if (portalMode) {
-    const bundle = toPortalBundle(
-      includeDebug ? result : stripInternalAnalysisDebug(result),
-      sourceType,
-      documentKind,
-      includeDebug,
-      portalImport,
-    );
-    console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
-      schemaVersion: bundle.schemaVersion,
-      itemCount: (bundle.items as unknown[]).length,
-      hasSchoolProfile: Boolean(bundle.schoolProfileProposal),
-      hasSchoolWeekOverlay: Boolean(
-        (bundle as Record<string, unknown>).schoolWeekOverlayProposal,
-      ),
-      schoolProfileRouting: (bundle.debug as Record<string, unknown> | undefined)
-        ?.schoolProfileRouting ?? null,
-      schoolWeekOverlayRouting: (bundle.debug as Record<string, unknown> | undefined)
-        ?.schoolWeekOverlayRouting ?? null,
-      debug: Boolean(bundle.debug),
-    });
-    return NextResponse.json(bundle);
+    const fileName = resolvePortalFileNameFromExtra(extra, portalMeta);
+    try {
+      const bundle = toPortalBundle(
+        includeDebug ? result : stripInternalAnalysisDebug(result),
+        sourceType,
+        documentKind,
+        includeDebug,
+        portalImport,
+      );
+      console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
+        ok: true,
+        schemaVersion: bundle.schemaVersion,
+        itemCount: (bundle.items as unknown[]).length,
+        fileErrorsCount: Array.isArray(bundle.fileErrors) ? bundle.fileErrors.length : 0,
+        hasSchoolProfile: Boolean(bundle.schoolProfileProposal),
+        hasSchoolWeekOverlay: Boolean(
+          (bundle as Record<string, unknown>).schoolWeekOverlayProposal,
+        ),
+        schoolProfileRouting: (bundle.debug as Record<string, unknown> | undefined)
+          ?.schoolProfileRouting ?? null,
+        schoolWeekOverlayRouting: (bundle.debug as Record<string, unknown> | undefined)
+          ?.schoolWeekOverlayRouting ?? null,
+        debug: Boolean(bundle.debug),
+      });
+      return NextResponse.json({
+        ok: true,
+        ...bundle,
+        fileErrors: Array.isArray(bundle.fileErrors) ? bundle.fileErrors : [],
+      });
+    } catch (error) {
+      const stage = "toPortalBundle";
+      console.error("[Tankestrom analyze failed]", { stage, error, fileName });
+      return NextResponse.json(
+        {
+          ok: false,
+          errorCode: "ANALYZE_INTERNAL_ERROR",
+          message: "Kunne ikke analysere dokumentet.",
+          debugMessage: error instanceof Error ? error.message : String(error),
+          stage,
+          schemaVersion: "1.0.0",
+          provenance: {
+            sourceSystem: "tankestrom",
+            sourceType,
+            generatedAt: new Date().toISOString(),
+            importRunId: randomUUID(),
+          },
+          items: [],
+          secondaryTaskCandidates: [],
+          fileErrors: [
+            {
+              fileName: fileName ?? "ukjent",
+              errorCode: "FILE_ANALYSIS_FAILED",
+              message: "Kunne ikke analysere denne filen.",
+              debugMessage: error instanceof Error ? error.message : String(error),
+            },
+          ],
+        },
+        { status: 500 },
+      );
+    }
   }
   // Non-portal: strip debug by default, keep when asked.
   const clean = includeDebug ? result : stripInternalAnalysisDebug(result);
@@ -7601,6 +7690,8 @@ export async function POST(request: NextRequest) {
     });
     return wrapped;
   };
+  let lastPortalMode = false;
+  let lastFileName: string | null = null;
   try {
     if (!process.env.OPENAI_API_KEY?.trim()) {
       return withCors(NextResponse.json(
@@ -7614,12 +7705,14 @@ export async function POST(request: NextRequest) {
 
     const multipart = isMultipart(request);
     let portalMode = detectPortalMode(request);
+    lastPortalMode = portalMode;
     const debug = isDebugRequest(request);
 
     const body: ParsedBody = multipart
       ? await parseMultipartBody(request)
       : await request.json();
     const { image, text, pdf, docx, fileName } = body;
+    lastFileName = typeof fileName === "string" ? fileName : null;
     const documentKind = parseDocumentKind(body.documentKind);
     const portalImport: PortalImportContext = {
       knownPersons: parseKnownPersonsFromBody(body.knownPersons),
@@ -7638,6 +7731,8 @@ export async function POST(request: NextRequest) {
     ) {
       portalMode = true;
     }
+
+    lastPortalMode = portalMode;
 
     console.log("[api/analyze] incoming request", {
       contentType: request.headers.get("content-type"),
@@ -7669,7 +7764,9 @@ export async function POST(request: NextRequest) {
         analysisModelTrace: routing.modelTrace,
       };
       return withCors(
-        wrapResponse(result, portalMode, "text", documentKind, undefined, debug, portalImport),
+        wrapResponse(result, portalMode, "text", documentKind, undefined, debug, portalImport, {
+          fileName: typeof fileName === "string" ? fileName : null,
+        }),
         "text_success",
       );
     }
@@ -7880,7 +7977,9 @@ export async function POST(request: NextRequest) {
         analysisModelTrace: routing.modelTrace,
       };
       return withCors(
-        wrapResponse(result, portalMode, "image", documentKind, undefined, debug, portalImport),
+        wrapResponse(result, portalMode, "image", documentKind, undefined, debug, portalImport, {
+          fileName: typeof fileName === "string" ? fileName : null,
+        }),
         "image_success",
       );
     }
@@ -7891,10 +7990,44 @@ export async function POST(request: NextRequest) {
     ), "missing_input");
   } catch (err) {
     console.error("[api/analyze]", err);
-    return withCors(NextResponse.json(
-      { error: "Noe gikk galt under analysen. Prøv igjen." },
-      { status: 500 }
-    ), "catch_500");
+    if (lastPortalMode) {
+      return withCors(
+        NextResponse.json(
+          {
+            ok: false,
+            errorCode: "ANALYZE_INTERNAL_ERROR",
+            message: "Kunne ikke analysere dokumentet.",
+            debugMessage: err instanceof Error ? err.message : String(err),
+            stage: "request",
+            schemaVersion: "1.0.0",
+            provenance: {
+              sourceSystem: "tankestrom",
+              sourceType: "unknown",
+              generatedAt: new Date().toISOString(),
+              importRunId: randomUUID(),
+            },
+            items: [],
+            fileErrors: [
+              {
+                fileName: lastFileName ?? "ukjent",
+                errorCode: "FILE_ANALYSIS_FAILED",
+                message: "Kunne ikke analysere denne filen.",
+                debugMessage: err instanceof Error ? err.message : String(err),
+              },
+            ],
+          },
+          { status: 500 },
+        ),
+        "catch_500_portal",
+      );
+    }
+    return withCors(
+      NextResponse.json(
+        { error: "Noe gikk galt under analysen. Prøv igjen." },
+        { status: 500 },
+      ),
+      "catch_500",
+    );
   }
 }
 
