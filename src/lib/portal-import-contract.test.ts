@@ -68,6 +68,8 @@ describe("portal import event contract (boarding pass)", () => {
     expect(item.event.sourceKind).toBe("document_import");
     expect(item.event.metadata?.travel?.arrivalTime).toBe("11:30");
     expect(item.event.metadata?.endTimeSource).toBe("explicit_arrival_time");
+    expect(tf!.proposedTitle).toBe("Flyreise New York–London");
+    expect(item.event.title).toBe("Flyreise New York–London");
     expect(item.event.end).toBe(portalEventDateTimeIso(date, "11:30"));
     expect(item.event.end).not.toBe(portalEventDateTimeIso(date, "09:30"));
   });

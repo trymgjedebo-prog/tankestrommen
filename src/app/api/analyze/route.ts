@@ -28,9 +28,10 @@ import type {
   SchoolWeeklyProfile,
 } from "@/lib/types";
 import {
-  inferTravelFlightFromBlob,
+  inferTravelFlightsFromBlob,
   type TravelFlightInference,
 } from "@/lib/travel-document-infer";
+import { dedupePortalFlightDepartureArrivalEvents } from "@/lib/portal-flight-dedupe";
 import {
   normalizePortalProposalEventItem,
   parseKnownPersonsFromBody,
@@ -683,12 +684,32 @@ function stripLeadingArrangementTitleNoise(title: string): string {
   );
 }
 
+/** Fjerner kildeskildrende formuleringer — kalender skal beskrive hendelsen, ikke analysen. */
+function sanitizeCalendarImportTitlePhrase(raw: string): string {
+  let t = normalizeSpace(raw);
+  if (!t) return "";
+  t = stripLeadingArrangementTitleNoise(t);
+  t = t.replace(/\b(informasjon|info)\s+om\s+/gi, "").trim();
+  t = t.replace(/^dokument(et)?\s*[:\-–]\s*/i, "").trim();
+  t = t.replace(/^bilde(t|ne)?\s*[:\-–]\s*/i, "").trim();
+  t = t.replace(/\b(PDF|PNG|JPEG|JPG)\b/gi, "").trim();
+  t = t.replace(/\b(fra|i)\s+Spond\b/gi, "").trim();
+  t = t.replace(/\bSpond\b/gi, "").trim();
+  t = t.replace(/\bboarding\s*pass\b/gi, "").trim();
+  t = t.replace(/\bflybillett(er)?\b/gi, "").trim();
+  t = t.replace(/\bskjema\b/gi, "").trim();
+  t = t.replace(/\bmelding(en)?\s+om\b/gi, "").trim();
+  t = t.replace(/\banalyse\b/gi, "").trim();
+  t = normalizeSpace(t).replace(/^[\s:–\-]+|[\s:–\-]+$/g, "").trim();
+  return t;
+}
+
 function buildCalendarEventTitle(
   result: AIAnalysisResult,
   titleSuffix: string | null
 ): string {
   const rawBase = normalizeSpace(result.title || "").trim();
-  const baseTitle = rawBase ? stripLeadingArrangementTitleNoise(rawBase) : rawBase;
+  const baseTitle = rawBase ? sanitizeCalendarImportTitlePhrase(rawBase) : rawBase;
   const suffix = normalizeSpace(titleSuffix || "").trim();
   const targetGroup = normalizeSpace(result.targetGroup || "").trim();
 
@@ -1574,6 +1595,9 @@ type PortalEventItem = {
       /** Kort maskinlesbar veiledning for import-matching (valgfri). */
       arrangementImportHint?: string;
       arrangementLinkDebug?: ArrangementLinkDebug;
+      importCategory?: "travel";
+      /** True når rute (IATA/by) ikke kunne leses — bruk generisk «Flyreise»-tittel. */
+      travelRouteUncertain?: boolean;
       /** Sluttid utledet uten eksplisitt ankomst (kun ved reisedokument-fly). */
       inferredEndTime?: boolean;
       startTimeSource?: "explicit" | "missing_or_unreadable";
@@ -3492,9 +3516,9 @@ function buildProposalItems(
   const resolveDate = createPortalWeekDateResolver(result);
 
   const travelBlob = collectTextBlobForTravelInference(result);
-  let travelFlightInfer: TravelFlightInference | null = null;
+  let travelFlightLegs: TravelFlightInference[] = [];
   if (!isSchoolPlanBundleContext(result, weekPlanLike) && !looksLikeCupOrSpondBroadcast(result)) {
-    travelFlightInfer = inferTravelFlightFromBlob(travelBlob);
+    travelFlightLegs = inferTravelFlightsFromBlob(travelBlob);
   }
   const preferredDateForTravel =
     result.scheduleByDay
@@ -3502,7 +3526,9 @@ function buildProposalItems(
       .find((x): x is string => Boolean(x)) ??
     result.schedule.map((s) => resolveDate(s.date, s.label)).find((x): x is string => Boolean(x)) ??
     null;
-  let travelFlightConsumed = false;
+  /** Maks én fly-etappe «inline» på eksisterende plan-rader; flere etapper legges til via flush. */
+  let travelInlineAttached = false;
+  let travelLegConsumed = 0;
 
   const asListSection = (heading: string, values: string[]): string | null => {
     const clean = values
@@ -3560,12 +3586,14 @@ function buildProposalItems(
     arrangementEndDateIso?: string | null,
   ): PortalEventItem => {
     const travelHere =
-      Boolean(travelFlightInfer) &&
-      !travelFlightConsumed &&
+      !travelInlineAttached &&
+      travelFlightLegs.length > travelLegConsumed &&
       (preferredDateForTravel === null || date === preferredDateForTravel);
-    if (travelHere) travelFlightConsumed = true;
-
-    const tf = travelHere ? travelFlightInfer! : null;
+    const tf = travelHere ? travelFlightLegs[travelLegConsumed]! : null;
+    if (travelHere) {
+      travelInlineAttached = true;
+      travelLegConsumed += 1;
+    }
     const { start, end } =
       tf
         ? { start: tf.departureTime, end: tf.endTime }
@@ -3618,6 +3646,10 @@ function buildProposalItems(
       ...(cupProposalDebug ? { cupProposalDebug } : {}),
       ...(tf
         ? {
+            importCategory: "travel" as const,
+            ...(tf.origin === "Ukjent" && tf.destination === "Ukjent"
+              ? { travelRouteUncertain: true }
+              : {}),
             inferredEndTime: tf.inferredEndTime,
             startTimeSource: tf.startTimeSource,
             endTimeSource: tf.endTimeSource,
@@ -4296,6 +4328,32 @@ function buildProposalItems(
   if (items.length === 0) {
     const today = new Date().toISOString().slice(0, 10);
     items.push(buildEventItem(today, null, null, null, undefined, null, null, null, null));
+  }
+
+  const isoForExtraTravel =
+    preferredDateForTravel ??
+    result.schedule
+      .map((s) => resolveDate(s.date, s.label))
+      .find((x): x is string => Boolean(x)) ??
+    result.scheduleByDay
+      .map((d) => resolveDate(d.date, d.dayLabel))
+      .find((x): x is string => Boolean(x)) ??
+    new Date().toISOString().slice(0, 10);
+
+  while (travelLegConsumed < travelFlightLegs.length) {
+    items.push(
+      buildEventItem(
+        isoForExtraTravel,
+        null,
+        null,
+        null,
+        undefined,
+        null,
+        null,
+        null,
+        null,
+      ),
+    );
   }
 
   return items;
@@ -7332,7 +7390,8 @@ function toPortalBundle(
     : schoolWeekOverlayProposal
       ? overlayHomeworkItems
       : buildProposalItems(result, sourceType, portalImport);
-  const items = rawProposalItems.map((it) =>
+  const travelDeduped = dedupePortalFlightDepartureArrivalEvents(rawProposalItems);
+  const items = travelDeduped.map((it) =>
     it.kind === "event" ? normalizePortalProposalEventItem(it) : it,
   );
   const secondaryTaskCandidates =
