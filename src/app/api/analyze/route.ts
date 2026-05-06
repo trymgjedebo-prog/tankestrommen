@@ -1513,6 +1513,16 @@ function collectTextBlobForTravelInference(result: AIAnalysisResult): string {
   return parts.join("\n");
 }
 
+function looksLikeFlightEventTitle(title: string): boolean {
+  const n = normalizeNorwegianLetters(title);
+  return /\b(flyreise|flight|boarding\s*pass|boardingpass|flybillett|e-?\s*ticket)\b/i.test(n);
+}
+
+function hasExplicitTimeRange(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  return /\d{1,2}[.:]\d{2}\s*[-–]\s*\d{1,2}[.:]\d{2}/.test(raw);
+}
+
 function extractAttendanceTimeFromDay(day: DayScheduleEntry): string | null {
   const pool = [day.time ?? "", day.details ?? "", ...day.highlights, ...day.notes].join("\n");
   const m = /\boppm[oø]te(?:\s*kl\.?)?\s*(\d{1,2})[.:](\d{2})\b/i.exec(pool);
@@ -1745,6 +1755,7 @@ type PortalEventItem = {
         | "explicit_arrival_time"
         | "computed_from_duration"
         | "missing_or_unreadable";
+      displayTimeLabel?: string;
       /** Speiler `event.requiresManualTimeReview` for metadata-lesere. */
       requiresManualTimeReview?: boolean;
       documentExtractedPersonName?: string;
@@ -3764,6 +3775,8 @@ async function buildProposalItems(
             end: null as string | null,
             requiresManualTimeReview: true,
             endTimeSource: "missing_or_unreadable" as const,
+            inferredEndTime: false,
+            displayTimeLabel: "Sluttid ikke oppgitt",
           }
         : null;
     const eventTitleRaw =
@@ -3771,6 +3784,20 @@ async function buildProposalItems(
     const eventTitle =
       !tf && cupProposalDebug ? buildCupChildCalendarTitle(result, titleSuffix) : eventTitleRaw;
     const eventTitleSanitized = sanitizeCalendarLikeTitle(eventTitle, 60);
+    const enforceFlightNoTfFallback =
+      !tf &&
+      looksLikeFlightEventTitle(eventTitleRaw) &&
+      !hasExplicitTimeRange(time) &&
+      start !== null
+        ? {
+            end: null as string | null,
+            requiresManualTimeReview: true,
+            endTimeSource: "missing_or_unreadable" as const,
+            inferredEndTime: false,
+            displayTimeLabel: "Sluttid ikke oppgitt",
+          }
+        : null;
+    const enforceFlightNoEnd = enforceFlightNoArrivalNoDuration ?? enforceFlightNoTfFallback;
     const documentExtractedName = asNullableString(tf?.passengerName);
     const personResolution = resolvePortalEventPersonMatch({
       documentExtractedName,
@@ -3794,13 +3821,15 @@ async function buildProposalItems(
           : {}),
         title: eventTitleSanitized.title,
         start,
-        end: enforceFlightNoArrivalNoDuration ? enforceFlightNoArrivalNoDuration.end : travelEndValue,
+        end: enforceFlightNoEnd ? enforceFlightNoEnd.end : travelEndValue,
         ...(tf
           ? {
-              requiresManualTimeReview: enforceFlightNoArrivalNoDuration
+              requiresManualTimeReview: enforceFlightNoEnd
                 ? true
                 : tf.requiresManualTimeReview,
             }
+          : enforceFlightNoTfFallback
+            ? { requiresManualTimeReview: true }
           : {}),
       },
     };
@@ -3835,14 +3864,17 @@ async function buildProposalItems(
             ...(tf.origin === "Ukjent" && tf.destination === "Ukjent"
               ? { travelRouteUncertain: true }
               : {}),
-            inferredEndTime: tf.inferredEndTime,
+            inferredEndTime: enforceFlightNoEnd
+              ? enforceFlightNoEnd.inferredEndTime
+              : tf.inferredEndTime,
             startTimeSource: tf.startTimeSource,
-            endTimeSource: enforceFlightNoArrivalNoDuration
-              ? enforceFlightNoArrivalNoDuration.endTimeSource
+            endTimeSource: enforceFlightNoEnd
+              ? enforceFlightNoEnd.endTimeSource
               : tf.endTimeSource,
-            requiresManualTimeReview: enforceFlightNoArrivalNoDuration
+            requiresManualTimeReview: enforceFlightNoEnd
               ? true
               : tf.requiresManualTimeReview,
+            ...(enforceFlightNoEnd ? { displayTimeLabel: enforceFlightNoEnd.displayTimeLabel } : {}),
             travel: travelFlightMetadataFromInference(tf),
             ...(personResolution.documentExtractedPersonName
               ? {
@@ -3850,6 +3882,27 @@ async function buildProposalItems(
                   ...(tf.passengerName ? { passengerName: tf.passengerName } : {}),
                 }
               : {}),
+          }
+        : {}),
+      ...(!tf && enforceFlightNoTfFallback
+        ? {
+            importCategory: "travel" as const,
+            inferredEndTime: false,
+            endTimeSource: "missing_or_unreadable" as const,
+            requiresManualTimeReview: true,
+            displayTimeLabel: "Sluttid ikke oppgitt",
+            travel: {
+              type: "flight" as const,
+              origin: "Ukjent",
+              originCity: null,
+              destination: "Ukjent",
+              destinationCity: null,
+              departureTime: start,
+              arrivalTime: null,
+              durationMinutes: null,
+              passengerName: null,
+              flightNumber: null,
+            },
           }
         : {}),
     };

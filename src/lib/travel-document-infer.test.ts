@@ -183,6 +183,25 @@ arrival 11:30
     expect(r!.inferredEndTime).toBe(false);
   });
 
+  it("does not treat gate closes/boarding/check-in as arrival end", () => {
+    const blob = `
+Boarding pass
+OSL Oslo
+LHR London
+departure 06:05
+gate closes 05:45
+boarding 05:35
+check-in 04:50
+`;
+    const r = inferTravelFlightFromBlob(blob);
+    expect(r).not.toBeNull();
+    expect(r!.departureTime).toBe("06:05");
+    expect(r!.arrivalTime).toBeNull();
+    expect(r!.endTime).toBeNull();
+    expect(r!.endTimeSource).toBe("missing_or_unreadable");
+    expect(r!.requiresManualTimeReview).toBe(true);
+  });
+
   it("ignores pseudo-IATA month tokens in glob — ikke Flyreise JUN–JUN", () => {
     const blob = `
 Boarding pass
