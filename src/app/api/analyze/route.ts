@@ -5012,6 +5012,65 @@ function dedupeLinesByNormalizedKey(lines: string[]): string[] {
   return out;
 }
 
+function normalizeChildSegmentTitleForDedupe(title: string): string {
+  return normalizeNorwegianLetters(normalizeSpace(title)).toLowerCase();
+}
+
+function mergeEventNotesUnique(a?: string, b?: string): string | undefined {
+  const parts = [a ?? "", b ?? ""]
+    .flatMap((v) => v.split(/\n{2,}/))
+    .map((v) => normalizeSpace(v))
+    .filter(Boolean);
+  if (parts.length === 0) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const p of parts) {
+    const k = normalizeNorwegianLetters(p).toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(p);
+  }
+  return out.join("\n\n");
+}
+
+function dedupeArrangementChildEvents(items: PortalProposalItem[]): PortalProposalItem[] {
+  const out: PortalProposalItem[] = [];
+  const seen = new Map<string, PortalEventItem>();
+
+  for (const item of items) {
+    if (item.kind !== "event") {
+      out.push(item);
+      continue;
+    }
+    const md = item.event.metadata;
+    if (!md?.isArrangementChild) {
+      out.push(item);
+      continue;
+    }
+
+    const key = [
+      md.arrangementBlockGroupId ?? "",
+      md.parentArrangementStableKey ?? "",
+      item.event.date ?? "",
+      item.event.start ?? "",
+      item.event.end ?? "",
+      normalizeChildSegmentTitleForDedupe(item.event.title ?? ""),
+    ].join("|");
+
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, item);
+      out.push(item);
+      continue;
+    }
+
+    const mergedNotes = mergeEventNotesUnique(existing.event.notes, item.event.notes);
+    if (mergedNotes) existing.event.notes = mergedNotes;
+  }
+
+  return out;
+}
+
 /** Bevar linje ordrett; dedupe på normalisert fullstreng (for activity_plan preserve). */
 function dedupeOverlayLinesRawNorm(lines: string[]): string[] {
   const seen = new Set<string>();
@@ -7600,16 +7659,17 @@ async function toPortalBundle(
       });
     }
   }
+  const dedupedItems = dedupeArrangementChildEvents(items);
   const secondaryTaskCandidates =
     !schoolProfileProposal && !schoolWeekOverlayProposal
-      ? buildSecondaryPortalTaskCandidates(result, items, resolveDate, resolvedYear, sourceType)
+      ? buildSecondaryPortalTaskCandidates(result, dedupedItems, resolveDate, resolvedYear, sourceType)
       : [];
   const pipelineSnapshot = {
     extractedTextLength: result.extractedText?.raw?.length ?? 0,
     documentKind: documentKind ?? null,
     hasSchoolWeeklyProfile: Boolean(result.schoolWeeklyProfile),
     schoolWeekOverlayBuilt: Boolean(schoolWeekOverlayProposal),
-    itemsLength: items.length,
+    itemsLength: dedupedItems.length,
     secondaryTaskCandidatesLength: secondaryTaskCandidates.length,
     schoolProfileDecision: schoolProfileDecision.reason,
     schoolWeekOverlayDecision: schoolWeekOverlayDecision.reason,
@@ -7624,7 +7684,7 @@ async function toPortalBundle(
     schoolWeekOverlaySignals: schoolWeekOverlayDecision.signals ?? [],
     hasSchoolProfileProposal: Boolean(schoolProfileProposal),
     hasSchoolWeekOverlayProposal: Boolean(schoolWeekOverlayProposal),
-    itemCount: items.length,
+    itemCount: dedupedItems.length,
   });
   const debugPayload: Record<string, unknown> = {};
   if (includeDebug) {
@@ -7706,7 +7766,7 @@ async function toPortalBundle(
       generatedAt: new Date().toISOString(),
       importRunId: randomUUID(),
     },
-    items,
+    items: dedupedItems,
     fileErrors,
     ...(secondaryTaskCandidates.length > 0 ? { secondaryTaskCandidates } : {}),
     ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
