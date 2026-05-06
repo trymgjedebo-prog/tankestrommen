@@ -815,6 +815,36 @@ function sanitizeCalendarLikeTitle(rawTitle: string, maxLen = 60): TitleSanitiza
   };
 }
 
+function stripYearFromChildTitleBase(raw: string): string {
+  return normalizeSpace(raw)
+    .replace(/\b20\d{2}\b/g, "")
+    .replace(/\s*[–—-]\s*\d{1,2}\s*$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s*[–—-]\s*$/g, "")
+    .trim();
+}
+
+function normalizeWeekdayLabel(raw: string | null | undefined): string {
+  const s = normalizeSpace(raw ?? "");
+  if (!s) return "dag";
+  const n = normalizeNorwegianLetters(s).toLowerCase();
+  if (n.includes("mandag")) return "mandag";
+  if (n.includes("tirsdag")) return "tirsdag";
+  if (n.includes("onsdag")) return "onsdag";
+  if (n.includes("torsdag")) return "torsdag";
+  if (n.includes("fredag")) return "fredag";
+  if (n.includes("lordag")) return "lørdag";
+  if (n.includes("sondag")) return "søndag";
+  return s;
+}
+
+function buildCupChildCalendarTitle(result: AIAnalysisResult, dayLabel: string | null | undefined): string {
+  const core = deriveArrangementCoreTitleForLink(result).coreTitle;
+  const base = stripYearFromChildTitleBase(core || result.title || "Arrangement");
+  const weekday = normalizeWeekdayLabel(dayLabel);
+  return `${base || "Arrangement"} – ${weekday}`;
+}
+
 const NORWEGIAN_MONTH_NAMES = [
   "januar",
   "februar",
@@ -3736,8 +3766,10 @@ async function buildProposalItems(
             endTimeSource: "missing_or_unreadable" as const,
           }
         : null;
-    const eventTitle =
+    const eventTitleRaw =
       tf?.proposedTitle ?? buildEventProposalTitle(result, titleSuffix, dayContext);
+    const eventTitle =
+      !tf && cupProposalDebug ? buildCupChildCalendarTitle(result, titleSuffix) : eventTitleRaw;
     const eventTitleSanitized = sanitizeCalendarLikeTitle(eventTitle, 60);
     const documentExtractedName = asNullableString(tf?.passengerName);
     const personResolution = resolvePortalEventPersonMatch({
@@ -3789,11 +3821,12 @@ async function buildProposalItems(
       ...(schoolContext ? { schoolContext } : {}),
       ...(schoolDayOverride ? { schoolDayOverride } : {}),
       ...(cupProposalDebug ? { cupProposalDebug } : {}),
-      ...(eventTitleSanitized.isTentative
+      ...((eventTitleSanitized.isTentative || Boolean(cupProposalDebug?.conditionalDayDetected))
         ? {
             isTentative: true,
-            tentativeReason: eventTitleSanitized.tentativeReason,
-            statusLabel: eventTitleSanitized.statusLabel,
+            tentativeReason:
+              eventTitleSanitized.tentativeReason ?? "Avhenger av sluttspill",
+            statusLabel: eventTitleSanitized.statusLabel ?? "Foreløpig",
           }
         : {}),
       ...(tf
@@ -3930,9 +3963,7 @@ async function buildProposalItems(
         day.dayLabel ?? "",
       ].join(" ");
       const conditionalDay = cupLike && isConditionalTournamentText(dayBlob);
-      const titleSuffix = conditionalDay
-        ? `${day.dayLabel ?? "Dag"} (usikker / betinget — ikke fast opplegg)`
-        : day.dayLabel;
+      const titleSuffix = day.dayLabel;
 
       let explicitStartEnd: { start: string; end: string } | null = null;
       if (cupLike) {
@@ -5036,6 +5067,7 @@ function mergeEventNotesUnique(a?: string, b?: string): string | undefined {
 function dedupeArrangementChildEvents(items: PortalProposalItem[]): PortalProposalItem[] {
   const out: PortalProposalItem[] = [];
   const seen = new Map<string, PortalEventItem>();
+  const seenByDay = new Map<string, PortalEventItem>();
 
   for (const item of items) {
     if (item.kind !== "event") {
@@ -5056,16 +5088,36 @@ function dedupeArrangementChildEvents(items: PortalProposalItem[]): PortalPropos
       item.event.end ?? "",
       normalizeChildSegmentTitleForDedupe(item.event.title ?? ""),
     ].join("|");
+    const normalizedTitle = normalizeChildSegmentTitleForDedupe(item.event.title ?? "");
+    const dayToken = normalizeWeekdayLabel(
+      normalizedTitle.split("–").slice(-1)[0] ?? normalizedTitle,
+    );
+    const dayKey = [
+      md.parentArrangementStableKey ?? md.arrangementBlockGroupId ?? "",
+      item.event.date ?? "",
+      dayToken,
+    ].join("|");
 
     const existing = seen.get(key);
-    if (!existing) {
+    const existingByDay = seenByDay.get(dayKey);
+    if (!existing && !existingByDay) {
       seen.set(key, item);
+      seenByDay.set(dayKey, item);
       out.push(item);
       continue;
     }
 
-    const mergedNotes = mergeEventNotesUnique(existing.event.notes, item.event.notes);
-    if (mergedNotes) existing.event.notes = mergedNotes;
+    const target = existing ?? existingByDay!;
+    const mergedNotes = mergeEventNotesUnique(target.event.notes, item.event.notes);
+    if (mergedNotes) target.event.notes = mergedNotes;
+    if (item.event.metadata?.isTentative) {
+      target.event.metadata = target.event.metadata ?? {};
+      target.event.metadata.isTentative = true;
+      if (!target.event.metadata.statusLabel) target.event.metadata.statusLabel = "Foreløpig";
+      if (!target.event.metadata.tentativeReason && item.event.metadata.tentativeReason) {
+        target.event.metadata.tentativeReason = item.event.metadata.tentativeReason;
+      }
+    }
   }
 
   return out;
