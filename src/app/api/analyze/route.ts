@@ -27,13 +27,15 @@ import {
   type PortalImportContext,
 } from "@/lib/portal-import-person";
 import {
-  asNullableString,
-  coerceAIAnalysisResultForPortal,
-} from "@/lib/analysis-null-safety";
-import {
   applyTankestromAnalyzeHeaders,
   getTankestromApiVersion,
 } from "@/lib/tankestrom-api-version";
+
+function asNullableString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
 
 /**
  * A-plan (`activity_plan`): mer tekstbevarende overlay — høyere linjetak, behold seksjonsledd,
@@ -7358,6 +7360,7 @@ async function toPortalBundle(
   includeDebug: boolean,
   portalImport: PortalImportContext = { knownPersons: [] },
 ): Promise<Record<string, unknown>> {
+  const { coerceAIAnalysisResultForPortal } = await import("@/lib/analysis-null-safety");
   const result = coerceAIAnalysisResultForPortal(resultIn);
   const { proposal: schoolProfileProposal, decision: schoolProfileDecision } = decideSchoolProfileProposal(
     result,
