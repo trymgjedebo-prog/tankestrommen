@@ -221,6 +221,17 @@ function docxDataUrlToBuffer(dataUrl: string): Buffer {
   return Buffer.from(m[2], "base64");
 }
 
+function parseImageDataUrlMeta(dataUrl: string): { mimeType: string | null; size: number | null } {
+  const trimmed = dataUrl.trim();
+  const m = /^data:([^;]+);base64,(.+)$/i.exec(trimmed);
+  if (!m) return { mimeType: null, size: null };
+  const mimeType = m[1]?.toLowerCase() ?? null;
+  const payload = m[2] ?? "";
+  // base64 expands payload ~4/3; use conservative estimate.
+  const size = Math.max(0, Math.floor((payload.length * 3) / 4));
+  return { mimeType, size };
+}
+
 async function analyzeFromExtractedText(
   rawText: string,
   preamble: string,
@@ -1565,6 +1576,10 @@ type PortalEventItem = {
     notes?: string;
     location?: string;
     metadata?: {
+      debug?: {
+        childSegmentsGenerated?: boolean;
+        childSegmentCount?: number;
+      };
       /** Vanlig skolekontekst for berikelse av eksisterende skoleblokk. */
       schoolContext?: EventSchoolContext;
       /**
@@ -1588,6 +1603,14 @@ type PortalEventItem = {
       endDate?: string;
       /** Parent er heldags over intervallet; unngå at klient tolker første dags klokkeslett som hovedtid. */
       multiDayAllDay?: boolean;
+      /** Container/event-card for arrangement med egne child-segmenter. */
+      isArrangementParent?: boolean;
+      /** Faktisk segment/event under arrangement-parent. */
+      isArrangementChild?: boolean;
+      /** Kobling fra child til parent-arrangement. */
+      parentArrangementStableKey?: string;
+      /** Parent skal være review/container, ikke stor kalenderblokk. */
+      exportAsCalendarEvent?: boolean;
       /** Antall programpunkter / underblokker (samsvarer typisk med lengden på `embeddedSchedule`). */
       embeddedSchedulePointCount?: number;
       /**
@@ -3533,8 +3556,18 @@ async function buildProposalItems(
   const travelBlob = collectTextBlobForTravelInference(result);
   let travelFlightLegs: TravelFlightInference[] = [];
   if (!isSchoolPlanBundleContext(result, weekPlanLike) && !looksLikeCupOrSpondBroadcast(result)) {
-    const { inferTravelFlightsFromBlob } = await import("@/lib/travel-document-infer");
-    travelFlightLegs = inferTravelFlightsFromBlob(travelBlob);
+    console.info("[Tankestrom analyze stage]", { stage: "travel_infer_start" });
+    try {
+      const { inferTravelFlightsFromBlob } = await import("@/lib/travel-document-infer");
+      travelFlightLegs = inferTravelFlightsFromBlob(travelBlob);
+      console.info("[Tankestrom analyze stage]", {
+        stage: "travel_infer_done",
+        inferredFlights: travelFlightLegs.length,
+      });
+    } catch (error) {
+      console.error("[Tankestrom analyze travel infer failed]", error);
+      throw error;
+    }
   }
   const preferredDateForTravel =
     result.scheduleByDay
@@ -4205,10 +4238,35 @@ async function buildProposalItems(
       attachEmbeddedScheduleToHostEvent(cupParentEvent, true, {
         endDateIso: lastSeg.date,
       });
+      const parentStableKey = cupParentEvent.event.metadata?.arrangementStableKey ?? null;
+      if (cupParentEvent.event.metadata) {
+        cupParentEvent.event.metadata.isArrangementParent = true;
+        cupParentEvent.event.metadata.exportAsCalendarEvent = false;
+      }
+      const childSegments =
+        cupMergeBuffer?.filter((it): it is PortalEventItem => it.kind === "event") ?? [];
+      for (const child of childSegments) {
+        child.event.metadata = child.event.metadata ?? {};
+        child.event.metadata.isArrangementChild = true;
+        if (parentStableKey) {
+          child.event.metadata.parentArrangementStableKey = parentStableKey;
+        }
+        if (cupParentEvent.event.metadata?.arrangementBlockGroupId) {
+          child.event.metadata.arrangementBlockGroupId =
+            cupParentEvent.event.metadata.arrangementBlockGroupId;
+        }
+      }
+      if (cupParentEvent.event.metadata) {
+        cupParentEvent.event.metadata.debug = {
+          ...(cupParentEvent.event.metadata.debug ?? {}),
+          childSegmentsGenerated: childSegments.length > 0,
+          childSegmentCount: childSegments.length,
+        };
+      }
       items.unshift(cupParentEvent);
       if (cupMergeBuffer) {
         for (const it of cupMergeBuffer) {
-          if (it.kind === "task") items.push(it);
+          items.push(it);
         }
       }
     } else if (cupParentMergeEligible && cupMergeBuffer) {
@@ -7585,6 +7643,7 @@ async function wrapResponse(
   if (portalMode) {
     const fileName = resolvePortalFileNameFromExtra(extra, portalMeta);
     try {
+      console.info("[Tankestrom analyze stage]", { stage: "portal_bundle_start", sourceType });
       const bundle = await toPortalBundle(
         includeDebug ? result : stripInternalAnalysisDebug(result),
         sourceType,
@@ -7997,29 +8056,106 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
           { status: 400 }
         ));
       }
+      const imageMeta = parseImageDataUrlMeta(image);
+      console.info("[Tankestrom analyze stage]", {
+        stage: "image_received",
+        fileName: typeof fileName === "string" ? fileName : null,
+        mimeType: imageMeta.mimeType,
+        size: imageMeta.size,
+      });
+      if (imageMeta.mimeType === "image/webp") {
+        return withCors(NextResponse.json(
+          { error: "WebP støttes ikke ennå. Last opp PNG/JPG." },
+          { status: 415 },
+        ), "webp_not_supported");
+      }
       if (image.length > 11_000_000) {
         return withCors(NextResponse.json(
           { error: "Bildet er for stort. Maks filstørrelse er 8 MB." },
           { status: 413 }
         ));
       }
-      stage = "analyze_image_openai";
-      const { analyzeImageWithRouting } = await import("@/lib/ai/analyze-image");
-      const routing = await analyzeImageWithRouting(image, {
-        documentKind: documentKind ?? undefined,
-        sourceRoute: "image",
-      });
-      const result: AIAnalysisResult = {
-        ...routing.result,
-        analysisModelTrace: routing.modelTrace,
-      };
-      stage = "wrap_portal_bundle_image";
-      return withCors(
-        await wrapResponse(result, portalMode, "image", documentKind, undefined, debug, portalImport, {
-          fileName: typeof fileName === "string" ? fileName : null,
-        }),
-        "image_success",
-      );
+      let result: AIAnalysisResult;
+      try {
+        stage = "analyze_image_openai";
+        console.info("[Tankestrom analyze stage]", { stage: "image_to_model_start" });
+        const { analyzeImageWithRouting } = await import("@/lib/ai/analyze-image");
+        const routing = await analyzeImageWithRouting(image, {
+          documentKind: documentKind ?? undefined,
+          sourceRoute: "image",
+        });
+        console.info("[Tankestrom analyze stage]", {
+          stage: "image_to_model_done",
+          initialModel: routing.modelTrace?.initialModel ?? null,
+          finalModel: routing.modelTrace?.finalModel ?? null,
+          escalated: routing.modelTrace?.escalated ?? null,
+        });
+        result = {
+          ...routing.result,
+          analysisModelTrace: routing.modelTrace,
+        };
+      } catch (error) {
+        const debugMessage =
+          error instanceof Error ? error.stack || error.message : String(error);
+        console.error("[Tankestrom analyze image_to_model failed]", error);
+        return withCors(
+          NextResponse.json(
+            {
+              ok: false,
+              errorCode: "IMAGE_ANALYZE_FAILED",
+              message: "Kunne ikke analysere bildet.",
+              debugMessage,
+              stage: "image_to_model",
+              fileErrors: [
+                {
+                  fileName: typeof fileName === "string" ? fileName : "ukjent",
+                  errorCode: "IMAGE_ANALYZE_FAILED",
+                  message: "Kunne ikke analysere bildet.",
+                  debugMessage,
+                  stage: "image_to_model",
+                },
+              ],
+            },
+            { status: 500 },
+          ),
+          "image_to_model_failed",
+        );
+      }
+      try {
+        stage = "wrap_portal_bundle_image";
+        return withCors(
+          await wrapResponse(result, portalMode, "image", documentKind, undefined, debug, portalImport, {
+            fileName: typeof fileName === "string" ? fileName : null,
+          }),
+          "image_success",
+        );
+      } catch (error) {
+        const debugMessage =
+          error instanceof Error ? error.stack || error.message : String(error);
+        console.error("[Tankestrom analyze portal bundle failed]", error);
+        return withCors(
+          NextResponse.json(
+            {
+              ok: false,
+              errorCode: "PORTAL_BUNDLE_FAILED",
+              message: "Kunne ikke bygge portalrespons.",
+              debugMessage,
+              stage: "portal_bundle",
+              fileErrors: [
+                {
+                  fileName: typeof fileName === "string" ? fileName : "ukjent",
+                  errorCode: "PORTAL_BUNDLE_FAILED",
+                  message: "Kunne ikke bygge portalrespons.",
+                  debugMessage,
+                  stage: "portal_bundle",
+                },
+              ],
+            },
+            { status: 500 },
+          ),
+          "portal_bundle_failed",
+        );
+      }
     }
 
     return withCors(NextResponse.json(
