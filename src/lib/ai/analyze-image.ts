@@ -1,4 +1,10 @@
 import OpenAI from "openai";
+import { currentSpan, traced, wrapOpenAIv4 } from "braintrust";
+import { ensureBraintrustLoggerForProject, TANKESTROM_BRAINTRUST_PROJECT } from "@/lib/braintrust-init";
+import {
+  BT_TRUNC_RAW_COMPLETION,
+  truncateForBraintrust,
+} from "@/lib/braintrust-analyze-telemetry";
 import type {
   AIAnalysisResult,
   AnalysisModelTrace,
@@ -17,6 +23,8 @@ import type {
 import {
   analysisLooksWeakForEscalation,
   emptyAnalysisModelTrace,
+  getImageInitialAnalysisModel,
+  getLightAnalysisModel,
   getStrongAnalysisModel,
   selectInitialAnalysisModel,
   type AnalysisModelRoutingInput,
@@ -1969,7 +1977,13 @@ function getOpenAIClient(): OpenAI {
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY er ikke satt i miljøvariabler");
   }
-  return new OpenAI({ apiKey });
+  const client = new OpenAI({ apiKey });
+  if (!process.env.BRAINTRUST_API_KEY?.trim()) {
+    return client;
+  }
+  ensureBraintrustLoggerForProject();
+  // Braintrust-typer er litt bak OpenAI SDK 4.x; runtime er kompatibel.
+  return wrapOpenAIv4(client as never) as unknown as OpenAI;
 }
 
 /**
@@ -2072,7 +2086,20 @@ async function analyzeImageWithModel(
     temperature: 0.2,
   });
 
-  return parseAIResponse(completion.choices[0]?.message?.content);
+  const raw = completion.choices[0]?.message?.content;
+  const span = currentSpan();
+  if (span && raw) {
+    span.log({
+      metadata: {
+        completionModel: model,
+        modality: "image",
+        rawCompletionChars: raw.length,
+        rawCompletionTrunc: truncateForBraintrust(raw, BT_TRUNC_RAW_COMPLETION),
+      },
+    });
+  }
+
+  return parseAIResponse(raw);
 }
 
 async function analyzeTextWithModel(
@@ -2095,7 +2122,20 @@ async function analyzeTextWithModel(
     temperature: 0.2,
   });
 
-  return parseAIResponse(completion.choices[0]?.message?.content);
+  const raw = completion.choices[0]?.message?.content;
+  const span = currentSpan();
+  if (span && raw) {
+    span.log({
+      metadata: {
+        completionModel: model,
+        modality: "text",
+        rawCompletionChars: raw.length,
+        rawCompletionTrunc: truncateForBraintrust(raw, BT_TRUNC_RAW_COMPLETION),
+      },
+    });
+  }
+
+  return parseAIResponse(raw);
 }
 
 const DOCUMENT_IMAGE_TRANSCRIBE_PROMPT = `Du ser et utsnitt fra et dokument (Word eller PDF) som norske foreldre skal forstå.
@@ -2130,6 +2170,17 @@ async function transcribeDocumentImageWithModel(
     temperature: 0.1,
   });
   const content = completion.choices[0]?.message?.content;
+  const span = currentSpan();
+  if (span && content) {
+    span.log({
+      metadata: {
+        completionModel: model,
+        modality: "transcribe_image",
+        rawCompletionChars: content.length,
+        rawCompletionTrunc: truncateForBraintrust(content, BT_TRUNC_RAW_COMPLETION),
+      },
+    });
+  }
   try {
     const parsed = JSON.parse(content || "{}") as { transcription?: unknown };
     return typeof parsed.transcription === "string" ? parsed.transcription : "";
@@ -2149,13 +2200,29 @@ export async function transcribeDocumentImageForMerge(
   return transcribeDocumentImageWithModel(imageBase64, model);
 }
 
+type ModelCallTraceContext = {
+  sourceRoute: string;
+  documentKind?: string | null;
+  inputKind: "text" | "image";
+  inputApproxChars: number;
+  analysisResponseMode?: "portal" | "raw" | "unknown";
+};
+
 function runRoutedImageAnalysis(
   imageBase64: string,
   input: AnalysisModelRoutingInput,
 ): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
   const initial = selectInitialAnalysisModel(input);
-  return runRoutedVisionLikeAnalysis(initial, (model) =>
-    analyzeImageWithModel(imageBase64, model),
+  return runRoutedVisionLikeAnalysis(
+    initial,
+    (model) => analyzeImageWithModel(imageBase64, model),
+    {
+      sourceRoute: input.sourceRoute,
+      documentKind: input.documentKind ?? null,
+      inputKind: "image",
+      inputApproxChars: imageBase64.length,
+      analysisResponseMode: input.analysisResponseMode ?? "unknown",
+    },
   );
 }
 
@@ -2164,25 +2231,51 @@ function runRoutedTextAnalysis(
   input: AnalysisModelRoutingInput,
 ): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
   const initial = selectInitialAnalysisModel(input);
-  return runRoutedVisionLikeAnalysis(initial, (model) =>
-    analyzeTextWithModel(text, model),
+  return runRoutedVisionLikeAnalysis(
+    initial,
+    (model) => analyzeTextWithModel(text, model),
+    {
+      sourceRoute: input.sourceRoute,
+      documentKind: input.documentKind ?? null,
+      inputKind: "text",
+      inputApproxChars: text.length,
+      analysisResponseMode: input.analysisResponseMode ?? "unknown",
+    },
   );
 }
 
 /**
  * Felles retry: ved lett modell → én eskalering til sterk ved feil eller «svakt» resultat.
  */
-async function runRoutedVisionLikeAnalysis(
+async function runRoutedVisionLikeAnalysisCore(
   initial: ReturnType<typeof selectInitialAnalysisModel>,
   runWithModel: (model: string) => Promise<AIAnalysisResult>,
+  modelCallContext: ModelCallTraceContext,
 ): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
   const strong = getStrongAnalysisModel();
   const trace = emptyAnalysisModelTrace(initial);
 
-  console.log("[analysis-model] initial", {
-    model: initial.model,
+  console.info("[Tankestrom model selected]", {
+    sourceType: modelCallContext.sourceRoute,
+    mode: modelCallContext.analysisResponseMode ?? "unknown",
     tier: initial.tier,
+    selectedModel: initial.model,
     reason: initial.reason,
+    envModelConfig: {
+      lightModel: process.env.TANKESTROM_LIGHT_MODEL,
+      defaultModel: process.env.TANKESTROM_DEFAULT_MODEL,
+      imageModel: process.env.TANKESTROM_IMAGE_MODEL,
+    },
+    effectiveModels: {
+      light: getLightAnalysisModel(),
+      strong: getStrongAnalysisModel(),
+      imageInitial: getImageInitialAnalysisModel(),
+    },
+    openaiModelEnv: {
+      light: process.env.OPENAI_ANALYSIS_MODEL_LIGHT,
+      strong: process.env.OPENAI_ANALYSIS_MODEL_STRONG,
+      image: process.env.OPENAI_ANALYSIS_MODEL_IMAGE,
+    },
   });
 
   try {
@@ -2214,6 +2307,53 @@ async function runRoutedVisionLikeAnalysis(
     }
     throw err;
   }
+}
+
+async function runRoutedVisionLikeAnalysis(
+  initial: ReturnType<typeof selectInitialAnalysisModel>,
+  runWithModel: (model: string) => Promise<AIAnalysisResult>,
+  modelCallContext: ModelCallTraceContext,
+): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
+  if (!process.env.BRAINTRUST_API_KEY?.trim()) {
+    return runRoutedVisionLikeAnalysisCore(initial, runWithModel, modelCallContext);
+  }
+  ensureBraintrustLoggerForProject();
+  return traced(
+    async (span) => {
+      span.log({
+        input: {
+          projectName: TANKESTROM_BRAINTRUST_PROJECT,
+          ...modelCallContext,
+          initialModel: initial.model,
+          tier: initial.tier,
+          routerReason: initial.reason,
+        },
+      });
+      try {
+        const out = await runRoutedVisionLikeAnalysisCore(initial, runWithModel, modelCallContext);
+        span.log({
+          output: {
+            titleSnippet: truncateForBraintrust(out.result.title ?? "", 200),
+            descriptionSnippet: truncateForBraintrust(out.result.description ?? "", 400),
+            scheduleByDayCount: out.result.scheduleByDay?.length ?? 0,
+            scheduleCount: out.result.schedule?.length ?? 0,
+            model: out.modelTrace.finalModel ?? out.modelTrace.initialModel ?? initial.model,
+            tier: initial.tier,
+            escalated: Boolean(out.modelTrace.escalated),
+          },
+        });
+        return out;
+      } catch (err) {
+        span.log({
+          output: {
+            error: err instanceof Error ? err.message : String(err),
+          },
+        });
+        throw err;
+      }
+    },
+    { name: "model_call" },
+  );
 }
 
 /** Bildeanalyse med modell-routing (lett/sterk + eskalering). */

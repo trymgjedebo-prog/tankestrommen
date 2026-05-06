@@ -16,23 +16,57 @@ export type AnalysisSourceRoute = "image" | "text" | "pdf" | "docx";
 export interface AnalysisModelRoutingInput {
   documentKind?: AnalysisDocumentKind | null;
   sourceRoute: AnalysisSourceRoute;
+  /**
+   * Kun logging / observability: om svaret pakkes som portal-bundle eller rå JSON.
+   * Påvirker ikke modellvalg i dag.
+   */
+  analysisResponseMode?: "portal" | "raw" | "unknown";
 }
 
 const WEAK_CONFIDENCE_THRESHOLD = 0.42;
 
-function envModel(key: string, fallback: string): string {
-  const v = process.env[key]?.trim();
-  return v && v.length > 0 ? v : fallback;
+function firstDefinedEnv(...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const v = process.env[key]?.trim();
+    if (v) return v;
+  }
+  return undefined;
 }
 
-/** Lett / rask modell (standard: mini). Overstyr med OPENAI_ANALYSIS_MODEL_LIGHT. */
+/**
+ * Lett modell (tekst/PDF/Word/auto, og bilde når ikke annet er satt).
+ * Prioritet: OPENAI_ANALYSIS_MODEL_LIGHT → TANKESTROM_LIGHT_MODEL → gpt-4o-mini
+ */
 export function getLightAnalysisModel(): string {
-  return envModel("OPENAI_ANALYSIS_MODEL_LIGHT", "gpt-4o-mini");
+  return (
+    firstDefinedEnv("OPENAI_ANALYSIS_MODEL_LIGHT", "TANKESTROM_LIGHT_MODEL") ??
+    "gpt-4o-mini"
+  );
 }
 
-/** Sterk modell for grid-timeplan m.m. Overstyr med OPENAI_ANALYSIS_MODEL_STRONG. */
+/**
+ * Sterk modell (timeplan/aktivitetsplan, og eskalering fra light).
+ * Prioritet: OPENAI_ANALYSIS_MODEL_STRONG → TANKESTROM_DEFAULT_MODEL → TANKESTROM_HEAVY_MODEL → gpt-4o
+ */
 export function getStrongAnalysisModel(): string {
-  return envModel("OPENAI_ANALYSIS_MODEL_STRONG", "gpt-4o");
+  return (
+    firstDefinedEnv(
+      "OPENAI_ANALYSIS_MODEL_STRONG",
+      "TANKESTROM_DEFAULT_MODEL",
+      "TANKESTROM_HEAVY_MODEL",
+    ) ?? "gpt-4o"
+  );
+}
+
+/**
+ * Første modell ved bildeanalyse (auto + sourceRoute image).
+ * Prioritet: OPENAI_ANALYSIS_MODEL_IMAGE → TANKESTROM_IMAGE_MODEL → samme som light.
+ */
+export function getImageInitialAnalysisModel(): string {
+  return (
+    firstDefinedEnv("OPENAI_ANALYSIS_MODEL_IMAGE", "TANKESTROM_IMAGE_MODEL") ??
+    getLightAnalysisModel()
+  );
 }
 
 /**
@@ -47,6 +81,7 @@ export function selectInitialAnalysisModel(
 ): { model: string; tier: "light" | "strong"; reason: string } {
   const light = getLightAnalysisModel();
   const strong = getStrongAnalysisModel();
+  const imageInitial = getImageInitialAnalysisModel();
   const kind = (input.documentKind ?? "auto").toLowerCase() as AnalysisDocumentKind;
 
   if (kind === "timetable") {
@@ -80,10 +115,13 @@ export function selectInitialAnalysisModel(
 
   // auto
   if (input.sourceRoute === "image") {
+    const sameAsLight = imageInitial === light;
     return {
-      model: light,
+      model: imageInitial,
       tier: "light",
-      reason: "auto:source:image→light_then_maybe_escalate",
+      reason: sameAsLight
+        ? "auto:source:image→light_then_maybe_escalate"
+        : "auto:source:image→image_env_then_maybe_escalate",
     };
   }
   return {

@@ -36,6 +36,18 @@ import {
   resolveNonFlightEventTimes,
 } from "@/lib/event-time-resolve";
 import { isUncertainDurationContext } from "@/lib/parse-duration";
+import { currentSpan, flush, startSpan, traced } from "braintrust";
+import { ensureBraintrustLoggerForProject, TANKESTROM_BRAINTRUST_PROJECT } from "@/lib/braintrust-init";
+import {
+  BT_TRUNC_BUNDLE_SNAPSHOT,
+  BT_TRUNC_TRAVEL_BLOB,
+  mergeTelemetrySourceType,
+  portalBundleJsonSnapshot,
+  safeFileNameForLog,
+  summarizePortalProposalItemsForBraintrust,
+  truncateForBraintrust,
+  type BraintrustPortalItem,
+} from "@/lib/braintrust-analyze-telemetry";
 
 function asNullableString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -266,6 +278,7 @@ async function analyzeFromExtractedText(
     const routing = await analyzeTextWithRouting(preamble + textForModel, {
       documentKind: documentKind ?? undefined,
       sourceRoute: sourceHint.type === "pdf" ? "pdf" : "docx",
+      analysisResponseMode: portalMode ? "portal" : "raw",
     });
     result = {
       ...routing.result,
@@ -3694,19 +3707,74 @@ async function buildProposalItems(
 
   const travelBlob = collectTextBlobForTravelInference(result);
   let travelFlightLegs: TravelFlightInference[] = [];
+  const btTravel = Boolean(process.env.BRAINTRUST_API_KEY?.trim());
   if (!isSchoolPlanBundleContext(result, weekPlanLike) && !looksLikeCupOrSpondBroadcast(result)) {
     console.info("[Tankestrom analyze stage]", { stage: "travel_infer_start" });
-    try {
-      const { inferTravelFlightsFromBlob } = await import("@/lib/travel-document-infer");
-      travelFlightLegs = inferTravelFlightsFromBlob(travelBlob);
-      console.info("[Tankestrom analyze stage]", {
-        stage: "travel_infer_done",
-        inferredFlights: travelFlightLegs.length,
-      });
-    } catch (error) {
-      console.error("[Tankestrom analyze travel infer failed]", error);
-      throw error;
+    if (btTravel) {
+      ensureBraintrustLoggerForProject();
+      await traced(
+        async (span) => {
+          span.log({
+            input: {
+              projectName: TANKESTROM_BRAINTRUST_PROJECT,
+              travelBlobChars: travelBlob.length,
+              travelBlobTrunc: truncateForBraintrust(travelBlob, BT_TRUNC_TRAVEL_BLOB),
+            },
+          });
+          try {
+            const { inferTravelFlightsFromBlob } = await import("@/lib/travel-document-infer");
+            travelFlightLegs = inferTravelFlightsFromBlob(travelBlob);
+            span.log({
+              output: {
+                inferredFlights: travelFlightLegs.length,
+                routesSample: travelFlightLegs.slice(0, 4).map((l) => ({
+                  origin: l.origin,
+                  destination: l.destination,
+                })),
+              },
+            });
+            console.info("[Tankestrom analyze stage]", {
+              stage: "travel_infer_done",
+              inferredFlights: travelFlightLegs.length,
+            });
+          } catch (error) {
+            console.error("[Tankestrom analyze travel infer failed]", error);
+            span.log({
+              output: {
+                error: error instanceof Error ? error.message : String(error),
+              },
+            });
+            throw error;
+          }
+        },
+        { name: "travel_infer" },
+      );
+    } else {
+      try {
+        const { inferTravelFlightsFromBlob } = await import("@/lib/travel-document-infer");
+        travelFlightLegs = inferTravelFlightsFromBlob(travelBlob);
+        console.info("[Tankestrom analyze stage]", {
+          stage: "travel_infer_done",
+          inferredFlights: travelFlightLegs.length,
+        });
+      } catch (error) {
+        console.error("[Tankestrom analyze travel infer failed]", error);
+        throw error;
+      }
     }
+  } else if (btTravel) {
+    ensureBraintrustLoggerForProject();
+    await traced(
+      async (span) => {
+        span.log({
+          output: {
+            skipped: true,
+            reason: "school_plan_bundle_or_cup_broadcast",
+          },
+        });
+      },
+      { name: "travel_infer" },
+    );
   }
   const preferredDateForTravel =
     result.scheduleByDay
@@ -7824,6 +7892,20 @@ async function toPortalBundle(
   includeDebug: boolean,
   portalImport: PortalImportContext = { knownPersons: [] },
 ): Promise<Record<string, unknown>> {
+  const btPortal = Boolean(process.env.BRAINTRUST_API_KEY?.trim());
+  if (btPortal) ensureBraintrustLoggerForProject();
+  const portalBundleSpan = btPortal ? startSpan({ name: "portal_bundle" }) : null;
+  try {
+  portalBundleSpan?.log({
+    input: {
+      projectName: TANKESTROM_BRAINTRUST_PROJECT,
+      sourceType,
+      documentKind: documentKind ?? null,
+      aiTitleTrunc: truncateForBraintrust(resultIn.title ?? "", 200),
+      extractedTextLen: resultIn.extractedText?.raw?.length ?? 0,
+    },
+  });
+
   const { coerceAIAnalysisResultForPortal } = await import("@/lib/analysis-null-safety");
   const result = coerceAIAnalysisResultForPortal(resultIn);
   const { proposal: schoolProfileProposal, decision: schoolProfileDecision } = decideSchoolProfileProposal(
@@ -7882,24 +7964,69 @@ async function toPortalBundle(
     proposalId?: string;
   }> = [];
   const items: PortalProposalItem[] = [];
-  for (const it of travelDeduped) {
-    try {
-      if (it.kind === "event") {
-        items.push(normalizePortalProposalEventItem(it));
-      } else {
-        items.push(it);
+  const normalizeSpan = btPortal ? startSpan({ name: "normalize_items" }) : null;
+  try {
+    normalizeSpan?.log({ input: { rawItemCount: travelDeduped.length } });
+    for (const it of travelDeduped) {
+      try {
+        if (it.kind === "event") {
+          items.push(normalizePortalProposalEventItem(it));
+        } else {
+          items.push(it);
+        }
+      } catch (err) {
+        console.error("[api/analyze] normalizePortalProposalEventItem failed", err);
+        fileErrors.push({
+          errorCode: "PROPOSAL_ITEM_NORMALIZE_FAILED",
+          message: "Kunne ikke normalisere et forslag fra dokumentet.",
+          debugMessage: err instanceof Error ? err.message : String(err),
+          proposalId: "proposalId" in it ? String(it.proposalId) : undefined,
+        });
       }
-    } catch (err) {
-      console.error("[api/analyze] normalizePortalProposalEventItem failed", err);
-      fileErrors.push({
-        errorCode: "PROPOSAL_ITEM_NORMALIZE_FAILED",
-        message: "Kunne ikke normalisere et forslag fra dokumentet.",
-        debugMessage: err instanceof Error ? err.message : String(err),
-        proposalId: "proposalId" in it ? String(it.proposalId) : undefined,
-      });
     }
+    normalizeSpan?.log({
+      output: {
+        normalizedItemCount: items.length,
+        normalizeFileErrors: fileErrors.length,
+      },
+    });
+  } finally {
+    normalizeSpan?.end();
   }
   const dedupedItems = dedupeArrangementChildEvents(items);
+  const arrangementSpan = btPortal ? startSpan({ name: "arrangement_linking_metadata" }) : null;
+  try {
+    const telem = mergeTelemetrySourceType(
+      summarizePortalProposalItemsForBraintrust(dedupedItems as unknown as BraintrustPortalItem[]),
+      sourceType,
+    );
+    const am = result.analysisModelTrace;
+    const updateIntentSample = dedupedItems
+      .filter((i): i is PortalEventItem => i.kind === "event")
+      .map((i) => i.event.metadata?.updateIntent)
+      .find((u) => u != null && typeof u === "object");
+    arrangementSpan?.log({
+      output: {
+        ...telem,
+        model: am?.finalModel ?? am?.initialModel ?? null,
+        tier: am?.initialTier ?? null,
+        bundleSnapshotTrunc: portalBundleJsonSnapshot(
+          dedupedItems as unknown as BraintrustPortalItem[],
+          BT_TRUNC_BUNDLE_SNAPSHOT,
+        ),
+        ...(updateIntentSample
+          ? {
+              updateIntentTrunc: truncateForBraintrust(
+                JSON.stringify(updateIntentSample),
+                2000,
+              ),
+            }
+          : {}),
+      },
+    });
+  } finally {
+    arrangementSpan?.end();
+  }
   const secondaryTaskCandidates =
     !schoolProfileProposal && !schoolWeekOverlayProposal
       ? buildSecondaryPortalTaskCandidates(result, dedupedItems, resolveDate, resolvedYear, sourceType)
@@ -7998,7 +8125,7 @@ async function toPortalBundle(
       textAnalyzePortalBundleReturned: true,
     };
   }
-  return {
+  const bundleOut = {
     schemaVersion: "1.0.0",
     provenance: {
       sourceSystem: "tankestrom",
@@ -8013,6 +8140,25 @@ async function toPortalBundle(
     ...(schoolWeekOverlayProposal ? { schoolWeekOverlayProposal } : {}),
     ...(Object.keys(debugPayload).length > 0 ? { debug: debugPayload } : {}),
   };
+  portalBundleSpan?.log({
+    output: {
+      ...mergeTelemetrySourceType(
+        summarizePortalProposalItemsForBraintrust(dedupedItems as unknown as BraintrustPortalItem[]),
+        sourceType,
+      ),
+      schemaVersion: bundleOut.schemaVersion,
+      fileErrorsCount: fileErrors.length,
+      secondaryTaskCandidates: secondaryTaskCandidates.length,
+      schoolProfileProposal: Boolean(schoolProfileProposal),
+      schoolWeekOverlayProposal: Boolean(schoolWeekOverlayProposal),
+      model: result.analysisModelTrace?.finalModel ?? result.analysisModelTrace?.initialModel ?? null,
+      tier: result.analysisModelTrace?.initialTier ?? null,
+    },
+  });
+  return bundleOut;
+  } finally {
+    portalBundleSpan?.end();
+  }
 }
 
 function isDebugRequest(request: NextRequest): boolean {
@@ -8081,6 +8227,18 @@ async function wrapResponse(
     } catch (error) {
       const stage = "toPortalBundle";
       console.error("[Tankestrom analyze failed]", { stage, error, fileName });
+      if (process.env.BRAINTRUST_API_KEY?.trim()) {
+        ensureBraintrustLoggerForProject();
+        currentSpan()?.log({
+          metadata: {
+            projectName: TANKESTROM_BRAINTRUST_PROJECT,
+            analyzeFailure: true,
+            stage,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            fileName: safeFileNameForLog(fileName),
+          },
+        });
+      }
       return NextResponse.json(
         {
           ok: false,
@@ -8142,6 +8300,56 @@ function detectPortalMode(request: NextRequest): boolean {
   if (accept.includes("application/vnd.foreldre.proposal+json")) return true;
 
   return false;
+}
+
+function logBraintrustAnalyzeRequestContext(args: {
+  portalMode: boolean;
+  multipart: boolean;
+  documentKind: AnalysisDocumentKind | null | undefined;
+  knownPersonCount: number;
+  body: ParsedBody;
+}): void {
+  if (!process.env.BRAINTRUST_API_KEY?.trim()) return;
+  ensureBraintrustLoggerForProject();
+  const { body, portalMode, multipart, documentKind, knownPersonCount } = args;
+  const { image, text, pdf, docx, fileName } = body;
+  let sourceType: "text" | "pdf" | "docx" | "image" | "unknown" = "unknown";
+  let inputLength = 0;
+  let mimeType: string | null = null;
+  let estimatedBytes: number | null = null;
+  if (text && typeof text === "string") {
+    sourceType = "text";
+    inputLength = text.length;
+  } else if (pdf && typeof pdf === "string") {
+    sourceType = "pdf";
+    inputLength = pdf.length;
+    mimeType = "application/pdf";
+  } else if (docx && typeof docx === "string") {
+    sourceType = "docx";
+    inputLength = docx.length;
+    mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  } else if (image && typeof image === "string") {
+    sourceType = "image";
+    inputLength = image.length;
+    const meta = parseImageDataUrlMeta(image);
+    mimeType = meta.mimeType;
+    estimatedBytes = meta.size;
+  }
+  currentSpan()?.log({
+    metadata: {
+      projectName: TANKESTROM_BRAINTRUST_PROJECT,
+      analyzeRequestContext: true,
+      portalMode,
+      multipart,
+      documentKind: documentKind ?? null,
+      knownPersonCount,
+      sourceType,
+      inputLength,
+      mimeType,
+      estimatedBytes,
+      fileName: safeFileNameForLog(typeof fileName === "string" ? fileName : null),
+    },
+  });
 }
 
 async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse> {
@@ -8226,6 +8434,14 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
       jsonTextPortalBundle: !multipart && Boolean(text && typeof text === "string" && text.trim()),
     });
 
+    logBraintrustAnalyzeRequestContext({
+      portalMode,
+      multipart,
+      documentKind: documentKind ?? null,
+      knownPersonCount: portalImport.knownPersons.length,
+      body,
+    });
+
     if (text && typeof text === "string") {
       stage = "analyze_text";
       const trimmed = text.trim();
@@ -8245,6 +8461,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
       const routing = await analyzeTextWithRouting(trimmed, {
         documentKind: documentKind ?? undefined,
         sourceRoute: "text",
+        analysisResponseMode: portalMode ? "portal" : "raw",
       });
       const result: AIAnalysisResult = {
         ...routing.result,
@@ -8490,6 +8707,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
         const routing = await analyzeImageWithRouting(image, {
           documentKind: documentKind ?? undefined,
           sourceRoute: "image",
+          analysisResponseMode: portalMode ? "portal" : "raw",
         });
         console.info("[Tankestrom analyze stage]", {
           stage: "image_to_model_done",
@@ -8571,6 +8789,18 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
     ), "missing_input");
   } catch (err) {
     console.error("[api/analyze]", { stage, err });
+    if (process.env.BRAINTRUST_API_KEY?.trim()) {
+      ensureBraintrustLoggerForProject();
+      currentSpan()?.log({
+        metadata: {
+          projectName: TANKESTROM_BRAINTRUST_PROJECT,
+          analyzeFailure: true,
+          stage,
+          errorMessage: err instanceof Error ? err.message : String(err),
+          fileName: safeFileNameForLog(lastFileName),
+        },
+      });
+    }
     const debugDetail =
       err instanceof Error ? err.stack || err.message : String(err);
     if (lastPortalMode) {
@@ -8623,6 +8853,29 @@ export async function POST(request: NextRequest) {
     url: request.url,
     contentType: request.headers.get("content-type"),
   });
+  const braintrustOn = Boolean(process.env.BRAINTRUST_API_KEY?.trim());
+  if (braintrustOn) {
+    ensureBraintrustLoggerForProject();
+    return traced(
+      async (span) => {
+        try {
+          span.log({
+            metadata: {
+              projectName: TANKESTROM_BRAINTRUST_PROJECT,
+              spanRoot: "analyze_request",
+              apiVersion: version,
+            },
+          });
+          const res = await handleAnalyzeRequest(request);
+          span.log({ metadata: { responseStatus: res.status } });
+          return res;
+        } finally {
+          await flush();
+        }
+      },
+      { name: "analyze_request" },
+    );
+  }
   try {
     return await handleAnalyzeRequest(request);
   } catch (error) {
