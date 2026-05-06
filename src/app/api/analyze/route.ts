@@ -478,6 +478,15 @@ function isoDateKey(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+function addDaysToYmd(dateYmd: string, days: number): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateYmd)) return null;
+  const [y, m, d] = dateYmd.split("-").map(Number);
+  const base = new Date(Date.UTC(y!, (m ?? 1) - 1, d ?? 1));
+  if (!Number.isFinite(base.getTime())) return null;
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
+}
+
 function detectIsoWeekdayFromText(raw: string): number | null {
   const s = raw.toLowerCase();
   if (/\b(man(day)?|mandag)\b/i.test(s)) return 1;
@@ -1641,6 +1650,7 @@ type PortalEventItem = {
       startTimeSource?: "explicit" | "missing_or_unreadable";
       endTimeSource?:
         | "explicit_arrival_time"
+        | "computed_from_duration"
         | "missing_or_unreadable";
       /** Speiler `event.requiresManualTimeReview` for metadata-lesere. */
       requiresManualTimeReview?: boolean;
@@ -1654,6 +1664,7 @@ type PortalEventItem = {
         destinationCity: string | null;
         departureTime: string | null;
         arrivalTime: string | null;
+        durationMinutes?: number | null;
         passengerName: string | null;
         flightNumber: string | null;
       };
@@ -3647,6 +3658,21 @@ async function buildProposalItems(
       tf
         ? { start: tf.departureTime, end: tf.endTime }
         : explicitStartEnd ?? extractStartEnd(time);
+    const travelEndValue =
+      tf && tf.endNextDay && end && /^\d{2}:\d{2}$/.test(end)
+        ? (() => {
+            const nextDate = addDaysToYmd(date, 1);
+            return nextDate ? `${nextDate}T${end}:00` : end;
+          })()
+        : end;
+    const enforceFlightNoArrivalNoDuration =
+      tf && !tf.arrivalTime && !tf.durationMinutes
+        ? {
+            end: null as string | null,
+            requiresManualTimeReview: true,
+            endTimeSource: "missing_or_unreadable" as const,
+          }
+        : null;
     const eventTitle =
       tf?.proposedTitle ?? buildEventProposalTitle(result, titleSuffix, dayContext);
     const documentExtractedName = asNullableString(tf?.passengerName);
@@ -3672,8 +3698,14 @@ async function buildProposalItems(
           : {}),
         title: eventTitle,
         start,
-        end,
-        ...(tf ? { requiresManualTimeReview: tf.requiresManualTimeReview } : {}),
+        end: enforceFlightNoArrivalNoDuration ? enforceFlightNoArrivalNoDuration.end : travelEndValue,
+        ...(tf
+          ? {
+              requiresManualTimeReview: enforceFlightNoArrivalNoDuration
+                ? true
+                : tf.requiresManualTimeReview,
+            }
+          : {}),
       },
     };
     const n = buildStructuredNotes(notes, dayContext);
@@ -3701,8 +3733,12 @@ async function buildProposalItems(
               : {}),
             inferredEndTime: tf.inferredEndTime,
             startTimeSource: tf.startTimeSource,
-            endTimeSource: tf.endTimeSource,
-            requiresManualTimeReview: tf.requiresManualTimeReview,
+            endTimeSource: enforceFlightNoArrivalNoDuration
+              ? enforceFlightNoArrivalNoDuration.endTimeSource
+              : tf.endTimeSource,
+            requiresManualTimeReview: enforceFlightNoArrivalNoDuration
+              ? true
+              : tf.requiresManualTimeReview,
             travel: travelFlightMetadataFromInference(tf),
             ...(personResolution.documentExtractedPersonName
               ? {

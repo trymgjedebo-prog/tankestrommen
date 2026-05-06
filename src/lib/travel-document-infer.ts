@@ -7,6 +7,7 @@ export type TravelFlightStartTimeSource = "explicit" | "missing_or_unreadable";
 
 export type TravelFlightEndTimeSource =
   | "explicit_arrival_time"
+  | "computed_from_duration"
   | "missing_or_unreadable";
 
 export type TravelFlightInference = {
@@ -15,6 +16,8 @@ export type TravelFlightInference = {
   /** Ankomst-slutt — `null` uten eksplisitt ankomst (ingen gjetning). */
   endTime: string | null;
   arrivalTime: string | null;
+  durationMinutes: number | null;
+  endNextDay: boolean;
   startTimeSource: TravelFlightStartTimeSource;
   endTimeSource: TravelFlightEndTimeSource;
   inferredEndTime: boolean;
@@ -57,6 +60,77 @@ function collectHHMMInOrder(line: string): string[] {
     out.push(normalizeHHMM(m[1]!, m[2]!));
   }
   return out;
+}
+
+function hhmmToMinutes(time: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) {
+    return null;
+  }
+  return h * 60 + min;
+}
+
+function computeEndFromDuration(
+  departureTime: string | null,
+  durationMinutes: number | null,
+): { endTime: string | null; endNextDay: boolean } {
+  if (!departureTime || !durationMinutes) return { endTime: null, endNextDay: false };
+  const startMinutes = hhmmToMinutes(departureTime);
+  if (startMinutes === null) return { endTime: null, endNextDay: false };
+  const endTotal = startMinutes + durationMinutes;
+  const endMinutes = ((endTotal % 1440) + 1440) % 1440;
+  const endNextDay = endTotal >= 1440;
+  const hh = Math.floor(endMinutes / 60);
+  const mm = endMinutes % 60;
+  return {
+    endTime: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`,
+    endNextDay,
+  };
+}
+
+function parseFlightDurationMinutes(blob: string): number | null {
+  const text = blob.toLowerCase().replace(/\s+/g, " ");
+  const patterns: RegExp[] = [
+    /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s*h(?:ours?)?\s*(\d{1,2})\s*m(?:in(?:utes?)?)?\b/i,
+    /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s*t(?:imer?)?\s*(\d{1,2})\s*(?:min(?:utter?)?)\b/i,
+    /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s*[:.]\s*(\d{2})\b/i,
+    /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s*(?:timer?|hours?)\s+og\s+(\d{1,2})\s*(?:min(?:utter?)?)\b/i,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (!Number.isFinite(h) || !Number.isFinite(min)) continue;
+    const total = h * 60 + min;
+    if (total > 0 && total <= 18 * 60) return total;
+  }
+
+  const halfHour = /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s+og\s+en\s+halv\s+(?:time|timer)\b/i.exec(
+    text,
+  );
+  if (halfHour) {
+    const h = Number(halfHour[1]);
+    if (Number.isFinite(h) && h >= 0 && h <= 17) return h * 60 + 30;
+  }
+
+  const decimalHours = /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})(?:[.,](\d))?\s*(?:timer?|hours?)\b/i.exec(
+    text,
+  );
+  if (decimalHours) {
+    const h = Number(decimalHours[1]);
+    const decRaw = decimalHours[2] ?? "0";
+    const dec = Number(`0.${decRaw}`);
+    if (Number.isFinite(h) && Number.isFinite(dec)) {
+      const total = Math.round((h + dec) * 60);
+      if (total > 0 && total <= 18 * 60) return total;
+    }
+  }
+
+  return null;
 }
 
 function lineRejectsAsArrivalTime(line: string): boolean {
@@ -393,14 +467,21 @@ function extractOrderedDepArrPairs(blob: string): Array<{ dep: string; arr: stri
 
 function buildLegInference(
   leg: { from: AirportRow; to: AirportRow },
-  times: { dep: string | null; arr: string | null },
+  times: { dep: string | null; arr: string | null; durationMinutes: number | null },
   shared: { passengerName: string | null; flightNumber: string | null },
 ): TravelFlightInference {
+  const explicitArrival = times.arr;
+  const computed = !explicitArrival
+    ? computeEndFromDuration(times.dep, times.durationMinutes)
+    : { endTime: null, endNextDay: false };
+  const resolvedEnd = explicitArrival ?? computed.endTime;
   const startTimeSource: TravelFlightStartTimeSource = times.dep
     ? "explicit"
     : "missing_or_unreadable";
-  const endTimeSource: TravelFlightEndTimeSource = times.arr
+  const endTimeSource: TravelFlightEndTimeSource = explicitArrival
     ? "explicit_arrival_time"
+    : computed.endTime
+      ? "computed_from_duration"
     : "missing_or_unreadable";
   const requiresManualTimeReview =
     startTimeSource === "missing_or_unreadable" ||
@@ -420,8 +501,10 @@ function buildLegInference(
 
   return {
     departureTime: times.dep,
-    endTime: times.arr,
-    arrivalTime: times.arr,
+    endTime: resolvedEnd,
+    arrivalTime: explicitArrival,
+    durationMinutes: times.durationMinutes,
+    endNextDay: !explicitArrival && computed.endNextDay,
     startTimeSource,
     endTimeSource,
     inferredEndTime: false,
@@ -457,6 +540,7 @@ export function inferTravelFlightsFromBlob(rawBlob: string): TravelFlightInferen
   const legs = deriveLegsFromAirportRows(rows);
   const pairs = extractOrderedDepArrPairs(blob);
   const globalTimes = scanLinesForLabeledTimes(blob, blobOneLine);
+  const durationMinutes = parseFlightDurationMinutes(blobOneLine);
   const shared = {
     passengerName: extractPassengerName(blobOneLine),
     flightNumber: extractFlightNumber(blobOneLine),
@@ -473,7 +557,7 @@ export function inferTravelFlightsFromBlob(rawBlob: string): TravelFlightInferen
     return [
       buildLegInference(
         { from: { code: "Ukjent", city: "" }, to: { code: "Ukjent", city: "" } },
-        { dep, arr },
+        { dep, arr, durationMinutes },
         shared,
       ),
     ];
@@ -495,7 +579,7 @@ export function inferTravelFlightsFromBlob(rawBlob: string): TravelFlightInferen
         arr = arr ?? hint.arr;
       }
     }
-    return buildLegInference(leg, { dep, arr }, shared);
+    return buildLegInference(leg, { dep, arr, durationMinutes }, shared);
   });
 }
 

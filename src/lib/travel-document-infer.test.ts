@@ -113,6 +113,42 @@ flight SK1234
     expect(r!.requiresManualTimeReview).toBe(true);
     expect(r!.arrivalTime).toBeNull();
     expect(r!.endTime).toBeNull();
+    expect(r!.durationMinutes).toBeNull();
+  });
+
+  it("computes end from explicit duration when arrival is missing", () => {
+    const blob = `
+Boarding pass
+- OSL Oslo
+- LHR London
+departure 05:00
+flight time 3:30
+`;
+    const r = inferTravelFlightFromBlob(blob);
+    expect(r).not.toBeNull();
+    expect(r!.departureTime).toBe("05:00");
+    expect(r!.arrivalTime).toBeNull();
+    expect(r!.durationMinutes).toBe(210);
+    expect(r!.endTime).toBe("08:30");
+    expect(r!.endTimeSource).toBe("computed_from_duration");
+    expect(r!.requiresManualTimeReview).toBe(false);
+  });
+
+  it("computed duration can pass midnight", () => {
+    const blob = `
+Boarding pass
+- OSL Oslo
+- AMS Amsterdam
+departure 22:45
+varighet 2 timer
+`;
+    const r = inferTravelFlightFromBlob(blob);
+    expect(r).not.toBeNull();
+    expect(r!.departureTime).toBe("22:45");
+    expect(r!.durationMinutes).toBe(120);
+    expect(r!.endTime).toBe("00:45");
+    expect(r!.endNextDay).toBe(true);
+    expect(r!.endTimeSource).toBe("computed_from_duration");
   });
 
   it("still returns inference when departure time missing but flight is clear", () => {

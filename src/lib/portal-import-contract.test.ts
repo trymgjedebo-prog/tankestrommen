@@ -116,6 +116,22 @@ flight SK99
     expect(item.event.requiresManualTimeReview).toBe(true);
   });
 
+  it("duration without arrival computes end, with duration metadata", () => {
+    const blob = `
+Boarding pass
+OSL Oslo
+LHR London
+departure 05:00
+varighet 3 timer 30 minutter
+`;
+    const tf = inferTravelFlightFromBlob(blob);
+    expect(tf).not.toBeNull();
+    expect(tf!.endTime).toBe("08:30");
+    expect(tf!.endTimeSource).toBe("computed_from_duration");
+    expect(tf!.durationMinutes).toBe(210);
+    expect(travelFlightMetadataFromInference(tf!).durationMinutes).toBe(210);
+  });
+
   it("matches known person when name equals displayName", () => {
     const r = resolvePortalEventPersonMatch({
       documentExtractedName: "John Doe",

@@ -125,6 +125,7 @@ export function travelFlightMetadataFromInference(tf: TravelFlightInference): {
   destinationCity: string | null;
   departureTime: string | null;
   arrivalTime: string | null;
+  durationMinutes: number | null;
   passengerName: string | null;
   flightNumber: string | null;
 } {
@@ -136,6 +137,7 @@ export function travelFlightMetadataFromInference(tf: TravelFlightInference): {
     destinationCity: tf.destCity,
     departureTime: tf.departureTime,
     arrivalTime: tf.arrivalTime,
+    durationMinutes: tf.durationMinutes,
     passengerName: tf.passengerName,
     flightNumber: tf.flightNumber,
   };
