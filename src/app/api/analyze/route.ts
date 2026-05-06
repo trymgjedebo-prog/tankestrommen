@@ -30,6 +30,12 @@ import {
   applyTankestromAnalyzeHeaders,
   getTankestromApiVersion,
 } from "@/lib/tankestrom-api-version";
+import {
+  defaultSchoolTimetableEndFromStart,
+  extractStartEndFromScheduleTime,
+  resolveNonFlightEventTimes,
+} from "@/lib/event-time-resolve";
+import { isUncertainDurationContext } from "@/lib/parse-duration";
 
 function asNullableString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -1458,28 +1464,6 @@ function hasReliableClockInTimeField(time: string | null | undefined): boolean {
   return /\d{1,2}[.:]\d{2}/.test(time);
 }
 
-function extractStartEnd(time: string | null): { start: string; end: string } {
-  const fallback = { start: "08:00", end: "09:00" };
-  if (!time) return fallback;
-  const rangeMatch = /(\d{1,2}[.:]\d{2})\s*[-–]\s*(\d{1,2}[.:]\d{2})/.exec(time);
-  if (rangeMatch) {
-    return {
-      start: rangeMatch[1].replace(".", ":"),
-      end: rangeMatch[2].replace(".", ":"),
-    };
-  }
-  const singleMatch = /(\d{1,2})[.:](\d{2})/.exec(time);
-  if (singleMatch) {
-    const h = Number(singleMatch[1]);
-    const m = singleMatch[2];
-    const s = `${String(h).padStart(2, "0")}:${m}`;
-    const eH = Math.min(h + 1, 23);
-    const e = `${String(eH).padStart(2, "0")}:${m}`;
-    return { start: s, end: e };
-  }
-  return fallback;
-}
-
 /** Tekstblob for fly/reise-heuristikk (modellfelt + rå OCR). */
 function collectTextBlobForTravelInference(result: AIAnalysisResult): string {
   const schedule = Array.isArray(result.schedule) ? result.schedule : [];
@@ -1750,11 +1734,22 @@ type PortalEventItem = {
       travelRouteUncertain?: boolean;
       /** Sluttid utledet uten eksplisitt ankomst (kun ved reisedokument-fly). */
       inferredEndTime?: boolean;
-      startTimeSource?: "explicit" | "missing_or_unreadable";
+      startTimeSource?: "explicit" | "computed_from_duration" | "missing_or_unreadable";
       endTimeSource?:
+        | "explicit"
         | "explicit_arrival_time"
         | "computed_from_duration"
         | "missing_or_unreadable";
+      /** Varighet i minutter når utledet eller eksplisitt (ikke-fly / metadata). */
+      durationMinutes?: number | null;
+      timeComputation?: {
+        formula: string;
+        startTime?: string;
+        endTime?: string;
+        durationMinutes: number;
+        computedEndTime?: string;
+        computedStartTime?: string;
+      };
       displayTimeLabel?: string;
       /** Speiler `event.requiresManualTimeReview` for metadata-lesere. */
       requiresManualTimeReview?: boolean;
@@ -3030,7 +3025,33 @@ function buildCupEmbeddedScheduleSegment(args: {
   deadlinesForEvent: string[];
   conditionalDay: boolean;
 }): EmbeddedScheduleSegment {
-  const { start, end } = args.explicitStartEnd ?? extractStartEnd(args.day.time);
+  let start: string;
+  let end: string;
+  if (args.explicitStartEnd) {
+    start = args.explicitStartEnd.start;
+    end = args.explicitStartEnd.end;
+  } else {
+    const blob = [
+      args.day.time ?? "",
+      args.detailsForEvent ?? "",
+      ...args.highlightsForEventFinal,
+      ...args.rememberForEvent,
+      ...args.notesOnlyForEvent,
+      ...args.deadlinesForEvent,
+    ].join("\n");
+    const r = resolveNonFlightEventTimes({ timeField: args.day.time, contextBlob: blob });
+    if (r.start && r.end) {
+      start = r.start;
+      end = r.end;
+    } else if (r.start) {
+      start = r.start;
+      end = r.end ?? CUP_UNCERTAIN_DAY_WINDOW.end;
+    } else {
+      const fe = extractStartEndFromScheduleTime(args.day.time);
+      start = fe.start ?? CUP_UNCERTAIN_DAY_WINDOW.start;
+      end = fe.end ?? CUP_UNCERTAIN_DAY_WINDOW.end;
+    }
+  }
   const title = buildEventProposalTitle(args.result, args.titleSuffix, {
     rememberItems: args.rememberForEvent,
     deadlines: args.deadlinesForEvent,
@@ -3508,9 +3529,10 @@ function detectSchoolDayOverride(
     let effectiveEnd = times.end;
 
     if (!effectiveStart && !effectiveEnd && fallbackTime) {
-      const fallback = extractStartEnd(fallbackTime);
-      effectiveStart = fallback.start;
-      effectiveEnd = fallback.end;
+      const fe = extractStartEndFromScheduleTime(fallbackTime);
+      effectiveStart = fe.start;
+      effectiveEnd =
+        fe.end ?? (fe.start ? defaultSchoolTimetableEndFromStart(fe.start) : null);
     }
 
     // Litt høyere tillit når vi fant et eksplisitt klokkeslett i samme setning.
@@ -3580,7 +3602,9 @@ function buildEventSchoolContext(
     }
   }
 
-  const { start, end } = extractStartEnd(time);
+  const fe = extractStartEndFromScheduleTime(time);
+  const start = fe.start;
+  const end = fe.end ?? (fe.start ? defaultSchoolTimetableEndFromStart(fe.start) : null);
   const hadProgramHint = Boolean(hint);
   let itemType: SchoolPortalItemType = "general";
   if (hadProgramHint || parsed.subjectKey) {
@@ -3731,6 +3755,40 @@ async function buildProposalItems(
     return sections.join("\n\n");
   };
 
+  const buildTimeContextBlob = (
+    noteBase: string | null,
+    dayContext?: {
+      rememberItems: string[];
+      deadlines: string[];
+      notes: string[];
+      highlights: string[];
+    },
+    extraBlob?: string | null,
+  ): string => {
+    const parts: string[] = [];
+    if (noteBase?.trim()) parts.push(noteBase.trim());
+    if (dayContext) {
+      for (const h of dayContext.highlights) {
+        const s = normalizeSpace(h);
+        if (s) parts.push(s);
+      }
+      for (const n of dayContext.notes) {
+        const s = normalizeSpace(n);
+        if (s) parts.push(s);
+      }
+      for (const r of dayContext.rememberItems) {
+        const s = normalizeSpace(r);
+        if (s) parts.push(s);
+      }
+      for (const d of dayContext.deadlines) {
+        const s = normalizeSpace(d);
+        if (s) parts.push(s);
+      }
+    }
+    if (extraBlob?.trim()) parts.push(extraBlob.trim());
+    return parts.join("\n");
+  };
+
   const buildEventItem = (
     date: string,
     time: string | null,
@@ -3748,7 +3806,10 @@ async function buildProposalItems(
     cupProposalDebug?: CupProposalItemDebug | null,
     /** Siste kalenderdag (ISO) for flerdagers parent — brukes i stabil arrangementsnøkkel. */
     arrangementEndDateIso?: string | null,
+    /** Ekstra fritekst for varighets-/tids-parsing (f.eks. result.description). */
+    timeContextBlob?: string | null,
   ): PortalEventItem => {
+    const timeResolutionBlob = buildTimeContextBlob(notes, dayContext, timeContextBlob ?? null);
     const travelHere =
       !travelInlineAttached &&
       travelFlightLegs.length > travelLegConsumed &&
@@ -3758,17 +3819,46 @@ async function buildProposalItems(
       travelInlineAttached = true;
       travelLegConsumed += 1;
     }
-    const { start, end } =
-      tf
-        ? { start: tf.departureTime, end: tf.endTime }
-        : explicitStartEnd ?? extractStartEnd(time);
-    const travelEndValue =
-      tf && tf.endNextDay && end && /^\d{2}:\d{2}$/.test(end)
-        ? (() => {
-            const nextDate = addDaysToYmd(date, 1);
-            return nextDate ? `${nextDate}T${end}:00` : end;
-          })()
-        : end;
+
+    let start: string | null = null;
+    let end: string | null = null;
+    let nonFlightResolved: ReturnType<typeof resolveNonFlightEventTimes> | null = null;
+
+    if (tf) {
+      start = tf.departureTime;
+      end = tf.endTime;
+    } else if (explicitStartEnd) {
+      start = explicitStartEnd.start;
+      end = explicitStartEnd.end;
+    } else {
+      nonFlightResolved = resolveNonFlightEventTimes({
+        timeField: time,
+        contextBlob: timeResolutionBlob,
+      });
+      start = nonFlightResolved.start;
+      end = nonFlightResolved.end;
+    }
+
+    const hhmm = /^\d{2}:\d{2}$/;
+    let eventStartOut: string | null = start;
+    let eventEndOut: string | null = end;
+
+    if (tf) {
+      if (tf.endNextDay && end && hhmm.test(end)) {
+        const nextDate = addDaysToYmd(date, 1);
+        eventEndOut = nextDate ? `${nextDate}T${end}:00` : end;
+      }
+    } else if (nonFlightResolved) {
+      if (nonFlightResolved.endNextDay && end && hhmm.test(end)) {
+        const nextDate = addDaysToYmd(date, 1);
+        eventEndOut = nextDate ? `${nextDate}T${end}:00` : end;
+      }
+      if (nonFlightResolved.startPreviousDay && start && hhmm.test(start)) {
+        const prevDate = addDaysToYmd(date, -1);
+        eventStartOut = prevDate ? `${prevDate}T${start}:00` : start;
+      }
+    }
+
     const enforceFlightNoArrivalNoDuration =
       tf && !tf.arrivalTime && !tf.durationMinutes
         ? {
@@ -3788,7 +3878,8 @@ async function buildProposalItems(
       !tf &&
       looksLikeFlightEventTitle(eventTitleRaw) &&
       !hasExplicitTimeRange(time) &&
-      start !== null
+      start !== null &&
+      end === null
         ? {
             end: null as string | null,
             requiresManualTimeReview: true,
@@ -3820,21 +3911,32 @@ async function buildProposalItems(
           ? { documentExtractedPersonName: personResolution.documentExtractedPersonName }
           : {}),
         title: eventTitleSanitized.title,
-        start,
-        end: enforceFlightNoEnd ? enforceFlightNoEnd.end : travelEndValue,
+        start: eventStartOut,
+        end: enforceFlightNoEnd ? enforceFlightNoEnd.end : eventEndOut,
         ...(tf
           ? {
               requiresManualTimeReview: enforceFlightNoEnd
                 ? true
                 : tf.requiresManualTimeReview,
             }
-          : enforceFlightNoTfFallback
+          : enforceFlightNoTfFallback || nonFlightResolved?.requiresManualTimeReview
             ? { requiresManualTimeReview: true }
-          : {}),
+            : {}),
       },
     };
     const n = buildStructuredNotes(notes, dayContext);
     if (n) item.event.notes = n;
+    if (
+      !tf &&
+      !explicitStartEnd &&
+      isUncertainDurationContext(timeResolutionBlob) &&
+      nonFlightResolved &&
+      (!nonFlightResolved.start || !nonFlightResolved.end)
+    ) {
+      const prefix =
+        "Varighet eller tidsrom er formulert usikkert i kilden; ingen automatisk beregning av manglende klokkeslett.";
+      item.event.notes = item.event.notes ? `${prefix}\n\n${item.event.notes}` : prefix;
+    }
     if (result.location) item.event.location = result.location;
     const arrLink = buildArrangementImportLinkMetadata(result, date, arrangementEndDateIso ?? null);
     item.event.metadata = {
@@ -3882,6 +3984,22 @@ async function buildProposalItems(
                   ...(tf.passengerName ? { passengerName: tf.passengerName } : {}),
                 }
               : {}),
+          }
+        : {}),
+      ...(!tf && nonFlightResolved && !enforceFlightNoTfFallback
+        ? {
+            ...(nonFlightResolved.durationMinutes != null
+              ? { durationMinutes: nonFlightResolved.durationMinutes }
+              : {}),
+            ...(nonFlightResolved.timeComputation
+              ? { timeComputation: nonFlightResolved.timeComputation }
+              : {}),
+            startTimeSource: nonFlightResolved.startTimeSource,
+            endTimeSource: nonFlightResolved.endTimeSource,
+            ...(nonFlightResolved.requiresManualTimeReview && !nonFlightResolved.end
+              ? { displayTimeLabel: "Sluttid ikke oppgitt" }
+              : {}),
+            requiresManualTimeReview: nonFlightResolved.requiresManualTimeReview,
           }
         : {}),
       ...(!tf && enforceFlightNoTfFallback
@@ -4224,6 +4342,8 @@ async function buildProposalItems(
           dayOverride,
           explicitStartEnd,
           cupDbg,
+          null,
+          result.description ?? null,
         );
         if (conditionalDay) {
           ev.confidence = Math.min(ev.confidence, 0.52);
@@ -4584,7 +4704,19 @@ async function buildProposalItems(
         items.push(buildTaskItem(isoDate, slot.label, slotSignal));
       } else {
         items.push(
-          buildEventItem(isoDate, slot.time, slot.label, null, undefined, null, null, null, null),
+          buildEventItem(
+            isoDate,
+            slot.time,
+            slot.label,
+            null,
+            undefined,
+            null,
+            null,
+            null,
+            null,
+            null,
+            result.description ?? null,
+          ),
         );
       }
     }
@@ -4675,7 +4807,10 @@ function synthesizeSchoolWeeklyProfileFromTimetableSignals(
 ): SchoolWeeklyProfile | null {
   const byDay = new Map<"0" | "1" | "2" | "3" | "4", Array<{ start: string; end: string }>>();
   const put = (idx: "0" | "1" | "2" | "3" | "4", time: string | null) => {
-    const { start, end } = extractStartEnd(time);
+    const fe = extractStartEndFromScheduleTime(time);
+    const start = fe.start;
+    const end = fe.end ?? (fe.start ? defaultSchoolTimetableEndFromStart(fe.start) : null);
+    if (!start || !end) return;
     const arr = byDay.get(idx) ?? [];
     arr.push({ start, end });
     byDay.set(idx, arr);

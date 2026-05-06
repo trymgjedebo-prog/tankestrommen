@@ -3,6 +3,8 @@
  * semantisk departure/arrival-tid, flere etapper, kalendervennlige titler (ikke «analyse»-språk).
  */
 
+import { parseDurationMinutes } from "./parse-duration";
+
 export type TravelFlightStartTimeSource = "explicit" | "missing_or_unreadable";
 
 export type TravelFlightEndTimeSource =
@@ -89,48 +91,6 @@ function computeEndFromDuration(
     endTime: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`,
     endNextDay,
   };
-}
-
-function parseFlightDurationMinutes(blob: string): number | null {
-  const text = blob.toLowerCase().replace(/\s+/g, " ");
-  const patterns: RegExp[] = [
-    /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s*h(?:ours?)?\s*(\d{1,2})\s*m(?:in(?:utes?)?)?\b/i,
-    /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s*t(?:imer?)?\s*(\d{1,2})\s*(?:min(?:utter?)?)\b/i,
-    /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s*[:.]\s*(\d{2})\b/i,
-    /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s*(?:timer?|hours?)\s+og\s+(\d{1,2})\s*(?:min(?:utter?)?)\b/i,
-  ];
-  for (const re of patterns) {
-    const m = re.exec(text);
-    if (!m) continue;
-    const h = Number(m[1]);
-    const min = Number(m[2]);
-    if (!Number.isFinite(h) || !Number.isFinite(min)) continue;
-    const total = h * 60 + min;
-    if (total > 0 && total <= 18 * 60) return total;
-  }
-
-  const halfHour = /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})\s+og\s+en\s+halv\s+(?:time|timer)\b/i.exec(
-    text,
-  );
-  if (halfHour) {
-    const h = Number(halfHour[1]);
-    if (Number.isFinite(h) && h >= 0 && h <= 17) return h * 60 + 30;
-  }
-
-  const decimalHours = /\b(?:duration|flight time|varighet|varer)\s*[:\-]?\s*(\d{1,2})(?:[.,](\d))?\s*(?:timer?|hours?)\b/i.exec(
-    text,
-  );
-  if (decimalHours) {
-    const h = Number(decimalHours[1]);
-    const decRaw = decimalHours[2] ?? "0";
-    const dec = Number(`0.${decRaw}`);
-    if (Number.isFinite(h) && Number.isFinite(dec)) {
-      const total = Math.round((h + dec) * 60);
-      if (total > 0 && total <= 18 * 60) return total;
-    }
-  }
-
-  return null;
 }
 
 function lineRejectsAsArrivalTime(line: string): boolean {
@@ -540,7 +500,7 @@ export function inferTravelFlightsFromBlob(rawBlob: string): TravelFlightInferen
   const legs = deriveLegsFromAirportRows(rows);
   const pairs = extractOrderedDepArrPairs(blob);
   const globalTimes = scanLinesForLabeledTimes(blob, blobOneLine);
-  const durationMinutes = parseFlightDurationMinutes(blobOneLine);
+  const durationMinutes = parseDurationMinutes(blobOneLine);
   const shared = {
     passengerName: extractPassengerName(blobOneLine),
     flightNumber: extractFlightNumber(blobOneLine),
