@@ -756,6 +756,65 @@ function buildCalendarEventTitle(
   return baseTitle ? `${baseTitle} – ${suffix}` : suffix;
 }
 
+type TitleSanitizationMeta = {
+  title: string;
+  isTentative: boolean;
+  tentativeReason?: string;
+  statusLabel?: string;
+};
+
+function sanitizeCalendarLikeTitle(rawTitle: string, maxLen = 60): TitleSanitizationMeta {
+  let title = normalizeSpace(rawTitle);
+  if (!title) return { title: "Hendelse", isTentative: false };
+
+  const tentativeHint =
+    /\b(usikker|forel[øo]pig|betinget|mulig|avhenger\s+av|dersom\s+laget\s+g[aå]r\s+videre)\b/i;
+  const isTentative = tentativeHint.test(title);
+
+  title = title.replace(/\(([^)]*)\)/g, (full, inner) => {
+    return tentativeHint.test(inner) ? "" : full;
+  });
+
+  title = title
+    .replace(
+      /\b(?:mandag|tirsdag|onsdag|torsdag|fredag|l[øo]rdag|s[øo]ndag|man|tir|ons|tor|fre|l[øo]r|s[øo]n)\.?\s+\d{1,2}\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)(?:\s+\d{4})?/gi,
+      "",
+    )
+    .replace(
+      /\b\d{1,2}\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)(?:\s+\d{4})?\b/gi,
+      "",
+    )
+    .replace(/\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b/g, "")
+    .replace(/\bkl\.?\s*\d{1,2}[:.]\d{2}\b/gi, "")
+    .replace(/\b\d{1,2}[:.]\d{2}\b/g, "")
+    .replace(/\b(?:usikker|forel[øo]pig|betinget|mulig)\b/gi, "")
+    .replace(/\s*[·|]\s*/g, " – ")
+    .replace(/\s+[–—-]\s+[–—-]\s+/g, " – ")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s*[–—-]\s*$/g, "")
+    .replace(/^\s*[–—-]\s*/g, "");
+
+  const flyreiseTil = /^Flyreise\s+(.+?)\s+til\s+(.+)$/i.exec(title);
+  if (flyreiseTil) {
+    title = `Flyreise ${normalizeSpace(flyreiseTil[1]!)}–${normalizeSpace(flyreiseTil[2]!)}`;
+  }
+
+  title = normalizeSpace(title);
+  if (!title) title = "Hendelse";
+  if (title.length > maxLen) title = `${title.slice(0, maxLen - 1).trimEnd()}…`;
+
+  return {
+    title,
+    isTentative,
+    ...(isTentative
+      ? {
+          tentativeReason: "Avhenger av sluttspill eller ikke-endelig program.",
+          statusLabel: "Foreløpig",
+        }
+      : {}),
+  };
+}
+
 const NORWEGIAN_MONTH_NAMES = [
   "januar",
   "februar",
@@ -1338,8 +1397,9 @@ function finalizePortalTaskTitleForProposal(
             ? "Praktisk hjelp til arrangementet"
             : "Gi beskjed om deltakelse";
   const san = sanitizeUserFacingTaskTitle(ctx.title, fallback);
+  const taskTitleSanitized = sanitizeCalendarLikeTitle(san.title, 60);
   return {
-    title: san.title,
+    title: taskTitleSanitized.title,
     taskProposalDebug: {
       taskTitleContextApplied: ctx.contextApplied,
       taskTitleContextKind: ctx.kind ?? null,
@@ -1612,6 +1672,9 @@ type PortalEventItem = {
       endDate?: string;
       /** Parent er heldags over intervallet; unngå at klient tolker første dags klokkeslett som hovedtid. */
       multiDayAllDay?: boolean;
+      isTentative?: boolean;
+      tentativeReason?: string;
+      statusLabel?: string;
       /** Container/event-card for arrangement med egne child-segmenter. */
       isArrangementParent?: boolean;
       /** Faktisk segment/event under arrangement-parent. */
@@ -3675,6 +3738,7 @@ async function buildProposalItems(
         : null;
     const eventTitle =
       tf?.proposedTitle ?? buildEventProposalTitle(result, titleSuffix, dayContext);
+    const eventTitleSanitized = sanitizeCalendarLikeTitle(eventTitle, 60);
     const documentExtractedName = asNullableString(tf?.passengerName);
     const personResolution = resolvePortalEventPersonMatch({
       documentExtractedName,
@@ -3696,7 +3760,7 @@ async function buildProposalItems(
         ...(personResolution.documentExtractedPersonName
           ? { documentExtractedPersonName: personResolution.documentExtractedPersonName }
           : {}),
-        title: eventTitle,
+        title: eventTitleSanitized.title,
         start,
         end: enforceFlightNoArrivalNoDuration ? enforceFlightNoArrivalNoDuration.end : travelEndValue,
         ...(tf
@@ -3725,6 +3789,13 @@ async function buildProposalItems(
       ...(schoolContext ? { schoolContext } : {}),
       ...(schoolDayOverride ? { schoolDayOverride } : {}),
       ...(cupProposalDebug ? { cupProposalDebug } : {}),
+      ...(eventTitleSanitized.isTentative
+        ? {
+            isTentative: true,
+            tentativeReason: eventTitleSanitized.tentativeReason,
+            statusLabel: eventTitleSanitized.statusLabel,
+          }
+        : {}),
       ...(tf
         ? {
             importCategory: "travel" as const,
