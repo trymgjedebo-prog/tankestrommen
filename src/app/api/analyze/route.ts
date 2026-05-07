@@ -48,6 +48,11 @@ import {
   truncateForBraintrust,
   type BraintrustPortalItem,
 } from "@/lib/braintrust-analyze-telemetry";
+import {
+  buildCupStructuredDayContent,
+  formatCupEventNotesFlat,
+  parseCupTimeWindow,
+} from "@/lib/cup-day-content";
 
 function asNullableString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -1648,17 +1653,6 @@ function hasVagueAfterLastMatchText(text: string): boolean {
   return /\b(etter\s+siste\s+kamp)\b/.test(n) && /\b(rydde|snakke|kort|beskjed|en\s+stund|litt\s+tid)\b/.test(n);
 }
 
-function parseCupTimeWindow(text: string): { earliestStart: string; latestStart: string } | null {
-  const m = /\b(?:en\s+gang\s+)?mellom\s+(?:kl\.?\s*)?(\d{1,2})[.:](\d{2})\s+og\s+(?:kl\.?\s*)?(\d{1,2})[.:](\d{2})\b/i.exec(
-    text,
-  );
-  if (!m) return null;
-  const a = `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
-  const b = `${String(Number(m[3])).padStart(2, "0")}:${m[4]}`;
-  if (hhmmToMinutesLocal(a) == null || hhmmToMinutesLocal(b) == null) return null;
-  return { earliestStart: a, latestStart: b };
-}
-
 function extractCupMatchTimes(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -1671,223 +1665,6 @@ function extractCupMatchTimes(text: string): string[] {
     out.push(hhmm);
   }
   return out;
-}
-
-const SHORT_VALID_BRING_ITEMS = new Set([
-  "håndkle",
-  "handkle",
-  "sokker",
-  "innesko",
-  "shorts",
-]);
-
-function isBringItemsSignal(text: string): boolean {
-  return /\b(husk|ta\s+med|utstyr|pakkeliste|alle\s+ma\s+ha\s+med|barna\s+ma\s+ha\s+med)\b/i.test(
-    normalizeNorwegianLetters(text),
-  );
-}
-
-function splitBringItems(text: string): string[] {
-  const cleaned = normalizeSpace(
-    text
-      .replace(/^(husk(?:\s*\/\s*ta\s+med)?|ta\s+med|utstyr|pakkeliste)\s*:?\s*/i, "")
-      .replace(/^(alle|barna)\s+ma\s+ha\s+med\s*/i, ""),
-  );
-  if (!cleaned) return [];
-  return cleaned
-    .split(/\s*(?:,|;|\bog\b)\s*/i)
-    .map((s) => normalizeSpace(s.replace(/^[\-•]\s*/, "").replace(/[.!?]+$/g, "")))
-    .filter((s) => s.length >= 2);
-}
-
-function isNoiseFragment(text: string): boolean {
-  const t = normalizeSpace(text);
-  if (!t) return true;
-  const n = normalizeNorwegianLetters(t).toLowerCase();
-  if (
-    n === "og" ||
-    n === "dagens innhold" ||
-    n === "husk / ta med" ||
-    n === "husk" ||
-    n === "ta med" ||
-    n === "notater" ||
-    n === "hoydepunkter"
-  ) {
-    return true;
-  }
-  if (/^i\s+[a-zæøå][\w\s.-]{0,36}$/i.test(t)) return true;
-  if (t.length <= 2 && !SHORT_VALID_BRING_ITEMS.has(n)) return true;
-  return false;
-}
-
-function stripLocationOnlyFragment(text: string): string {
-  return normalizeSpace(text.replace(/\bi\s+[A-ZÆØÅa-zæøå][^;,.]{2,40}$/i, ""));
-}
-
-function cleanupCupHighlight(
-  raw: string,
-  titleBlocklist: Set<string>,
-): { time: string; label: string; location?: string } | null {
-  const input = normalizeSpace(raw);
-  if (!input || isNoiseFragment(input)) return null;
-  if (titleBlocklist.has(cupLineNormKey(input))) return null;
-  if (parseCupTimeWindow(input)) return null;
-  const tm = /(\d{1,2})[.:](\d{2})/.exec(input);
-  if (!tm) return null;
-  const time = `${String(Number(tm[1])).padStart(2, "0")}:${tm[2]}`;
-  let label = normalizeSpace(input.replace(tm[0], "").replace(/^[\s:–\-]+|[\s:–\-]+$/g, ""));
-  let location: string | undefined;
-  const semicolonParts = input.split(";").map((p) => normalizeSpace(p)).filter(Boolean);
-  if (semicolonParts.length >= 2) {
-    const right = semicolonParts[semicolonParts.length - 1]!;
-    if (!/^\d{1,2}[.:]\d{2}$/.test(right)) label = right;
-  }
-  const loc = /\bi\s+([A-ZÆØÅa-zæøå][^;,.]{2,40})$/i.exec(input);
-  if (loc) location = normalizeSpace(loc[1]);
-  label = stripLocationOnlyFragment(label);
-  if (!label) {
-    if (/\boppm[oø]te\b/i.test(input)) label = "Oppmøte";
-    else if (/\bkamp\b/i.test(input)) label = "Kamp";
-    else if (/\bavreise\b/i.test(input)) label = "Avreise";
-  }
-  if (!label || isNoiseFragment(label)) return null;
-  if (titleBlocklist.has(cupLineNormKey(label))) return null;
-  return { time, label, ...(location ? { location } : {}) };
-}
-
-function buildCupStructuredDayContent(input: {
-  date: string;
-  details: string | null;
-  highlights: string[];
-  notes: string[];
-  rememberItems: string[];
-  deadlines: string[];
-  parentTitle: string;
-  childTitle: string;
-}): {
-  highlights: string[];
-  bringItems: string[];
-  logisticsNotes: string[];
-  generalNotes: string[];
-  uncertaintyNotes: string[];
-  sourceOrder: string[];
-  removedDuplicateHighlights: string[];
-  removedFragmentNotes: string[];
-  timeWindowCandidates: Array<{ earliestStart: string; latestStart: string; label?: string }>;
-} {
-  const titleBlocklist = new Set<string>([
-    cupLineNormKey(input.parentTitle),
-    cupLineNormKey(input.childTitle),
-  ]);
-  const bringItems: string[] = [];
-  const logisticsNotes: string[] = [];
-  const generalNotes: string[] = [];
-  const uncertaintyNotes: string[] = [];
-  const sourceOrder: string[] = [];
-  const removedFragmentNotes: string[] = [];
-  const timeWindowCandidates: Array<{ earliestStart: string; latestStart: string; label?: string }> = [];
-  const highlightsRaw: string[] = [];
-
-  const pushOrdered = (kind: "highlight" | "bringItem" | "logistics" | "general" | "uncertainty", v: string) => {
-    sourceOrder.push(`${kind}:${v}`);
-  };
-  const addNote = (raw: string) => {
-    const s = normalizeSpace(raw);
-    if (!s || isNoiseFragment(s)) {
-      if (s) removedFragmentNotes.push(s);
-      return;
-    }
-    if (/\b(avhenger|betinget|usikkert|tidspunkt\s+ikke\s+klart|kommer\s+senere)\b/i.test(s)) {
-      uncertaintyNotes.push(s);
-      pushOrdered("uncertainty", s);
-      return;
-    }
-    if (/\b(hall|arena|skolehall|mellom\s+kampene|oppvarming|rydd|samlet)\b/i.test(s)) {
-      logisticsNotes.push(s);
-      pushOrdered("logistics", s);
-      return;
-    }
-    generalNotes.push(s);
-    pushOrdered("general", s);
-  };
-
-  const collectBringItems = (raw: string) => {
-    if (!isBringItemsSignal(raw)) return;
-    for (const item of splitBringItems(raw)) {
-      if (isNoiseFragment(item)) continue;
-      bringItems.push(item);
-      pushOrdered("bringItem", item);
-    }
-  };
-
-  for (const r of input.rememberItems) collectBringItems(r);
-  for (const n of input.notes) collectBringItems(n);
-  if (input.details) collectBringItems(input.details);
-
-  const gather = [input.details ?? "", ...input.highlights, ...input.notes, ...input.deadlines];
-  for (const raw of gather) {
-    const s = normalizeSpace(raw);
-    if (!s) continue;
-    const timeWindow = parseCupTimeWindow(s);
-    if (timeWindow) {
-      const labelPart = normalizeSpace(s.split(/mellom/i)[0] || "Tidspunkt");
-      timeWindowCandidates.push({ ...timeWindow, ...(labelPart ? { label: labelPart } : {}) });
-      uncertaintyNotes.push(
-        `${labelPart || "Tidspunkt"} mellom ${timeWindow.earliestStart} og ${timeWindow.latestStart}`,
-      );
-      pushOrdered(
-        "uncertainty",
-        `${labelPart || "Tidspunkt"} mellom ${timeWindow.earliestStart} og ${timeWindow.latestStart}`,
-      );
-      continue;
-    }
-    const parsed = cleanupCupHighlight(s, titleBlocklist);
-    if (parsed) {
-      highlightsRaw.push(
-        `${parsed.time} ${parsed.label}${parsed.location ? ` (${parsed.location})` : ""}`.trim(),
-      );
-      continue;
-    }
-    addNote(s);
-  }
-
-  const dedupHighlights = new Map<string, string>();
-  const removedDuplicateHighlights: string[] = [];
-  for (const h of highlightsRaw) {
-    const m = /^(\d{2}:\d{2})\s+(.+)$/.exec(h);
-    if (!m) continue;
-    const k = `${input.date}|${m[1]}|${cupLineNormKey(m[2] || "")}`;
-    if (dedupHighlights.has(k)) {
-      removedDuplicateHighlights.push(h);
-      continue;
-    }
-    dedupHighlights.set(k, h);
-    pushOrdered("highlight", h);
-  }
-
-  const dedupeStable = (arr: string[]) => {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const x of arr) {
-      const key = cupLineNormKey(x);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      out.push(x);
-    }
-    return out;
-  };
-
-  return {
-    highlights: [...dedupHighlights.values()],
-    bringItems: dedupeStable(bringItems),
-    logisticsNotes: dedupeStable(logisticsNotes),
-    generalNotes: dedupeStable(generalNotes),
-    uncertaintyNotes: dedupeStable(uncertaintyNotes),
-    sourceOrder,
-    removedDuplicateHighlights,
-    removedFragmentNotes: dedupeStable(removedFragmentNotes),
-    timeWindowCandidates,
-  };
 }
 
 function resolveCupDayTiming(input: {
@@ -1908,8 +1685,8 @@ function resolveCupDayTiming(input: {
     ...input.deadlinesForEvent,
   ].join("\n");
 
-  const timeWindow = parseCupTimeWindow(blob);
-  if (timeWindow) {
+  const twParsed = parseCupTimeWindow(blob);
+  if (twParsed) {
     return {
       start: null,
       end: null,
@@ -1917,7 +1694,7 @@ function resolveCupDayTiming(input: {
       attendanceOffsetMinutes: null,
       durationMinutes: null,
       postEventBufferMinutes: null,
-      timeWindow,
+      timeWindow: { earliestStart: twParsed.earliestStart, latestStart: twParsed.latestStart },
       timePrecision: "time_window",
       startTimeSource: "missing_or_unreadable",
       endTimeSource: "missing_or_unreadable",
@@ -2114,10 +1891,16 @@ type EmbeddedScheduleSegment = {
     highlights: string[];
     bringItems: string[];
     logisticsNotes: string[];
+    parentTasks?: string[];
     generalNotes: string[];
     uncertaintyNotes: string[];
     sourceOrder?: string[];
-    timeWindowCandidates?: Array<{ earliestStart: string; latestStart: string; label?: string }>;
+    timeWindowCandidates?: Array<{
+      earliestStart: string;
+      latestStart: string;
+      label?: string;
+      tentative?: boolean;
+    }>;
   };
 };
 
@@ -2256,10 +2039,16 @@ type PortalEventItem = {
         highlights: string[];
         bringItems: string[];
         logisticsNotes: string[];
+        parentTasks?: string[];
         generalNotes: string[];
         uncertaintyNotes: string[];
         sourceOrder?: string[];
-        timeWindowCandidates?: Array<{ earliestStart: string; latestStart: string; label?: string }>;
+        timeWindowCandidates?: Array<{
+          earliestStart: string;
+          latestStart: string;
+          label?: string;
+          tentative?: boolean;
+        }>;
       };
       documentExtractedPersonName?: string;
       passengerName?: string;
@@ -2334,6 +2123,9 @@ type CupProposalItemDebug = {
   logisticsNotes?: string[];
   generalNotes?: string[];
   uncertaintyNotes?: string[];
+  parentTasks?: string[];
+  /** Når sann: ingen «Dagens innhold»/«Husk / ta med»-seksjoner i event.notes (bruk metadata.dayContent). */
+  flatCupNotesPreferred?: boolean;
   removedFragmentNotes?: string[];
   removedDuplicateHighlights?: string[];
   timeWindowCandidates?: Array<{ earliestStart: string; latestStart: string }>;
@@ -3566,10 +3358,16 @@ function buildCupEmbeddedScheduleSegment(args: {
     highlights: string[];
     bringItems: string[];
     logisticsNotes: string[];
+    parentTasks: string[];
     generalNotes: string[];
     uncertaintyNotes: string[];
     sourceOrder: string[];
-    timeWindowCandidates: Array<{ earliestStart: string; latestStart: string; label?: string }>;
+    timeWindowCandidates: Array<{
+      earliestStart: string;
+      latestStart: string;
+      label?: string;
+      tentative: true;
+    }>;
   } | null;
 }): EmbeddedScheduleSegment {
   let start: string | null = null;
@@ -3632,19 +3430,23 @@ function buildCupEmbeddedScheduleSegment(args: {
     }
   };
 
-  if (args.detailsForEvent?.trim()) {
-    for (const ln of args.detailsForEvent.split(/\n/)) {
-      const s = normalizeSpace(ln);
-      if (!s) continue;
-      considerRaw(s, "details");
+  if (!args.structuredDayContent) {
+    if (args.detailsForEvent?.trim()) {
+      for (const ln of args.detailsForEvent.split(/\n/)) {
+        const s = normalizeSpace(ln);
+        if (!s) continue;
+        considerRaw(s, "details");
+      }
     }
+    for (const h of args.highlightsForEventFinal) considerRaw(h, "highlights");
+    for (const r of args.rememberForEvent) considerRaw(r, "remember");
+    for (const n of args.notesOnlyForEvent) considerRaw(n, "notes");
+    for (const d of args.deadlinesForEvent) considerRaw(d, "deadlines");
   }
-  for (const h of args.highlightsForEventFinal) considerRaw(h, "highlights");
-  for (const r of args.rememberForEvent) considerRaw(r, "remember");
-  for (const n of args.notesOnlyForEvent) considerRaw(n, "notes");
-  for (const d of args.deadlinesForEvent) considerRaw(d, "deadlines");
 
-  let notesBody = linesOut.join("\n").trim();
+  let notesBody = args.structuredDayContent
+    ? (formatCupEventNotesFlat(args.structuredDayContent) ?? "").trim()
+    : linesOut.join("\n").trim();
   let trimmed = false;
   if (notesBody.length > EMBEDDED_SEGMENT_NOTES_MAX_CHARS) {
     notesBody = `${notesBody.slice(0, EMBEDDED_SEGMENT_NOTES_MAX_CHARS - 1).trimEnd()}…`;
@@ -3661,7 +3463,8 @@ function buildCupEmbeddedScheduleSegment(args: {
   }
 
   let source: EmbeddedScheduleSegment["embeddedScheduleSegmentNotesSource"];
-  if (args.conditionalDay && linesOut.length === 0) source = "conditional";
+  if (args.structuredDayContent) source = args.conditionalDay ? "conditional" : "notes";
+  else if (args.conditionalDay && linesOut.length === 0) source = "conditional";
   else if (sourcesHit.size === 0) source = "none";
   else if (sourcesHit.size === 1) source = sourcesHit.values().next().value!;
   else source = "mixed";
@@ -3705,6 +3508,9 @@ function buildCupEmbeddedScheduleSegment(args: {
             highlights: args.structuredDayContent.highlights,
             bringItems: args.structuredDayContent.bringItems,
             logisticsNotes: args.structuredDayContent.logisticsNotes,
+            ...(args.structuredDayContent.parentTasks.length > 0
+              ? { parentTasks: args.structuredDayContent.parentTasks }
+              : {}),
             generalNotes: args.structuredDayContent.generalNotes,
             uncertaintyNotes: args.structuredDayContent.uncertaintyNotes,
             ...(args.structuredDayContent.sourceOrder.length > 0
@@ -4564,7 +4370,9 @@ async function buildProposalItems(
             : {}),
       },
     };
-    const n = buildStructuredNotes(notes, dayContext);
+    const n = cupProposalDebug?.flatCupNotesPreferred
+      ? null
+      : buildStructuredNotes(notes, dayContext);
     if (n) item.event.notes = n;
     if (
       !tf &&
@@ -4809,17 +4617,7 @@ async function buildProposalItems(
       ].join(" ");
       const conditionalDay = cupLike && isConditionalTournamentText(dayBlob);
       const titleSuffix = day.dayLabel;
-      const cupTiming = cupLike
-        ? resolveCupDayTiming({
-            day,
-            detailsForEvent: fDetails,
-            highlightsForEventFinal: fHighlightsForEvent,
-            notesOnlyForEvent: fNotesRaw,
-            rememberForEvent: fRemember,
-            deadlinesForEvent: day.deadlines,
-            conditionalDay,
-          })
-        : null;
+      let cupTiming: CupDayTiming | null = null;
 
       const explicitStartEnd: { start: string; end: string } | null = null;
       const defaultTimeSuppressed = Boolean(explicitStartEnd);
@@ -4879,23 +4677,7 @@ async function buildProposalItems(
       let deadlinesForEvent = day.deadlines;
       let highlightsForEventFinal = fHighlightsForEvent;
       let detailsForEvent = fDetails;
-      let structuredDayContent:
-        | {
-            highlights: string[];
-            bringItems: string[];
-            logisticsNotes: string[];
-            generalNotes: string[];
-            uncertaintyNotes: string[];
-            sourceOrder: string[];
-            removedDuplicateHighlights: string[];
-            removedFragmentNotes: string[];
-            timeWindowCandidates: Array<{
-              earliestStart: string;
-              latestStart: string;
-              label?: string;
-            }>;
-          }
-        | null = null;
+      let structuredDayContent: ReturnType<typeof buildCupStructuredDayContent> | null = null;
       const rawNotesBeforeCleanup = [...fNotesRaw];
       const rawHighlightsBeforeCleanup = [...fHighlightsForEvent];
       let totalStripped = 0;
@@ -4957,6 +4739,18 @@ async function buildProposalItems(
           ...structuredDayContent.generalNotes,
           ...structuredDayContent.uncertaintyNotes,
         ];
+      }
+
+      if (cupLike) {
+        cupTiming = resolveCupDayTiming({
+          day,
+          detailsForEvent,
+          highlightsForEventFinal,
+          notesOnlyForEvent: fNotesRaw,
+          rememberForEvent: fRemember,
+          deadlinesForEvent,
+          conditionalDay,
+        });
       }
 
       const removedFragmentNotes = rawNotesBeforeCleanup.filter((n) => {
@@ -5068,12 +4862,14 @@ async function buildProposalItems(
               cupParentTaskRemovedFromEventNotes: totalStripped > 0 ? totalStripped : undefined,
               cupDuplicateParentTaskSuppressed:
                 duplicateParentSuppressed > 0 ? duplicateParentSuppressed : undefined,
+              flatCupNotesPreferred: Boolean(structuredDayContent),
               rawNotesBeforeCleanup,
               finalNotes: notesOnlyForEvent,
               rawHighlightsBeforeCleanup,
               finalHighlights: highlightsForEventFinal,
               bringItems: rememberForEvent,
               logisticsNotes: structuredDayContent?.logisticsNotes,
+              parentTasks: structuredDayContent?.parentTasks,
               generalNotes: structuredDayContent?.generalNotes,
               uncertaintyNotes: structuredDayContent?.uncertaintyNotes,
               removedFragmentNotes: removedFragmentNotes.length > 0 ? removedFragmentNotes : undefined,
@@ -5084,9 +4880,11 @@ async function buildProposalItems(
                   ? structuredDayContent.timeWindowCandidates.map((tw) => ({
                       earliestStart: tw.earliestStart,
                       latestStart: tw.latestStart,
+                      ...(tw.label ? { label: tw.label } : {}),
+                      tentative: true as const,
                     }))
                   : cupTiming?.timeWindow
-                    ? [cupTiming.timeWindow]
+                    ? [{ ...cupTiming.timeWindow, tentative: true as const }]
                     : undefined,
               sourceOrder:
                 structuredDayContent?.sourceOrder && structuredDayContent.sourceOrder.length > 0
@@ -5099,7 +4897,7 @@ async function buildProposalItems(
           isoDate,
           day.time,
           titleSuffix,
-          detailsForEvent,
+          cupLike && structuredDayContent ? null : detailsForEvent,
           {
             rememberItems: rememberForEvent,
             deadlines: deadlinesForEvent,
@@ -5114,6 +4912,9 @@ async function buildProposalItems(
           null,
           result.description ?? null,
         );
+        if (cupLike && structuredDayContent) {
+          ev.event.notes = formatCupEventNotesFlat(structuredDayContent) ?? undefined;
+        }
         if (conditionalDay) {
           ev.confidence = Math.min(ev.confidence, 0.52);
           const prefix =
@@ -5134,6 +4935,9 @@ async function buildProposalItems(
             highlights: structuredDayContent.highlights,
             bringItems: structuredDayContent.bringItems,
             logisticsNotes: structuredDayContent.logisticsNotes,
+            ...(structuredDayContent.parentTasks.length > 0
+              ? { parentTasks: structuredDayContent.parentTasks }
+              : {}),
             generalNotes: structuredDayContent.generalNotes,
             uncertaintyNotes: structuredDayContent.uncertaintyNotes,
             ...(structuredDayContent.sourceOrder.length > 0
