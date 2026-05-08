@@ -553,6 +553,40 @@ export type CupTimingEnrichmentInput = {
   tentative: boolean;
 };
 
+function hhmmToMinutesLocal(hhmm: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(mm) || h < 0 || h > 23 || mm < 0 || mm > 59) return null;
+  return h * 60 + mm;
+}
+
+function minutesToHhmmLocal(total: number): string {
+  const t = ((total % 1440) + 1440) % 1440;
+  const h = Math.floor(t / 60);
+  const m = t % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function shiftHhmmLocal(hhmm: string, delta: number): string | null {
+  const m = hhmmToMinutesLocal(hhmm);
+  if (m == null) return null;
+  return minutesToHhmmLocal(m + delta);
+}
+
+function parseAttendanceOffsetForEachMatch(text: string): number | null {
+  const n = normalizeNorwegianLetters(text);
+  const m =
+    /\b(?:oppm[oø]te|m[oø]t)\b[^.!?\n]{0,70}?(\d{1,3})\s*min(?:utter)?\s*f[øo]r[^.!?\n]{0,30}?\b(?:hver|alle)\s+kamp\b/i.exec(
+      n,
+    ) ||
+    /\b(?:hver|alle)\s+kamp\b[^.!?\n]{0,70}?(\d{1,3})\s*min(?:utter)?\s*f[øo]r\b/i.exec(n);
+  if (!m) return null;
+  const v = Number(m[1]);
+  return Number.isFinite(v) && v > 0 && v <= 180 ? v : null;
+}
+
 function highlightCoversTime(list: string[], hhmm: string): boolean {
   for (const h of list) {
     if (h.startsWith(`${hhmm} `)) return true;
@@ -629,9 +663,22 @@ export function enrichCupStructuredContentWithResolvedTiming(
     if (highlightCoversTime(highlights, t)) continue;
     const labelSingle = inferTimedActivityLabelFromText(blob);
     const label =
-      times.length === 1 ? (labelSingle ?? defaultMatchLabelByIndex(0)) : defaultMatchLabelByIndex(i);
+      times.length === 1
+        ? !labelSingle || labelSingle === "Kamp" || labelSingle === "Kampstart"
+          ? defaultMatchLabelByIndex(0)
+          : labelSingle
+        : defaultMatchLabelByIndex(i);
     if (!label || titleBlock.has(normKeyTimed(label))) continue;
     highlights.push(`${t} ${label}`);
+  }
+
+  const perMatchOffset = parseAttendanceOffsetForEachMatch(blob);
+  if (perMatchOffset != null && times.length > 0) {
+    for (const t of times) {
+      const attPerMatch = shiftHhmmLocal(t, -perMatchOffset);
+      if (!attPerMatch || highlightCoversTime(highlights, attPerMatch)) continue;
+      highlights.push(`${attPerMatch} Oppmøte`);
+    }
   }
 
   const att = enrichment.attendanceTime;

@@ -4763,13 +4763,24 @@ async function buildProposalItems(
             ...fRemember,
             ...deadlinesForEvent,
           ].join("\n");
+          const activityTimingBlob = [
+            detailsForEvent ?? "",
+            ...highlightsForEventFinal,
+            ...fNotesRaw,
+            ...fRemember,
+            ...deadlinesForEvent,
+          ].join("\n");
+          const orderedMatchTimesForHighlights = extractCupMatchTimes(activityTimingBlob);
+          if (orderedMatchTimesForHighlights.length === 0 && cupTiming.start) {
+            orderedMatchTimesForHighlights.push(cupTiming.start);
+          }
           structuredDayContent = enrichCupStructuredContentWithResolvedTiming(structuredDayContent, {
             date: isoDate,
             parentTitleNorm: cupLineNormKey(parentTitleForTiming),
             childTitleNorm: cupLineNormKey(childTitleForTiming),
             sourceBlob: timingBlob,
             attendanceTime: cupTiming.attendanceTime,
-            orderedMatchTimes: extractCupMatchTimes(timingBlob),
+            orderedMatchTimes: orderedMatchTimesForHighlights,
             daySegmentStart: cupTiming.start,
             daySegmentEnd: cupTiming.end,
             timeWindow: cupTiming.timeWindow ?? null,

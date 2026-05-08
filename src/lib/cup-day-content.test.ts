@@ -165,4 +165,126 @@ describe("buildCupStructuredDayContent (Høstcupen-regresjon)", () => {
     });
     expect(enriched.highlights.some((h) => h === "17:30 Første kamp")).toBe(true);
   });
+
+  it("Test A: fredag får oppmøte + første kamp fra starttid og offset, varighet blir note", () => {
+    const structured = buildCupStructuredDayContent({
+      ...base,
+      details: null,
+      highlights: [],
+      notes: [
+        "Møt ferdig skiftet 50 minutter før kampstart.",
+        "Kampen varer 2 x 20 minutter med 5 minutter pause.",
+      ],
+      rememberItems: [],
+      deadlines: [],
+    });
+    const enriched = enrichCupStructuredContentWithResolvedTiming(structured, {
+      date: "2026-09-18",
+      parentTitleNorm: "hostcupen",
+      childTitleNorm: "hostcupen fredag",
+      sourceBlob:
+        "17:30-18:10\nMøt ferdig skiftet 50 minutter før kampstart.\nKampen varer 2 x 20 minutter med 5 minutter pause.",
+      attendanceTime: "16:40",
+      orderedMatchTimes: ["17:30"],
+      daySegmentStart: "17:30",
+      daySegmentEnd: "18:10",
+      timeWindow: null,
+      timePrecision: "exact",
+      tentative: false,
+    });
+    expect(enriched.highlights).toContain("16:40 Oppmøte");
+    expect(enriched.highlights).toContain("17:30 Første kamp");
+    expect(enriched.highlights.some((h) => /2 x 20|pause/i.test(h))).toBe(false);
+    expect(
+      [...enriched.logisticsNotes, ...enriched.generalNotes, ...enriched.uncertaintyNotes].some((n) =>
+        /2 x 20|pause/i.test(n),
+      ),
+    ).toBe(true);
+  });
+
+  it("Test B: flere kamper + oppmøte før hver kamp gir alle highlights uten duplikater", () => {
+    const structured = buildCupStructuredDayContent({
+      ...base,
+      date: "2026-09-19",
+      childTitle: "Høstcupen – lørdag",
+      details: null,
+      highlights: [],
+      notes: ["Oppmøte 45 minutter før hver kamp."],
+      rememberItems: [],
+      deadlines: [],
+    });
+    const enriched = enrichCupStructuredContentWithResolvedTiming(structured, {
+      date: "2026-09-19",
+      parentTitleNorm: "hostcupen",
+      childTitleNorm: "hostcupen lordag",
+      sourceBlob: "09:15 første kamp. 14:40 andre kamp. Oppmøte 45 minutter før hver kamp.",
+      attendanceTime: "08:30",
+      orderedMatchTimes: ["09:15", "14:40"],
+      daySegmentStart: "09:15",
+      daySegmentEnd: null,
+      timeWindow: null,
+      timePrecision: "start_only",
+      tentative: false,
+    });
+    expect(enriched.highlights).toContain("08:30 Oppmøte");
+    expect(enriched.highlights).toContain("09:15 Første kamp");
+    expect(enriched.highlights).toContain("13:55 Oppmøte");
+    expect(enriched.highlights).toContain("14:40 Andre kamp");
+    expect(new Set(enriched.highlights).size).toBe(enriched.highlights.length);
+  });
+
+  it("Test C: highlight-label som matcher event title droppes", () => {
+    const structured = buildCupStructuredDayContent({
+      ...base,
+      details: null,
+      highlights: ["17:30 Høstcupen – fredag"],
+      notes: [],
+      rememberItems: [],
+      deadlines: [],
+    });
+    const enriched = enrichCupStructuredContentWithResolvedTiming(structured, {
+      date: "2026-09-18",
+      parentTitleNorm: "hostcupen",
+      childTitleNorm: "hostcupen fredag",
+      sourceBlob: "17:30 kamp",
+      attendanceTime: null,
+      orderedMatchTimes: ["17:30"],
+      daySegmentStart: "17:30",
+      daySegmentEnd: null,
+      timeWindow: null,
+      timePrecision: "start_only",
+      tentative: false,
+    });
+    expect(enriched.highlights.some((h) => /høstcupen/i.test(h))).toBe(false);
+    expect(enriched.highlights).toContain("17:30 Første kamp");
+  });
+
+  it("Test D: tidsvindu blir én highlight og ikke to separate", () => {
+    const structured = buildCupStructuredDayContent({
+      ...base,
+      date: "2026-09-20",
+      childTitle: "Høstcupen – søndag",
+      details: null,
+      highlights: [],
+      notes: ["Første kamp mellom 10:00 og 12:00."],
+      rememberItems: [],
+      deadlines: [],
+    });
+    const enriched = enrichCupStructuredContentWithResolvedTiming(structured, {
+      date: "2026-09-20",
+      parentTitleNorm: "hostcupen",
+      childTitleNorm: "hostcupen sondag",
+      sourceBlob: "Første kamp mellom 10:00 og 12:00.",
+      attendanceTime: null,
+      orderedMatchTimes: ["10:00", "12:00"],
+      daySegmentStart: null,
+      daySegmentEnd: null,
+      timeWindow: { earliestStart: "10:00", latestStart: "12:00" },
+      timePrecision: "time_window",
+      tentative: true,
+    });
+    expect(enriched.highlights).toContain("10:00–12:00 Første kamp (foreløpig)");
+    expect(enriched.highlights.some((h) => /^10:00\s/.test(h) && !h.includes("–"))).toBe(false);
+    expect(enriched.highlights.some((h) => /^12:00\s/.test(h) && !h.includes("–"))).toBe(false);
+  });
 });
