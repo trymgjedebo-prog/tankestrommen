@@ -1670,6 +1670,12 @@ function lineLooksLikeAdministrativeDeadline(line: string): boolean {
   return !activitySignal;
 }
 
+function contextSuggestsAttendanceForTime(line: string, indexInLine: number): boolean {
+  const start = Math.max(0, indexInLine - 36);
+  const before = normalizeNorwegianLetters(line.slice(start, indexInLine));
+  return /\b(oppmote|oppmøte|m[oø]t(?:er)?)\b/.test(before);
+}
+
 function extractCupMatchTimes(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -1680,6 +1686,7 @@ function extractCupMatchTimes(text: string): string[] {
     if (!line || lineLooksLikeAdministrativeDeadline(line)) continue;
     let m: RegExpExecArray | null;
     while ((m = re.exec(line)) !== null) {
+      if (contextSuggestsAttendanceForTime(line, m.index)) continue;
       const hhmm = `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
       if (hhmmToMinutesLocal(hhmm) == null || seen.has(hhmm)) continue;
       seen.add(hhmm);

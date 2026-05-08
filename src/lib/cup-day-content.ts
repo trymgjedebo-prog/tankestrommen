@@ -728,7 +728,9 @@ export function enrichCupStructuredContentWithResolvedTiming(
       if (!target) return h;
       const n = normalizeNorwegianLetters(label);
       const genericMatchLabel = /^(kamp|kampstart)(\s+kl\.?)?$/.test(n);
-      if (genericMatchLabel) return `${time} ${target}`;
+      const wrongAttendanceOnMatchTime =
+        /^oppm[oø]te\b/i.test(label) && !explicitAttendanceTimes.includes(time);
+      if (genericMatchLabel || wrongAttendanceOnMatchTime) return `${time} ${target}`;
       return h;
     });
 

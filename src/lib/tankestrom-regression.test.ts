@@ -12,6 +12,8 @@ describe("Tankestrømmen regression harness", () => {
     t.expectChildCount(3);
     t.expectChildTitles(["Vårcupen – fredag", "Vårcupen – lørdag", "Vårcupen – søndag"]);
     t.expectDayHighlights("fredag", ["17:45 Oppmøte", "18:40 Første kamp"]);
+    t.expectNoDayHighlightAt("fredag", "16:50");
+    t.expectNoDayHighlightContaining("fredag", "18:40 Oppmøte");
     t.expectNoDayHighlightAt("fredag", "20:00");
     t.expectNoDayHighlightContaining("fredag", "Spond");
     t.expectNoDayHighlightContaining("fredag", "barnet kan delta");
