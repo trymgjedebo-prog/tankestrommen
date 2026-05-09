@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Diagnose environment
+        run: |
+          node -v
+          npm -v
+          pwd
+          ls -la
+          test -f package.json
+          test -f package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Tankestrømmen regression
+        run: npm run test:tankestrom-regression
+
+      - name: Build
+        run: npm run build
