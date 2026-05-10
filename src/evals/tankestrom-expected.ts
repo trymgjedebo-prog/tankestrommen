@@ -15,9 +15,17 @@ export type RequiredTaskSpec = {
   dueTime: string | null;
 };
 
+/** Hvordan live/regression forventes strukturert for scoring (default: som i dag). */
+export type TankestromEvalShape = "embedded_schedule" | "single_event";
+
 export type TankestromExpected = {
   schemaVersion: number;
   category?: string;
+  /**
+   * `embedded_schedule`: flerdagers parent med embeddedSchedule (cup m.m.).
+   * `single_event`: en eller flere vanlige kalenderhendelser uten embedded — mappes til «barn» per dag i eval.
+   */
+  evalShape?: TankestromEvalShape;
   parentCount: number;
   childCount: number;
   childTitles: string[];
@@ -37,4 +45,8 @@ export function loadTankestromExpected(absolutePath: string): TankestromExpected
 
 export function resolveExpectedPath(repoRoot: string, fixtureId: string): string {
   return resolve(repoRoot, `fixtures/tankestrom/expected/${fixtureId}.expected.json`);
+}
+
+export function effectiveEvalShape(expected: TankestromExpected): TankestromEvalShape {
+  return expected.evalShape ?? "embedded_schedule";
 }

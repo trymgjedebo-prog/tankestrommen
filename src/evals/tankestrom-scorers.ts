@@ -1,5 +1,10 @@
 import type { RegressionPortalBundle } from "@/lib/tankestrom-regression-fixture-runner";
-import type { DayKey, TankestromExpected, TimePrecision } from "@/evals/tankestrom-expected";
+import {
+  type DayKey,
+  effectiveEvalShape,
+  type TankestromExpected,
+  type TimePrecision,
+} from "@/evals/tankestrom-expected";
 
 export type ScorerResult = {
   score: number;
@@ -233,10 +238,23 @@ export function scoreParentCountCorrect(
   bundle: RegressionPortalBundle,
   expected: TankestromExpected,
 ): ScorerResult {
+  if (effectiveEvalShape(expected) === "single_event") {
+    const ok = bundle.parentTitle.trim().length > 0 && bundle.children.length > 0;
+    return {
+      score: ok ? 1 : 0,
+      failures: ok
+        ? []
+        : [
+            `single_event: forventet ikke-tom parentTitle og minst ett barn, fikk parentTitle="${bundle.parentTitle}" childCount=${bundle.children.length}`,
+          ],
+    };
+  }
   const ok = expected.parentCount === 1 && bundle.parentTitle.length > 0;
   return {
     score: ok ? 1 : 0,
-    failures: ok ? [] : [`Forventet parentCount=${expected.parentCount} med ikke-tom tittel, fikk parentTitle="${bundle.parentTitle}"`],
+    failures: ok
+      ? []
+      : [`Forventet parentCount=${expected.parentCount} med ikke-tom tittel, fikk parentTitle="${bundle.parentTitle}"`],
   };
 }
 
