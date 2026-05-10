@@ -1306,8 +1306,10 @@ function buildContextualPortalTaskTitle(
   if (isDeadlineResponseSpondTaskLine(raw) || (/\bspond\b/.test(n) && /\b(senest|innen|frist)\b/.test(n))) {
     let title: string;
     let eventUsed: string | null = null;
-    if (/\bp[aå]melding\b/.test(n)) {
+    if (/\bp[aå]melding\b/.test(n) || /\bmeld(?:e)?\s+deg\s+p[aåo]\b/.test(n) || /\bmeld(?:e)?\s+dere\s+p[aåo]\b/.test(n)) {
       title = "Svar og påmelding i Spond";
+    } else if (/\bgi\s+beskjed\b/.test(n)) {
+      title = "Gi beskjed i Spond";
     } else if (/\btilbakemelding\b/.test(n) || /\bgi\s+tilbakemelding\b/.test(n)) {
       title = "Gi tilbakemelding om deltakelse";
     } else if (/\bbekreft\b/.test(n) && !/\bsvarer\b/.test(n)) {
@@ -2091,8 +2093,9 @@ function splitTaskCandidatesForCup(raw: string | null): string[] {
   return out;
 }
 
+/** Mønster kjøres på `normalizeNorwegianLetters`-tekst (å→a, ø→o), så bruk p[aå] i stedet for på. */
 const SPOND_RESPONSE_VERB_RE =
-  /\b(svarer|svar|svare|besvar|besvare|bekreft|melde|tilbakemelding|påmelding|registrer|sjekk|fyll\s+ut)\b/;
+  /\b(svarer|svar|svare|besvar|besvare|bekreft|meld|melde|tilbakemelding|p[aå]melding|registrer|sjekk|fyll\s+ut)\b/;
 
 /** Smalt, høyprioritets mønster: svarhandling + Spond + frist + tid/dato. */
 function isDeadlineResponseSpondTaskLine(line: string): boolean {
@@ -2101,7 +2104,12 @@ function isDeadlineResponseSpondTaskLine(line: string): boolean {
   const n = normalizeNorwegianLetters(t);
   if (!/\bspond\b/.test(n)) return false;
   if (!/\b(senest|innen|frist)\b/.test(n)) return false;
-  if (!SPOND_RESPONSE_VERB_RE.test(n)) return false;
+  const responseVerb =
+    SPOND_RESPONSE_VERB_RE.test(n) ||
+    /\bgi\s+beskjed\b/.test(n) ||
+    /\bmeld(?:e)?\s+deg\s+p[aåo]\b/.test(n) ||
+    /\bmeld(?:e)?\s+dere\s+p[aåo]\b/.test(n);
+  if (!responseVerb) return false;
   const hasTimeOrDate =
     /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|\d{1,2}\.\s*\d{1,2}|\d{1,2}\.\s*juni)\b/i.test(
       t,
@@ -2128,7 +2136,7 @@ function inferTaskExtractionDebug(taskText: string): Pick<
   const responseDeadline = isDeadlineResponseSpondTaskLine(t);
   const deadline =
     responseDeadline ||
-    (/\b(senest|innen|frist|svar\s+i\s+spond|svar\s+innen|påmelding|pameldings)\b/.test(n) &&
+    (/\b(senest|innen|frist|svar\s+i\s+spond|svar\s+innen|p[aå]melding|pameldings)\b/.test(n) &&
       /\b(kl\.?|\d{1,2}\s*[:.]\s*\d{2}|januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|mandag|tirsdag|onsdag|torsdag|fredag|l[oø]rdag|s[oø]ndag|\d{1,2}\.\s*juni|\d{1,2}\/\d{1,2})\b/i.test(
         t,
       ));
@@ -2623,7 +2631,7 @@ function cupTaskNeedsContextInTitle(body: string): boolean {
   const n = normalizeNorwegianLetters(t);
   if (t.length > 58) return false;
   if (/\bspond\b/.test(n)) {
-    if (/\b(om\s+deltakelse|angå|vedrørende|påmelding|til\s+cup|for\s+cup)\b/.test(n)) return false;
+    if (/\b(om\s+deltakelse|anga|vedrorende|p[aå]melding|til\s+cup|for\s+cup)\b/.test(n)) return false;
     return true;
   }
   if (/^gi\s+beskjed\b/i.test(t) && t.length < 52) return true;
@@ -2913,8 +2921,8 @@ function isParentCoordinatorTaskLine(line: string): boolean {
     /\b(innen|f[oø]r|senest|frist|betale|kr\s*\d|\d+\s*kr)\b/.test(n)
   )
     return true;
-  if (/\bpåmelding\b/.test(n) && /\b(innen|f[oø]r|senest)\b/.test(n)) return true;
-  if (/\bbekreft\b/.test(n) && /\b(deltakelse|oppm[oø]te|påmelding)\b/.test(n)) return true;
+  if (/\bp[aå]melding\b/.test(n) && /\b(innen|f[oø]r|senest)\b/.test(n)) return true;
+  if (/\bbekreft\b/.test(n) && /\b(deltakelse|oppm[oø]te|p[aå]melding)\b/.test(n)) return true;
   if (/\bdere\s+må\s+(svar|melde|bekreft)\b/.test(n)) return true;
   if (/\bforeldre\s+må\s+/.test(n) && /\b(svar|melde|bekreft|gi\s+beskjed)\b/.test(n)) return true;
   return false;
@@ -3027,6 +3035,33 @@ function shouldCountAsPortalTask(text: string, cupLike: boolean): boolean {
   if (isParentCoordinatorTaskLine(t)) return true;
   if (cupLike && isGeneralCupPracticalBulkLine(t)) return false;
   return isStandaloneTaskCandidate(t);
+}
+
+/**
+ * Spond-frister i description/ocr/tittel når modellen ikke kopierer dem til dag-feltene.
+ * Ikke-cup: alltid. Cup: bare én kalenderdag i scheduleByDay (unngå støy ved flerdagers cup).
+ */
+function collectGlobalSpondDeadlineTaskPieces(result: AIAnalysisResult, cupLike: boolean): string[] {
+  const blobs = [
+    typeof result.description === "string" ? result.description : "",
+    result.extractedText && typeof result.extractedText.raw === "string" ? result.extractedText.raw : "",
+    typeof result.title === "string" ? result.title : "",
+  ];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const blob of blobs) {
+    if (!normalizeSpace(blob)) continue;
+    for (const part of splitTaskCandidatesForCup(blob)) {
+      const t = normalizeSpace(part);
+      if (!t || !isDeadlineResponseSpondTaskLine(t)) continue;
+      if (!shouldCountAsPortalTask(t, cupLike)) continue;
+      const k = cupParentTaskDedupeKey(t);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(t);
+    }
+  }
+  return out;
 }
 
 function collectCupHoistedPracticalLines(
@@ -4351,6 +4386,13 @@ async function buildProposalItems(
     const cupEmbeddedScheduleSegments: EmbeddedScheduleSegment[] | null =
       cupLike && result.scheduleByDay.length >= 2 ? [] : null;
     const cupGlobalScheduleBlob = cupLike ? [result.title ?? "", result.description ?? ""].join("\n") : "";
+    const scheduleDayCount = result.scheduleByDay.length;
+    const mergeGlobalSpondDeadlineSnippets =
+      !cupLike || (cupLike && scheduleDayCount === 1);
+    const globalSpondDeadlinePieces = mergeGlobalSpondDeadlineSnippets
+      ? collectGlobalSpondDeadlineTaskPieces(result, cupLike)
+      : [];
+    const emittedGlobalSpondDeadlineTaskKeys = new Set<string>();
 
     for (const day of result.scheduleByDay) {
       const isoDate = resolveDate(day.date, day.dayLabel);
@@ -4362,16 +4404,21 @@ async function buildProposalItems(
       const fHighlights = cupLike ? filterHoistedCupStrings(day.highlights, hk) : day.highlights;
       const fDetails = cupLike ? filterDetailsHoisted(day.details, hk) : day.details;
 
-      const fHighlightsForEventBase =
-        cupLike
-          ? fHighlights.filter((h) => {
-              const s = normalizeSpace(h);
-              if (!s) return false;
-              const parts = splitTaskCandidatesForCup(s);
-              if (parts.length === 1 && isParentCoordinatorTaskLine(parts[0]!)) return false;
-              return true;
-            })
-          : fHighlights;
+      const fHighlightsForEventBase = cupLike
+        ? fHighlights.filter((h) => {
+            const s = normalizeSpace(h);
+            if (!s) return false;
+            const parts = splitTaskCandidatesForCup(s);
+            if (parts.length === 1 && isParentCoordinatorTaskLine(parts[0]!)) return false;
+            return true;
+          })
+        : fHighlights.filter((h) => {
+            const s = normalizeSpace(h);
+            if (!s) return false;
+            const parts = splitTaskCandidatesForCup(s);
+            if (parts.length === 1 && isDeadlineResponseSpondTaskLine(parts[0]!)) return false;
+            return true;
+          });
       const globalDayMatchTimes = cupLike
         ? extractGlobalCupScheduleTimesForDay(cupGlobalScheduleBlob, day.dayLabel)
         : [];
@@ -4395,12 +4442,18 @@ async function buildProposalItems(
       const explicitStartEnd: { start: string; end: string } | null = null;
       const defaultTimeSuppressed = Boolean(explicitStartEnd);
 
+      const freshGlobalSpondDeadlines = mergeGlobalSpondDeadlineSnippets
+        ? globalSpondDeadlinePieces.filter(
+            (g) => !emittedGlobalSpondDeadlineTaskKeys.has(cupParentTaskDedupeKey(g)),
+          )
+        : [];
       const taskCandidates = [
         ...day.deadlines,
         ...fRemember.flatMap((r) => splitTasks(r)),
         ...fNotesRaw.flatMap((n) => splitTasks(n)),
         ...fHighlights.flatMap((h) => splitTasks(h)),
         ...splitTasks(fDetails),
+        ...freshGlobalSpondDeadlines,
       ];
       const rawTaskPieces = taskCandidates
         .map((text) => normalizeSpace(text))
@@ -4776,6 +4829,9 @@ async function buildProposalItems(
         ...day.notes,
         ...day.rememberItems,
         ...day.deadlines,
+        ...(mergeGlobalSpondDeadlineSnippets
+          ? [result.description ?? "", result.extractedText?.raw ?? "", result.title ?? ""]
+          : []),
       ].join("\n");
       const taskCtxLabel = deriveTaskContextLabel(result);
 
@@ -4784,7 +4840,7 @@ async function buildProposalItems(
         let dueTime: string | null = null;
         let taskDebug: TaskProposalDebug | null = null;
 
-        if (cupLike) {
+        if (cupLike || isDeadlineResponseSpondTaskLine(taskText)) {
           const resolved = resolveCupTaskDeadlineAndMeta(
             taskText,
             deadlineBlobForDay,
@@ -4817,7 +4873,14 @@ async function buildProposalItems(
             taskDebug.taskTitleContextSource = enc.enriched ? taskCtxLabel.source : null;
           }
         } else if (!cupLike && isParentCoordinatorTaskLine(taskText)) {
-          taskBody = normalizeTaskTitle(normalizeCupParentTaskBodyForTitle(taskText));
+          taskBody = normalizeCupParentTaskBodyForTitle(taskText);
+          if (isDeadlineResponseSpondTaskLine(taskText) && taskDebug) {
+            taskBody = stripDeadlineClauseFromTaskBody(
+              taskBody,
+              Boolean(taskDebug.taskDeadlineDerivedFromLine),
+            );
+          }
+          taskBody = normalizeTaskTitle(taskBody);
         }
 
         const titleFin = finalizePortalTaskTitleForProposal(taskText, taskBody, result);
@@ -4841,6 +4904,9 @@ async function buildProposalItems(
         }
         if (cupMergeBuffer) cupMergeBuffer.push(tk);
         else items.push(tk);
+        if (mergeGlobalSpondDeadlineSnippets && isDeadlineResponseSpondTaskLine(taskText)) {
+          emittedGlobalSpondDeadlineTaskKeys.add(cupParentTaskDedupeKey(taskText));
+        }
       }
     }
 
