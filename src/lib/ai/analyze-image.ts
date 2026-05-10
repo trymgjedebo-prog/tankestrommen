@@ -29,6 +29,7 @@ import {
   selectInitialAnalysisModel,
   type AnalysisModelRoutingInput,
 } from "@/lib/ai/analysis-model-router";
+import { textHasActivityClockWindowCue } from "@/lib/event-time-resolve";
 
 const EVENT_CATEGORIES: EventCategory[] = [
   "arrangement",
@@ -2253,16 +2254,17 @@ function runRoutedImageAnalysis(
   );
 }
 
-function ensureTextAnalysisSourceExcerpt(result: AIAnalysisResult, sourceText: string): AIAnalysisResult {
+export function ensureTextAnalysisSourceExcerpt(
+  result: AIAnalysisResult,
+  sourceText: string,
+): AIAnalysisResult {
   const src = sourceText.trim();
   if (!src) return result;
   const rawExisting = result.extractedText?.raw?.trim() ?? "";
-  const windowCue =
-    /\bmellom\b|\d{1,2}[.:]\d{2}\s+til\s+(?:kl\.?\s*)?\d{1,2}[.:]\d{2}/i.test(src);
+  const windowCue = textHasActivityClockWindowCue(src);
   const softDurationCue = /\bvalgfritt\b|\bca\.\s*\d|\bcirka\b/i.test(src);
   const needsSourceForTimeSemantics =
-    (windowCue &&
-      !/\bmellom\b|\d{1,2}[.:]\d{2}\s+til\s+(?:kl\.?\s*)?\d{1,2}[.:]\d{2}/i.test(rawExisting)) ||
+    (windowCue && !textHasActivityClockWindowCue(rawExisting)) ||
     (softDurationCue && !/\bvalgfritt\b|\bca\.\s*\d|\bcirka\b/i.test(rawExisting));
 
   if (!rawExisting) {

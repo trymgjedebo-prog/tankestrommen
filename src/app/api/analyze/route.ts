@@ -2838,7 +2838,8 @@ function looksLikeCupOrSpondBroadcast(result: AIAnalysisResult): boolean {
   ].join("\n");
   const n = normalizeNorwegianLetters(blob);
   if (/\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) return false;
-  return /\b(cup|turnering|stevne|spond|sluttspill|seriekamp|idrett|fotball|håndball|oppm[oø]te|samling|pulje|finale|bronse|semifinale)\b/.test(
+  // Ikke bruk «spond» alene: foreldre/dugnad-meldinger med Svar i Spond er ikke cup-kringkasting.
+  return /\b(cup|turnering|stevne|sluttspill|seriekamp|idrett|fotball|håndball|oppm[oø]te|samling|pulje|finale|bronse|semifinale)\b/.test(
     n,
   );
 }
