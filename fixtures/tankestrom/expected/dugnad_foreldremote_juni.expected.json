@@ -8,19 +8,23 @@
     "Foreldregruppa – våravslutning – lørdag"
   ],
   "highlightsByDay": {
-    "fredag": ["19:00 Tredje kamp", "10:00 Første kamp", "12:00 Andre kamp"],
-    "lørdag": ["10:00 Første kamp", "12:00 Andre kamp", "19:00 Tredje kamp"]
+    "fredag": ["19:00 Foreldremøte"],
+    "lørdag": ["10:00–12:00 Dugnad"]
   },
-  "requiredBringItems": [],
+  "requiredBringItems": ["arbeidshansker"],
   "forbiddenInNotes": [],
-  "forbiddenHighlights": [],
+  "forbiddenHighlights": [
+    { "includes": "Første kamp" },
+    { "includes": "Andre kamp" },
+    { "includes": "Tredje kamp" }
+  ],
   "tentativeDays": {
     "fredag": false,
     "lørdag": false
   },
   "timePrecisionByDay": {
-    "fredag": "date_only",
-    "lørdag": "date_only"
+    "fredag": "start_only",
+    "lørdag": "time_window"
   },
   "requiredTasks": [
     {

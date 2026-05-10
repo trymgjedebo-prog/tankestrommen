@@ -13,13 +13,13 @@
   "forbiddenInNotes": [],
   "forbiddenHighlights": [],
   "tentativeDays": {
-    "fredag": true,
-    "lørdag": true,
+    "fredag": false,
+    "lørdag": false,
     "søndag": true
   },
   "timePrecisionByDay": {
-    "fredag": "date_only",
-    "lørdag": "date_only",
+    "fredag": "start_only",
+    "lørdag": "start_only",
     "søndag": "date_only"
   },
   "requiredTasks": []

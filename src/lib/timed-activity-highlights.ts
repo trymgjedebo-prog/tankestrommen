@@ -47,6 +47,7 @@ export function lineSuggestsTimedMainActivity(text: string): boolean {
     /\b(forestilling|konsert|generalpr[oø]ve|gpro|premiere|opptreden)\b/.test(n) ||
     /\b(sluttspill|finale|semifinale)\b/.test(n) ||
     /\b(trening|trenings[oø]kt|[oø]kt)\b/.test(n) ||
+    /\b(dugnad|foreldrem[oø]te|pr[oø]ve|eksamen)\b/.test(n) ||
     /\b(m[oø]te|fellessamling)\b/.test(n)
   );
 }
@@ -71,6 +72,9 @@ export function inferTimedActivityLabelFromText(text: string): string | null {
   if (/\b(spill(?:er|ere)?|avkast)\b/.test(n)) return "Kamp";
   if (/\bstarter\b/.test(n) && !/\boppm[oø]te\b/.test(n)) return "Kamp";
   if (/\boppm[oø]te\b/.test(n)) return "Oppmøte";
+  if (/\bforeldrem[oø]te\b/.test(n)) return "Foreldremøte";
+  if (/\bdugnad\b/.test(n)) return "Dugnad";
+  if (/\b(pr[oø]ve|matematikkpr[oø]ve|norskstil|eksamen|kartlegging)\b/.test(n)) return "Prøve";
   if (/\bsamling\b/.test(n)) return "Samling";
   if (/\bavreise\b/.test(n)) return "Avreise";
   if (/\bankom(st|mer)\b/.test(n)) return "Ankomst";
@@ -97,6 +101,9 @@ export function inferTimeWindowActivityLabel(blob: string): string {
   if (/\bforste\s+sluttspillkamp\b/.test(n)) return "Første sluttspillkamp";
   if (/\ba[\s-]?sluttspill\b/i.test(blob)) return "Første sluttspillkamp";
   if (/\bførste\s+kamp\b/i.test(blob)) return "Første kamp";
+  if (/\bdugnad\b/.test(n)) return "Dugnad";
+  if (/\bforeldrem[oø]te\b/.test(n)) return "Foreldremøte";
+  if (/\b(trening|trenings[oø]kt)\b/.test(n)) return "Trening";
   const fromInfer = inferTimedActivityLabelFromText(blob);
   if (fromInfer && !/^Kamp$/.test(fromInfer)) return fromInfer;
   if (/\bsluttspill\b/.test(n)) return "Sluttspillkamp";
