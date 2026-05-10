@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "category": "team_message",
+  "evalShape": "single_event",
   "parentCount": 1,
   "childCount": 1,
   "childTitles": ["Guttelaget – beskjed uke 42 – fredag"],

@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import {
+  effectiveEvalShape,
   loadTankestromExpected,
   resolveExpectedPath,
   type DayKey,
@@ -327,6 +328,7 @@ async function main(): Promise<void> {
         const fixturePath = resolveFixturePath(root, fx.rel);
         const expected = loadTankestromExpected(resolveExpectedPath(root, fx.id));
         const category = expected.category ?? "unknown";
+        const evalShape = effectiveEvalShape(expected);
 
         const { regressionBundle, modelTrace, latencyMs } = await runLiveFixtureAnalysis(fixturePath);
         const { scores, failures, styleWarnings, semanticNearMisses, average } = runAllTankestromScorers(
@@ -339,6 +341,7 @@ async function main(): Promise<void> {
         const metadata: Record<string, unknown> = {
           fixtureId: fx.id,
           category,
+          evalShape,
           model: requestedLabel,
           selectedModel,
           modelOverrideUsed: evalCtx.modelOverrideUsed,
@@ -367,7 +370,7 @@ async function main(): Promise<void> {
 
         const { structureAverage: _avg, ...scoresForBt } = scores;
         span.log({
-          input: { fixtureId: fx.id, fixturePath: fx.rel, category, mode: "live_text" },
+          input: { fixtureId: fx.id, fixturePath: fx.rel, category, evalShape, mode: "live_text" },
           output: {
             parentTitle: regressionBundle.parentTitle,
             childCount: regressionBundle.children.length,
