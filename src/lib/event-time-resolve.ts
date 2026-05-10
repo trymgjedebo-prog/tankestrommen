@@ -267,6 +267,25 @@ function extractNorwegianActivityClockWindow(
 }
 
 /**
+ * Om teksten inneholder formulering som tilsier aktivitetsvindu (mellom … og …, kl-range, «til»-range).
+ * Brukes bl.a. for å avgjøre om modellens `extractedText.raw` allerede bærer tidsvindu-semantikk,
+ * eller om original kilde bør slås inn — løs `\bmellom\b` i råtekst gir for mange falske positiver.
+ */
+export function textHasActivityClockWindowCue(blob: string): boolean {
+  if (!normalizeSpace(blob)) return false;
+  if (extractNorwegianActivityClockWindow(blob, null) != null) return true;
+  const collapsed = normalizeSpace(blob);
+  if (
+    new RegExp(String.raw`\b(\d{1,2}[.:]\d{2})\s*${CLOCK_RANGE_DASH}\s*(\d{1,2}[.:]\d{2})\b`).test(
+      collapsed,
+    )
+  )
+    return true;
+  if (/\b(\d{1,2}[.:]\d{2})\s+til\s+(?:kl\.?\s*)?(\d{1,2}[.:]\d{2})\b/i.test(collapsed)) return true;
+  return false;
+}
+
+/**
  * Varighet skal bare brukes når den står i samme «blokk» som det aktuelle klokkeslettet,
  * ellers plukker flerdagers `description` feil (f.eks. «ca. 45 min» fra et foreldremøte dagen før).
  */

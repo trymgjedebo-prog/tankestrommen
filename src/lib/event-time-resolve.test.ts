@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveNonFlightEventTimes } from "./event-time-resolve";
+import { resolveNonFlightEventTimes, textHasActivityClockWindowCue } from "./event-time-resolve";
 
 describe("resolveNonFlightEventTimes", () => {
   it("flyavgang + flytid → beregnet slutt (Test 1)", () => {
@@ -243,5 +243,20 @@ Lørdag 14. juni mellom kl. 10:00 og 12:00 dugnad.`;
     expect(lordag.start).toBe("10:00");
     expect(lordag.end).toBe("12:00");
     expect(lordag.timePrecision).toBe("time_window");
+  });
+});
+
+describe("textHasActivityClockWindowCue", () => {
+  it("gjenkjenner mellom kl. … og …", () => {
+    expect(textHasActivityClockWindowCue("dugnad mellom kl. 10:00 og 12:00")).toBe(true);
+  });
+  it("gjenkjenner klokke-intervall med tankestrek", () => {
+    expect(textHasActivityClockWindowCue("møte kl. 10:00–12:00")).toBe(true);
+  });
+  it("gjenkjenner til-form", () => {
+    expect(textHasActivityClockWindowCue("fra 10:00 til 12:00")).toBe(true);
+  });
+  it("«mellom» uten klokkeslett-vindu → false", () => {
+    expect(textHasActivityClockWindowCue("Gi beskjed mellom venner")).toBe(false);
   });
 });
