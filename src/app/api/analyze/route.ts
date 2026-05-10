@@ -648,6 +648,45 @@ function extractClockHHMMFromText(text: string): string | null {
   return `${String(h).padStart(2, "0")}:${m[2]}`;
 }
 
+/**
+ * Klokkeslett for Spond-/frist-task: kun fra selve fristlinjen, typisk etter siste «innen/senest/frist».
+ * Unngår at kampstart, oppmøte eller annen programtekst foran linjen blir dueTime.
+ */
+function extractDueTimeFromDeadlineTaskLine(line: string): string | null {
+  const deadlineRe = /\b(innen|inne|senest|frist|f[oø]r|inn\s+f[oø]r|innan)\b/gi;
+  let lastIdx = -1;
+  let m: RegExpExecArray | null;
+  while ((m = deadlineRe.exec(line)) !== null) {
+    lastIdx = m.index;
+  }
+  const tail = lastIdx >= 0 ? line.slice(lastIdx) : line;
+  return extractClockHHMMFromText(tail);
+}
+
+/**
+ * Spond-/påmeldingsfrist: klokkeslett fra oppgavelinjen, eller fra en kontekstlinje som inneholder
+ * både «spond» og fristord (senest/innen/…). Unngår kamp- og oppmøtetider som ikke står på fristlinjen.
+ */
+function extractDueTimeFromSpondDeadlineSources(
+  line: string,
+  nearbyContextBlob: string,
+): string | null {
+  const direct = extractDueTimeFromDeadlineTaskLine(line);
+  if (direct) return direct;
+  const ln = normalizeNorwegianLetters(line);
+  if (!/\bspond\b/.test(ln)) return null;
+  for (const raw of nearbyContextBlob.split(/\r?\n/)) {
+    const row = normalizeSpace(raw);
+    if (!row) continue;
+    const rn = normalizeNorwegianLetters(row);
+    if (!/\bspond\b/.test(rn)) continue;
+    if (!/\b(innen|inne|senest|frist|f[oø]r|inn\s+f[oø]r|innan)\b/i.test(rn)) continue;
+    const t = extractDueTimeFromDeadlineTaskLine(row);
+    if (t) return t;
+  }
+  return null;
+}
+
 /** Finn dato-kandidater i fritekst (norsk måned + ev. år). */
 function collectIsoDateCandidatesInText(text: string, fallbackYear: number): string[] {
   const candidates: string[] = [];
@@ -2699,7 +2738,10 @@ function resolveCupTaskDeadlineAndMeta(
   debug: TaskProposalDebug;
 } {
   const lineDate = pickBestDeadlineDateFromTaskLine(line, fallbackYear);
-  const lineTime = extractClockHHMMFromText(line);
+  const ln = normalizeNorwegianLetters(line);
+  const lineTime = /\bspond\b/.test(ln)
+    ? extractDueTimeFromSpondDeadlineSources(line, nearbyContextBlob)
+    : extractDueTimeFromDeadlineTaskLine(line);
   let taskDate = scheduleDayIso;
   let dueTime: string | null = lineTime;
   let derivedLine = false;
@@ -2716,7 +2758,7 @@ function resolveCupTaskDeadlineAndMeta(
     if (ctxDate) {
       taskDate = ctxDate;
       derivedContext = true;
-      if (!dueTime) dueTime = extractClockHHMMFromText(nearbyContextBlob);
+      // Ikke hent klokkeslett fra hele dagens program/description: da blir kamp/oppmøte/foreldremøte feilaktig dueTime.
     }
   }
 
