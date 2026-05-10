@@ -5,7 +5,11 @@ import {
   cupLineNormKey,
   enrichCupStructuredContentWithResolvedTiming,
   formatCupEventNotesFlat,
+  isBringItemsSignal,
+  lineLooksLikeAdministrativeDeadline,
+  parseCupTimeWindow,
 } from "@/lib/cup-day-content";
+import { extractOrderedHhmmTimesFromText } from "@/lib/timed-activity-highlights";
 import {
   extractGlobalCupScheduleTimesByDay,
   isConditionalTournamentTextForDay,
@@ -73,6 +77,15 @@ function splitSentences(text: string): string[] {
     .filter(Boolean);
 }
 
+/** Én linje kan inneholde flere setninger (skole/dugnad); del opp for renere highlights. */
+function splitNoteSegmentsForGeneral(line: string): string[] {
+  const masked = maskNorwegianNonSentenceDots(line);
+  return masked
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => normalizeSpace(unmaskNorwegianDots(s)))
+    .filter(Boolean);
+}
+
 function hasDayMention(sentence: string, day: DayKey): boolean {
   const n = normalizeNorwegianLetters(sentence);
   if (day === "fredag") return /\bfredag|friday\b/.test(n);
@@ -125,7 +138,7 @@ function parseExplicitAttendanceTime(text: string, day: DayKey): string | null {
     "i",
   );
   const dayFirst = reDayFirst.exec(text);
-  if (dayFirst) return `${String(Number(dayFirst[2])).padStart(2, "0")}:${dayFirst[3]}`;
+  if (dayFirst) return `${String(Number(dayFirst[1])).padStart(2, "0")}:${dayFirst[2]}`;
 
   const reAttendanceFirst = new RegExp(
     `oppm[oø]te[^\\n.!?]{0,90}?${dayExpr}[^\\n.!?]{0,40}?kl\\.?\\s*(\\d{1,2})[:.](\\d{2})`,
@@ -133,7 +146,7 @@ function parseExplicitAttendanceTime(text: string, day: DayKey): string | null {
   );
   const attendanceFirst = reAttendanceFirst.exec(text);
   if (!attendanceFirst) return null;
-  return `${String(Number(attendanceFirst[2])).padStart(2, "0")}:${attendanceFirst[3]}`;
+  return `${String(Number(attendanceFirst[1])).padStart(2, "0")}:${attendanceFirst[2]}`;
 }
 
 function parsePerMatchOffset(text: string, day: DayKey): number | null {
@@ -149,7 +162,7 @@ function parsePerMatchOffset(text: string, day: DayKey): number | null {
   );
   const m = re.exec(text);
   if (!m) return null;
-  const v = Number(m[2]);
+  const v = Number(m[1]);
   return Number.isFinite(v) && v > 0 && v <= 180 ? v : null;
 }
 
@@ -168,6 +181,47 @@ function inferParentTitle(text: string): string {
   if (/v[aå]rcupen/i.test(first)) return "Vårcupen";
   if (/h[øo]stcupen/i.test(first)) return "Høstcupen";
   return first || "Arrangement";
+}
+
+function normalizeActivityHighlightStyle(category?: string): "cup" | "general" {
+  const c = (category ?? "cup").trim().toLowerCase();
+  if (c === "cup") return "cup";
+  return "general";
+}
+
+/** Flerdagers «pakkeliste» (komma/«og») — skal med på alle kort med innhold; korte «ta med»-hint typisk én dag. */
+function bringOrphanLikelySharedAcrossDays(line: string): boolean {
+  return (line.match(/\s*,\s*|\s+og\s+/gi) ?? []).length >= 2;
+}
+
+function buildGeneralDaySourceBlob(text: string, day: DayKey): string {
+  const lines = text
+    .split(/\n+/)
+    .map((s) => normalizeSpace(s))
+    .filter(Boolean);
+  const weekendDays: DayKey[] = ["fredag", "lørdag", "søndag"];
+  const dayLines = lines.filter((l) => hasDayMention(l, day));
+  const orphans = lines.filter(
+    (l) => !weekendDays.some((d) => hasDayMention(l, d)),
+  );
+  const daysWithContent = weekendDays.filter((d) => lines.some((l) => hasDayMention(l, d)));
+  const lastDayWithContent =
+    daysWithContent.length > 0 ? daysWithContent[daysWithContent.length - 1]! : null;
+  const firstPrimaryDay: DayKey | null =
+    weekendDays.find((d) => lines.some((l) => hasDayMention(l, d))) ?? null;
+
+  const parts: string[] = [...dayLines];
+  for (const o of orphans) {
+    if (lineLooksLikeAdministrativeDeadline(o)) continue;
+    if (extractOrderedHhmmTimesFromText(o).length > 0) continue;
+    if (isBringItemsSignal(o)) {
+      if (dayLines.length === 0) continue;
+      if (bringOrphanLikelySharedAcrossDays(o) || lastDayWithContent === day) parts.push(o);
+      continue;
+    }
+    if (firstPrimaryDay === day && dayLines.length > 0) parts.push(o);
+  }
+  return parts.join("\n");
 }
 
 function parseMonthToken(raw: string): string | null {
@@ -224,7 +278,10 @@ function parseSpondDeadlineTask(
   };
 }
 
-export function runTankestromFixture(fixturePath: string): RegressionPortalBundle {
+export function runTankestromFixture(
+  fixturePath: string,
+  options?: { category?: string },
+): RegressionPortalBundle {
   const fullPath = resolve(fixturePath);
   const text = readFileSync(fullPath, "utf8");
   const parentTitle = inferParentTitle(text);
@@ -232,28 +289,63 @@ export function runTankestromFixture(fixturePath: string): RegressionPortalBundl
   const sentences = splitSentences(text);
   const days: DayKey[] = ["fredag", "lørdag", "søndag"];
   const children: RegressionChild[] = [];
+  const highlightStyle = normalizeActivityHighlightStyle(options?.category);
 
   for (const day of days) {
     const date = parseDayDate(text, day);
-    const dayTimes =
-      day === "fredag" ? global.fredag : day === "lørdag" ? global.lordag : global.sondag;
-    const attendanceExplicit = parseExplicitAttendanceTime(text, day);
     const offset = parsePerMatchOffset(text, day);
 
     const daySentences = sentences.filter((s) => hasDayMention(s, day));
     const genericSentences = sentences.filter(
       (s) => !hasDayMention(s, "fredag") && !hasDayMention(s, "lørdag") && !hasDayMention(s, "søndag"),
     );
-    const sourceBlob = [...daySentences, ...genericSentences].join("\n");
+    const sourceBlob =
+      highlightStyle === "general"
+        ? buildGeneralDaySourceBlob(text, day)
+        : [...daySentences, ...genericSentences].join("\n");
+
+    let dayTimes =
+      day === "fredag" ? global.fredag : day === "lørdag" ? global.lordag : global.sondag;
+    const attendanceExplicit = parseExplicitAttendanceTime(text, day);
+
+    const twFromBlob = highlightStyle === "general" ? parseCupTimeWindow(sourceBlob) : null;
+    const timeWindow =
+      twFromBlob != null
+        ? { earliestStart: twFromBlob.earliestStart, latestStart: twFromBlob.latestStart }
+        : null;
+
+    if (highlightStyle === "general" && !timeWindow && dayTimes.length === 0) {
+      const fromBlob = extractOrderedHhmmTimesFromText(sourceBlob);
+      dayTimes = attendanceExplicit
+        ? fromBlob.filter((t) => t !== attendanceExplicit)
+        : fromBlob;
+    }
+
+    const effectiveMatchTimes = timeWindow != null ? [] : dayTimes;
+
     const conditional = isConditionalTournamentTextForDay(sourceBlob, day);
+    const noteLines =
+      highlightStyle === "general"
+        ? sourceBlob
+            .split(/\n+/)
+            .flatMap((line) => splitNoteSegmentsForGeneral(line))
+            .map((s) => normalizeSpace(s))
+            .filter(Boolean)
+        : daySentences;
     const timePrecision: TimePrecision =
-      dayTimes.length > 0 ? "start_only" : conditional ? "date_only" : "date_only";
+      timeWindow != null
+        ? "time_window"
+        : effectiveMatchTimes.length > 0
+          ? "start_only"
+          : conditional
+            ? "date_only"
+            : "date_only";
 
     const structured = buildCupStructuredDayContent({
       date: date ?? "1970-01-01",
       details: null,
-      highlights: dayTimes.map((t) => `${t} Kamp`),
-      notes: daySentences,
+      highlights: effectiveMatchTimes.map((t) => `${t} Kamp`),
+      notes: noteLines,
       rememberItems: [],
       deadlines: [],
       parentTitle,
@@ -265,17 +357,19 @@ export function runTankestromFixture(fixturePath: string): RegressionPortalBundl
       childTitleNorm: cupLineNormKey(`${parentTitle} – ${day}`),
       sourceBlob,
       attendanceTime: attendanceExplicit,
-      orderedMatchTimes: dayTimes,
-      daySegmentStart: attendanceExplicit ?? dayTimes[0] ?? null,
+      orderedMatchTimes: effectiveMatchTimes,
+      daySegmentStart:
+        attendanceExplicit ?? effectiveMatchTimes[0] ?? timeWindow?.earliestStart ?? null,
       daySegmentEnd: null,
-      timeWindow: null,
+      timeWindow,
       timePrecision,
       tentative: conditional,
+      activityHighlightStyle: highlightStyle,
     });
 
     let highlights = [...enriched.highlights];
-    if (offset != null && dayTimes.length > 0) {
-      for (const t of dayTimes) {
+    if (offset != null && timeWindow == null && effectiveMatchTimes.length > 0) {
+      for (const t of effectiveMatchTimes) {
         const att = shiftHhmm(t, -offset);
         if (att && !highlights.some((h) => h.startsWith(`${att} `))) {
           highlights.push(`${att} Oppmøte`);
@@ -284,12 +378,12 @@ export function runTankestromFixture(fixturePath: string): RegressionPortalBundl
       highlights = highlights.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     }
 
-    if (date || daySentences.length > 0 || dayTimes.length > 0) {
+    if (date || daySentences.length > 0 || dayTimes.length > 0 || timeWindow != null) {
       children.push({
         day,
         title: `${parentTitle} – ${day}`,
         date,
-        start: attendanceExplicit ?? dayTimes[0] ?? null,
+        start: attendanceExplicit ?? effectiveMatchTimes[0] ?? timeWindow?.earliestStart ?? null,
         timePrecision,
         tentative: conditional,
         highlights,

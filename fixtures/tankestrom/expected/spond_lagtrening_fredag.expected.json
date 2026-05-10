@@ -5,16 +5,20 @@
   "childCount": 1,
   "childTitles": ["Guttelaget – beskjed uke 42 – fredag"],
   "highlightsByDay": {
-    "fredag": ["17:45 Oppmøte", "18:30 Første kamp"]
+    "fredag": ["17:45 Oppmøte", "18:30 Trening"]
   },
-  "requiredBringItems": [],
+  "requiredBringItems": ["drikkeflaske", "leggskinner"],
   "forbiddenInNotes": [],
-  "forbiddenHighlights": [],
+  "forbiddenHighlights": [
+    { "includes": "Første kamp" },
+    { "includes": "Andre kamp" },
+    { "includes": "Tredje kamp" }
+  ],
   "tentativeDays": {
     "fredag": false
   },
   "timePrecisionByDay": {
-    "fredag": "date_only"
+    "fredag": "start_only"
   },
   "requiredTasks": [
     {

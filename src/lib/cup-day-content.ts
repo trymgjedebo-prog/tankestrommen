@@ -12,6 +12,7 @@ import {
 import {
   buildTimeWindowHighlightLine,
   defaultMatchLabelByIndex,
+  extractOrderedHhmmTimesFromText,
   inferTimedActivityLabelFromText,
   inferTimeWindowActivityLabel,
   lineSuggestsTimedMainActivity,
@@ -28,6 +29,31 @@ function normalizeNorwegianLetters(input: string): string {
     .replace(/å/g, "a")
     .replace(/ø/g, "o")
     .replace(/æ/g, "e");
+}
+
+const BLOB_MASK_DOT = "\uE040";
+
+/** Unngå setningssplit i «kl.» og «18. september» når vi leter opp aktivitet per klokkeslett. */
+function maskDotsForSentenceSplit(line: string): string {
+  const months =
+    "januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember";
+  const dateDot = new RegExp(`\\b(\\d{1,2})\\.(\s+)(${months})\\b`, "gi");
+  return line
+    .replace(/\bkl\./gi, `kl${BLOB_MASK_DOT}`)
+    .replace(dateDot, (_m, d, sp, mo) => `${d}${BLOB_MASK_DOT}${sp}${mo}`);
+}
+
+function unmaskDotsForSentenceSplit(s: string): string {
+  return s.replaceAll(BLOB_MASK_DOT, ".");
+}
+
+function sourceFragmentsForHhmmLookup(line: string): string[] {
+  const masked = maskDotsForSentenceSplit(line);
+  const parts = masked
+    .split(/(?<=[.!?])\s+/)
+    .map((x) => normalizeSpace(unmaskDotsForSentenceSplit(x)))
+    .filter(Boolean);
+  return parts.length ? parts : [normalizeSpace(line)];
 }
 
 export function cupLineNormKey(s: string): string {
@@ -74,6 +100,9 @@ const BRING_CANONICAL: Array<{ test: (s: string) => boolean; label: string }> = 
   { test: (s) => /\binnesko\b/i.test(s), label: "innesko" },
   { test: (s) => /\bhåndkle\b/i.test(s), label: "håndkle" },
   { test: (s) => /\bkampdrakt\b/i.test(s), label: "kampdrakt" },
+  { test: (s) => /\bleggskinner\b/i.test(s), label: "leggskinner" },
+  { test: (s) => /\barbeidshansker\b/i.test(s), label: "arbeidshansker" },
+  { test: (s) => /\bgymt[oø]y\b/i.test(s), label: "gymtøy" },
 ];
 
 function canonicalBringLabel(raw: string): string {
@@ -84,7 +113,7 @@ function canonicalBringLabel(raw: string): string {
   return t.length ? t.charAt(0).toLowerCase() + t.slice(1) : t;
 }
 
-function isBringItemsSignal(text: string): boolean {
+export function isBringItemsSignal(text: string): boolean {
   const n = normalizeNorwegianLetters(text);
   return (
     /\b(husk|ta\s+med|utstyr|pakkeliste)\b/i.test(n) ||
@@ -199,7 +228,7 @@ function highlightLabelIsTimeWindowJunk(label: string): boolean {
   );
 }
 
-function lineLooksLikeAdministrativeDeadline(line: string): boolean {
+export function lineLooksLikeAdministrativeDeadline(line: string): boolean {
   const n = normalizeNorwegianLetters(line);
   const adminSignal =
     /\b(spond|svar|frist|senest|pamelding|påmelding|meld\s+fra|gi\s+beskjed|kommentarfelt)\b/.test(n);
@@ -572,6 +601,11 @@ export type CupTimingEnrichmentInput = {
   timeWindow: { earliestStart: string; latestStart: string } | null;
   timePrecision: "exact" | "start_only" | "date_only" | "time_window";
   tentative: boolean;
+  /**
+   * `cup` (default): behold kamp-ordinaler og cup-oppførsel.
+   * `general`: ikke-cup tekster — bruk aktivitetsinferens per klokkeslett, ikke «Første kamp» som standard.
+   */
+  activityHighlightStyle?: "cup" | "general";
 };
 
 function hhmmToMinutesLocal(hhmm: string): number | null {
@@ -608,7 +642,12 @@ function parseAttendanceOffsetForEachMatch(text: string): number | null {
   return Number.isFinite(v) && v > 0 && v <= 180 ? v : null;
 }
 
-function ordinalAttendanceLabel(indexZeroBased: number, totalMatches: number): string {
+function ordinalAttendanceLabel(
+  indexZeroBased: number,
+  totalMatches: number,
+  style: "cup" | "general",
+): string {
+  if (style === "general") return "Oppmøte";
   if (totalMatches <= 1) return "Oppmøte";
   const kamp = defaultMatchLabelByIndex(indexZeroBased).toLowerCase();
   return `Oppmøte før ${kamp}`;
@@ -683,10 +722,20 @@ export function enrichCupStructuredContentWithResolvedTiming(
   content: CupStructuredDayContent,
   enrichment: CupTimingEnrichmentInput,
 ): CupStructuredDayContent {
+  const highlightStyle = enrichment.activityHighlightStyle ?? "cup";
   const titleBlock = new Set(
     [enrichment.parentTitleNorm, enrichment.childTitleNorm].filter((x) => x && x.length > 0),
   );
   const blob = enrichment.sourceBlob;
+
+  function bestSourceLineForHhmm(blobText: string, hhmm: string): string | null {
+    for (const raw of blobText.split(/\n+/).map(normalizeSpace).filter(Boolean)) {
+      for (const frag of sourceFragmentsForHhmmLookup(raw)) {
+        if (extractOrderedHhmmTimesFromText(frag).includes(hhmm)) return frag;
+      }
+    }
+    return null;
+  }
 
   let highlights = content.highlights.filter((h) => !isTitleLikeHighlightLine(h, titleBlock));
   let logisticsNotes = [...content.logisticsNotes];
@@ -751,8 +800,21 @@ export function enrichCupStructuredContentWithResolvedTiming(
     .filter((t) => !explicitAttendanceTimes.includes(t))
     .sort((a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!);
 
-  /** Kamprad-label: aldri global «Oppmøte» fra hele blobben for én kamptid. */
+  /** Kamprad-label: aldri global «Oppmøte» fra hele blobben for én kamptid (cup). */
   function matchRowLabelForIndex(i: number): string {
+    if (highlightStyle === "general") {
+      const t = matchClocksOrdered[i]!;
+      const lineHit = bestSourceLineForHhmm(blob, t);
+      if (lineHit) {
+        const inf = inferTimedActivityLabelFromText(lineHit);
+        if (inf) return inf;
+      }
+      if (matchClocksOrdered.length === 1) {
+        const infAll = inferTimedActivityLabelFromText(blob);
+        if (infAll) return infAll;
+      }
+      return "Aktivitet";
+    }
     if (matchClocksOrdered.length !== 1) return defaultMatchLabelByIndex(i);
     const inferred = inferTimedActivityLabelFromText(blob);
     if (
@@ -778,7 +840,7 @@ export function enrichCupStructuredContentWithResolvedTiming(
   function labelForMatchClock(time: string): string | undefined {
     const idx = matchClocksOrdered.indexOf(time);
     if (idx < 0) return undefined;
-    return timeLabelByMatch.get(time) ?? defaultMatchLabelByIndex(idx);
+    return timeLabelByMatch.get(time) ?? matchRowLabelForIndex(idx);
   }
 
   highlights = highlights.map((h) => {
@@ -799,7 +861,7 @@ export function enrichCupStructuredContentWithResolvedTiming(
   for (let i = 0; i < matchClocksOrdered.length; i++) {
     const t = matchClocksOrdered[i]!;
     if (highlightCoversTime(highlights, t)) continue;
-    const label = timeLabelByMatch.get(t) ?? defaultMatchLabelByIndex(i);
+    const label = timeLabelByMatch.get(t) ?? matchRowLabelForIndex(i);
     if (!label || titleBlock.has(normKeyTimed(label))) continue;
     highlights.push(`${t} ${label}`);
   }
@@ -810,7 +872,9 @@ export function enrichCupStructuredContentWithResolvedTiming(
       const t = matchClocksOrdered[i]!;
       const attPerMatch = shiftHhmmLocal(t, -perMatchOffset);
       if (!attPerMatch || highlightCoversTime(highlights, attPerMatch)) continue;
-      highlights.push(`${attPerMatch} ${ordinalAttendanceLabel(i, matchClocksOrdered.length)}`);
+      highlights.push(
+        `${attPerMatch} ${ordinalAttendanceLabel(i, matchClocksOrdered.length, highlightStyle)}`,
+      );
     }
   }
 
@@ -854,7 +918,9 @@ export function enrichCupStructuredContentWithResolvedTiming(
     const matchIdx = matchClocksOrdered.indexOf(ds);
     const label: string | null =
       matchIdx >= 0
-        ? defaultMatchLabelByIndex(matchIdx)
+        ? highlightStyle === "general"
+          ? matchRowLabelForIndex(matchIdx)
+          : defaultMatchLabelByIndex(matchIdx)
         : inferTimedActivityLabelFromText(blob);
     if (
       label &&

@@ -18,9 +18,9 @@
     "søndag": false
   },
   "timePrecisionByDay": {
-    "fredag": "date_only",
-    "lørdag": "date_only",
-    "søndag": "date_only"
+    "fredag": "start_only",
+    "lørdag": "start_only",
+    "søndag": "start_only"
   },
   "requiredTasks": []
 }

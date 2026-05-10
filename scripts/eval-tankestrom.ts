@@ -127,7 +127,7 @@ async function main(): Promise<void> {
     const expectedPath = resolveExpectedPath(root, fx.id);
     const expected = loadTankestromExpected(expectedPath);
     const t0 = performance.now();
-    const bundle = runTankestromFixture(fixturePath);
+    const bundle = runTankestromFixture(fixturePath, { category: expected.category });
     const latencyMs = Math.round(performance.now() - t0);
 
     const { scores, failures, styleWarnings, semanticNearMisses, average } = runAllTankestromScorers(
