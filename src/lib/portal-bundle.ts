@@ -14,6 +14,10 @@ import {
   normalizePortalProposalEventItem,
   type PortalImportContext,
 } from "@/lib/portal-import-person";
+import {
+  buildAnalysisCorpus,
+  buildAnalysisEvidenceReport,
+} from "@/lib/analysis-evidence";
 import type { AIAnalysisResult, SchoolWeekOverlayProposal } from "@/lib/types";
 import { currentSpan, startSpan } from "braintrust";
 
@@ -334,6 +338,7 @@ export async function toPortalBundle(
       ...(secondaryTaskCandidates.length > 0 ? { secondaryTaskCandidates } : {}),
       ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
       ...(schoolWeekOverlayProposal ? { schoolWeekOverlayProposal } : {}),
+      evidenceReport: buildAnalysisEvidenceReport(buildAnalysisCorpus(result), result),
       ...(Object.keys(debugPayload).length > 0 ? { debug: debugPayload } : {}),
     };
     portalBundleSpan?.log({
