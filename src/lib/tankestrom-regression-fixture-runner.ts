@@ -14,6 +14,9 @@ import {
   extractGlobalCupScheduleTimesByDay,
   isConditionalTournamentTextForDay,
 } from "@/lib/cup-timing-context";
+import { buildCupWeekendDayBlob } from "@/lib/cup-day-source-blob";
+import { resolveCupDayTiming } from "@/lib/cup-resolve-day-timing";
+import { parseScopedAttendanceOffsetMinutes } from "@/lib/activity-duration";
 
 export type DayKey = "fredag" | "lørdag" | "søndag";
 export type TimePrecision = "exact" | "start_only" | "date_only" | "time_window";
@@ -23,6 +26,10 @@ export type RegressionChild = {
   title: string;
   date: string | null;
   start: string | null;
+  end?: string | null;
+  endTimeSource?: string | null;
+  durationMinutes?: number | null;
+  postEventBufferMinutes?: number | null;
   timePrecision: TimePrecision;
   tentative: boolean;
   highlights: string[];
@@ -293,37 +300,62 @@ export function runTankestromFixture(
 
   for (const day of days) {
     const date = parseDayDate(text, day);
-    const offset = parsePerMatchOffset(text, day);
 
     const daySentences = sentences.filter((s) => hasDayMention(s, day));
-    const genericSentences = sentences.filter(
-      (s) => !hasDayMention(s, "fredag") && !hasDayMention(s, "lørdag") && !hasDayMention(s, "søndag"),
-    );
+    const weekendBlob = buildCupWeekendDayBlob(text, day);
+    const cupDaySectionBlob = weekendBlob.trim().length > 0;
     const sourceBlob =
       highlightStyle === "general"
         ? buildGeneralDaySourceBlob(text, day)
-        : [...daySentences, ...genericSentences].join("\n");
+        : cupDaySectionBlob
+          ? weekendBlob
+          : buildGeneralDaySourceBlob(text, day);
 
-    let dayTimes =
-      day === "fredag" ? global.fredag : day === "lørdag" ? global.lordag : global.sondag;
-    const attendanceExplicit = parseExplicitAttendanceTime(text, day);
-
-    const twFromBlob = highlightStyle === "general" ? parseCupTimeWindow(sourceBlob) : null;
-    const timeWindow =
+    const conditional = isConditionalTournamentTextForDay(sourceBlob, day);
+    const twFromBlob = parseCupTimeWindow(sourceBlob);
+    const rawTimeWindow =
       twFromBlob != null
         ? { earliestStart: twFromBlob.earliestStart, latestStart: twFromBlob.latestStart }
         : null;
+    const timeWindow = conditional ? null : rawTimeWindow;
 
-    if (highlightStyle === "general" && !timeWindow && dayTimes.length === 0) {
+    let dayTimes =
+      day === "fredag" ? global.fredag : day === "lørdag" ? global.lordag : global.sondag;
+
+    if (cupDaySectionBlob && !conditional && !rawTimeWindow) {
+      const blobTimes = extractOrderedHhmmTimesFromText(sourceBlob);
+      if (blobTimes.length > 0) {
+        const merged = [...dayTimes, ...blobTimes];
+        dayTimes = [...new Set(merged)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      }
+    }
+
+    const attendanceExplicit = parseExplicitAttendanceTime(text, day);
+    const offsetEvidence = parseScopedAttendanceOffsetMinutes(sourceBlob);
+    const offset = offsetEvidence?.perMatch ? offsetEvidence.minutes : parsePerMatchOffset(text, day);
+
+    if (highlightStyle === "general" && !rawTimeWindow && dayTimes.length === 0) {
       const fromBlob = extractOrderedHhmmTimesFromText(sourceBlob);
       dayTimes = attendanceExplicit
         ? fromBlob.filter((t) => t !== attendanceExplicit)
         : fromBlob;
     }
 
-    const effectiveMatchTimes = timeWindow != null ? [] : dayTimes;
+    const effectiveMatchTimes = conditional || rawTimeWindow != null ? [] : dayTimes;
 
-    const conditional = isConditionalTournamentTextForDay(sourceBlob, day);
+    const attendanceFromOffset =
+      !attendanceExplicit &&
+      offsetEvidence &&
+      effectiveMatchTimes.length > 0
+        ? shiftHhmm(
+            effectiveMatchTimes[0]!,
+            -(offsetEvidence.perMatch && effectiveMatchTimes.length > 1
+              ? offsetEvidence.minutes
+              : offsetEvidence.minutes),
+          )
+        : null;
+    const attendanceForEnrich = attendanceExplicit ?? attendanceFromOffset;
+
     const noteLines =
       highlightStyle === "general"
         ? sourceBlob
@@ -331,15 +363,17 @@ export function runTankestromFixture(
             .flatMap((line) => splitNoteSegmentsForGeneral(line))
             .map((s) => normalizeSpace(s))
             .filter(Boolean)
-        : daySentences;
-    const timePrecision: TimePrecision =
-      timeWindow != null
+        : sourceBlob
+            .split(/\n+/)
+            .map((s) => normalizeSpace(s))
+            .filter((l) => l && !/\bkampoppsett\s*:/i.test(l));
+    const timePrecision: TimePrecision = conditional
+      ? "date_only"
+      : timeWindow != null
         ? "time_window"
         : effectiveMatchTimes.length > 0
-          ? "start_only"
-          : conditional
-            ? "date_only"
-            : "date_only";
+          ? "exact"
+          : "date_only";
 
     const structured = buildCupStructuredDayContent({
       date: date ?? "1970-01-01",
@@ -356,10 +390,10 @@ export function runTankestromFixture(
       parentTitleNorm: cupLineNormKey(parentTitle),
       childTitleNorm: cupLineNormKey(`${parentTitle} – ${day}`),
       sourceBlob,
-      attendanceTime: attendanceExplicit,
+      attendanceTime: attendanceForEnrich,
       orderedMatchTimes: effectiveMatchTimes,
       daySegmentStart:
-        attendanceExplicit ?? effectiveMatchTimes[0] ?? timeWindow?.earliestStart ?? null,
+        attendanceForEnrich ?? effectiveMatchTimes[0] ?? timeWindow?.earliestStart ?? null,
       daySegmentEnd: null,
       timeWindow,
       timePrecision,
@@ -367,8 +401,29 @@ export function runTankestromFixture(
       activityHighlightStyle: highlightStyle,
     });
 
+    const cupTiming = resolveCupDayTiming({
+      day: {
+        dayLabel: day,
+        date,
+        time: attendanceForEnrich ?? effectiveMatchTimes[0] ?? null,
+        details: null,
+        highlights: effectiveMatchTimes.map((t) => `${t} Kamp`),
+        rememberItems: enriched.bringItems,
+        deadlines: [],
+        notes: noteLines,
+      },
+      detailsForEvent: null,
+      highlightsForEventFinal: effectiveMatchTimes.map((t) => `${t} Kamp`),
+      notesOnlyForEvent: noteLines,
+      rememberForEvent: enriched.bringItems,
+      deadlinesForEvent: [],
+      conditionalDay: conditional,
+      fullCorpus: text,
+      supplementalTimeContextBlob: sourceBlob,
+    });
+
     let highlights = [...enriched.highlights];
-    if (offset != null && timeWindow == null && effectiveMatchTimes.length > 0) {
+    if (offset != null && !offsetEvidence?.perMatch && timeWindow == null && effectiveMatchTimes.length > 0) {
       for (const t of effectiveMatchTimes) {
         const att = shiftHhmm(t, -offset);
         if (att && !highlights.some((h) => h.startsWith(`${att} `))) {
@@ -379,12 +434,18 @@ export function runTankestromFixture(
     }
 
     if (date || daySentences.length > 0 || dayTimes.length > 0 || timeWindow != null) {
+      const resolvedPrecision =
+        cupTiming.timePrecision !== "date_only" ? cupTiming.timePrecision : timePrecision;
       children.push({
         day,
         title: `${parentTitle} – ${day}`,
         date,
-        start: attendanceExplicit ?? effectiveMatchTimes[0] ?? timeWindow?.earliestStart ?? null,
-        timePrecision,
+        start: cupTiming.start ?? attendanceExplicit ?? effectiveMatchTimes[0] ?? timeWindow?.earliestStart ?? null,
+        end: cupTiming.end,
+        endTimeSource: cupTiming.endTimeSource,
+        durationMinutes: cupTiming.durationMinutes,
+        postEventBufferMinutes: cupTiming.postEventBufferMinutes,
+        timePrecision: resolvedPrecision,
         tentative: conditional,
         highlights,
         bringItems: enriched.bringItems,

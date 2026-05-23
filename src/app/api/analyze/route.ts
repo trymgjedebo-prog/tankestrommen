@@ -4717,6 +4717,7 @@ async function buildProposalItems(
           deadlinesForEvent,
           conditionalDay,
           supplementalTimeContextBlob: cupTimingSupplement || undefined,
+          fullCorpus: mergedTimeContextBlobFromResult(result),
         });
         if (structuredDayContent && cupTiming) {
           const parentTitleForTiming = buildCupParentCalendarTitle(result);

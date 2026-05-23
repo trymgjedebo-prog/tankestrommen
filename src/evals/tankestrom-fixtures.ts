@@ -6,6 +6,7 @@ export type TankestromFixtureDef = { id: string; rel: string };
 export const TANKESTROM_FIXTURE_DEFS: TankestromFixtureDef[] = [
   { id: "vaacup_original", rel: "fixtures/tankestrom/vaacup_original.txt" },
   { id: "hostcup_handball", rel: "fixtures/tankestrom/hostcup_handball.txt" },
+  { id: "hostcup_duration_endtime_rich", rel: "fixtures/tankestrom/hostcup_duration_endtime_rich.txt" },
   { id: "speiderhelg", rel: "fixtures/tankestrom/speiderhelg.txt" },
   { id: "turnstevne", rel: "fixtures/tankestrom/turnstevne.txt" },
   { id: "spond_lagtrening_fredag", rel: "fixtures/tankestrom/spond_lagtrening_fredag.txt" },

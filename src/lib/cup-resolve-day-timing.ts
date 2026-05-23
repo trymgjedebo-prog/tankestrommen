@@ -1,10 +1,17 @@
-import { parseCupTimeWindow } from "@/lib/cup-day-content";
+import {
+  computeInferredDayEnd,
+  parsePostEventBufferMinutes,
+  parseScopedAttendanceOffsetMinutes,
+  resolveMatchDurationMinutes,
+} from "@/lib/activity-duration";
+import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
+import { lineLooksLikeAdministrativeDeadline, parseCupTimeWindow } from "@/lib/cup-day-content";
 import {
   extractCupMatchTimes,
   extractExplicitAttendanceHhmmTimes,
+  extractKampAnchoredClockTimes,
 } from "@/lib/cup-match-times";
 import { resolveNonFlightEventTimes } from "@/lib/event-time-resolve";
-import { parseDurationMinutes } from "@/lib/parse-duration";
 import type { DayScheduleEntry } from "@/lib/types";
 
 function normalizeNorwegianLetters(input: string): string {
@@ -80,55 +87,13 @@ function shiftHhmmLocal(hhmm: string, delta: number): string | null {
   return minutesToHhmmLocal(m + delta);
 }
 
-function parseCupAttendanceOffsetMinutes(text: string): number | null {
-  const m =
-    /\b(?:oppm[oø]te|m[oø]ter(?:\s+ferdig\s+skiftet)?)\b[^.!?\n]{0,70}?(\d{1,3})\s*min(?:utter)?\s*f[øo]r\b/i.exec(
-      text,
-    ) ||
-    /\b(\d{1,3})\s*min(?:utter)?\s*f[øo]r\b[^.!?\n]{0,70}?\b(?:kamp|oppm[oø]te)\b/i.exec(text);
-  if (!m) return null;
-  const n = Number(m[1]);
-  return Number.isFinite(n) && n > 0 && n <= 180 ? n : null;
-}
-
-function parseCupMatchDurationMinutes(text: string): number | null {
-  const normalized = normalizeNorwegianLetters(text).toLowerCase();
-  const mult =
-    /\b(\d{1,2})\s*x\s*(\d{1,2})\s*min(?:utter)?\b/.exec(normalized) ||
-    /\b(\d{1,2})\s*omganger?[^\d]{0,12}(\d{1,2})\s*min(?:utter)?\b/.exec(normalized);
-  if (mult) {
-    const rounds = Number(mult[1]);
-    const per = Number(mult[2]);
-    if (!Number.isFinite(rounds) || !Number.isFinite(per) || rounds <= 0 || per <= 0) return null;
-    let total = rounds * per;
-    const pause = /(?:\+\s*|og\s+)(\d{1,2})\s*min(?:utter)?\s*pause\b/.exec(normalized);
-    if (pause) {
-      const p = Number(pause[1]);
-      if (Number.isFinite(p) && p > 0 && p <= 45) total += p;
-    }
-    return total;
-  }
-  return parseDurationMinutes(text);
-}
-
-function parseCupPostEventBufferMinutes(text: string): number | null {
-  const normalized = normalizeNorwegianLetters(text).toLowerCase();
-  const half = /\b(?:ikke\s+ute\s+for|ikke\s+ferdig\s+for)[^.!?\n]{0,60}?(?:en\s+halvtime|halvtime)\b/.exec(
-    normalized,
-  );
-  if (half) return 30;
-  const m =
-    /\b(?:ikke\s+ute\s+for|ikke\s+ferdig\s+for|etter\s+kampen|etter\s+siste\s+kamp)\b[^.!?\n]{0,80}?(\d{1,3})\s*min(?:utter)?\b/.exec(
-      normalized,
-    );
-  if (!m) return null;
-  const n = Number(m[1]);
-  return Number.isFinite(n) && n > 0 && n <= 180 ? n : null;
-}
-
-function hasVagueAfterLastMatchText(text: string): boolean {
-  const n = normalizeNorwegianLetters(text).toLowerCase();
-  return /\b(etter\s+siste\s+kamp)\b/.test(n) && /\b(rydde|snakke|kort|beskjed|en\s+stund|litt\s+tid)\b/.test(n);
+function resolveDayScopedBlob(input: {
+  day: DayScheduleEntry;
+  blob: string;
+  fullCorpus?: string | null;
+}): string {
+  const corpus = (input.fullCorpus ?? input.blob).replace(/\r\n/g, "\n").trim();
+  return extractDayBlobFromCorpus(corpus, input.day.dayLabel).trim();
 }
 
 type CupWeekdayKey = "fredag" | "lordag" | "sondag";
@@ -218,6 +183,8 @@ export function resolveCupDayTiming(input: {
   conditionalDay: boolean;
   /** Ekstra kontekst (typisk rå/description) når modellen utelater «mellom … og …» i strukturerte felt. */
   supplementalTimeContextBlob?: string | null;
+  /** Full kildetekst for arv av varighet («samme spilletid som fredag»). */
+  fullCorpus?: string | null;
 }): CupDayTiming {
   const supplemental = normalizeSpace(input.supplementalTimeContextBlob ?? "");
   const blob = [
@@ -259,11 +226,23 @@ export function resolveCupDayTiming(input: {
     contextBlob: nonFlightBlob,
     scheduleDayLabel: input.day.dayLabel,
   });
-  const matchTimes = extractCupMatchTimes(blob);
-  const durationMinutes = parseCupMatchDurationMinutes(blob);
-  const attendanceOffsetMinutes = parseCupAttendanceOffsetMinutes(blob);
-  const postEventBufferMinutes = parseCupPostEventBufferMinutes(blob);
-  const vagueAfter = hasVagueAfterLastMatchText(blob);
+  const fullCorpus = (input.fullCorpus ?? supplemental ?? blob).replace(/\r\n/g, "\n").trim();
+  const dayScopedBlob = resolveDayScopedBlob({ day: input.day, blob, fullCorpus });
+  const timingBlob = dayScopedBlob
+    .split(/\n/)
+    .filter((l) => !lineLooksLikeAdministrativeDeadline(l.trim()))
+    .join("\n");
+  const matchTimesRaw = extractCupMatchTimes(timingBlob.length ? timingBlob : dayScopedBlob);
+  const matchTimes =
+    extractKampAnchoredClockTimes(timingBlob.length ? timingBlob : dayScopedBlob).length > 0
+      ? extractKampAnchoredClockTimes(timingBlob.length ? timingBlob : dayScopedBlob)
+      : matchTimesRaw;
+  const durationEvidence = resolveMatchDurationMinutes(timingBlob || dayScopedBlob, fullCorpus);
+  const durationMinutes = durationEvidence?.totalMinutes ?? null;
+  const offsetEvidence = parseScopedAttendanceOffsetMinutes(timingBlob || dayScopedBlob);
+  const attendanceOffsetMinutes = offsetEvidence?.minutes ?? null;
+  const bufferEvidence = parsePostEventBufferMinutes(timingBlob || dayScopedBlob);
+  const postEventBufferMinutes = bufferEvidence?.minutes ?? null;
   const firstMatch = matchTimes[0] ?? r.start;
   const lastMatch = matchTimes.length > 0 ? matchTimes[matchTimes.length - 1]! : r.start;
   const explicitAttendanceFromDay = extractAttendanceTimeFromDay(input.day);
@@ -283,25 +262,27 @@ export function resolveCupDayTiming(input: {
   let timeComputation: CupDayTiming["timeComputation"] | undefined;
 
   if (lastMatch && durationMinutes != null) {
-    const after = postEventBufferMinutes ?? 0;
-    const computed = shiftHhmmLocal(lastMatch, durationMinutes + after);
-    if (computed && (matchTimes.length <= 1 || postEventBufferMinutes != null) && !vagueAfter) {
-      end = computed;
-      endTimeSource = postEventBufferMinutes != null
-        ? "computed_from_duration_and_aftertime"
-        : "computed_from_duration";
+    end = null;
+    const inferred = computeInferredDayEnd({
+      lastMatchTime: lastMatch,
+      duration: durationEvidence,
+      buffer: bufferEvidence,
+    });
+    if (inferred.endTime) {
+      end = inferred.endTime;
+      endTimeSource =
+        inferred.endTimeSource == null || inferred.endTimeSource === "missing_or_unreadable"
+          ? "missing_or_unreadable"
+          : inferred.endTimeSource;
       timeComputation = {
         formula:
           postEventBufferMinutes != null
-            ? "start + duration + postEventBuffer = end"
-            : "start + duration = end",
+            ? "lastMatch + duration + postEventBuffer = end"
+            : "lastMatch + duration = end",
         startTime: lastMatch,
         durationMinutes,
-        computedEndTime: computed,
+        computedEndTime: inferred.endTime,
       };
-    } else if (matchTimes.length > 1 || vagueAfter) {
-      end = null;
-      endTimeSource = "missing_or_unreadable";
     }
   }
 

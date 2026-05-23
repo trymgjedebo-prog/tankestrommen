@@ -1,0 +1,116 @@
+{
+  "fixture": "fixtures/tankestrom/hostcup_duration_endtime_rich.txt",
+  "capturedAt": "2026-05-23T17:21:21.366Z",
+  "regressionHarness": {
+    "parentTitle": "Høstcupen",
+    "children": [
+      {
+        "day": "fredag",
+        "title": "Høstcupen – fredag",
+        "date": "2026-09-18",
+        "start": "16:40",
+        "end": "18:45",
+        "endTimeSource": "computed_from_duration_and_aftertime",
+        "durationMinutes": 45,
+        "postEventBufferMinutes": 30,
+        "timePrecision": "exact",
+        "tentative": false,
+        "highlights": [
+          "17:30 Første kamp",
+          "16:40 Oppmøte"
+        ],
+        "bringItems": [],
+        "notes": "Fredag 18. september:\n\nMøt ferdig skiftet 50 minutter før kampstart.\n\nKampen varer 2 x 20 minutter med 5 minutter pause.\n\nMobiltelefoner skal ligge i bagen under kampen.\n\nKort samling i garderoben etter kampen før hjemreise.\n\nRegn med å være ute av hallen omtrent en halvtime etter kampslutt."
+      },
+      {
+        "day": "lørdag",
+        "title": "Høstcupen – lørdag",
+        "date": "2026-09-19",
+        "start": "08:30",
+        "end": "15:55",
+        "endTimeSource": "computed_from_duration_and_aftertime",
+        "durationMinutes": 45,
+        "postEventBufferMinutes": 30,
+        "timePrecision": "exact",
+        "tentative": false,
+        "highlights": [
+          "09:15 Første kamp",
+          "14:40 Andre kamp",
+          "08:30 Oppmøte før første kamp",
+          "13:55 Oppmøte før andre kamp"
+        ],
+        "bringItems": [],
+        "notes": "Lørdag 19. september:\n\nOppmøte 45 minutter før hver kamp.\n\nKampene har samme spilletid som fredag.\n\nEn kamp varer like lenge som de andre.\n\nBeregn litt tid etter siste kamp før dere drar hjem."
+      },
+      {
+        "day": "søndag",
+        "title": "Høstcupen – søndag",
+        "date": "2026-09-20",
+        "start": null,
+        "end": null,
+        "endTimeSource": "missing_or_unreadable",
+        "durationMinutes": null,
+        "postEventBufferMinutes": null,
+        "timePrecision": "date_only",
+        "tentative": true,
+        "highlights": [],
+        "bringItems": [
+          "ekstra t-skjorte"
+        ],
+        "notes": "Søndag 20. september:\n\nB-sluttspill etter lunsj dersom vi havner der.\n\nSvar i Spond senest tirsdag 8. september kl. 21:00 om barnet kan delta hele helgen eller ikke.\n\nA-sluttspill: første kamp mellom 10:00 og 12:00 (foreløpig)\n\nDetaljert søndagsprogram kommer senere."
+      }
+    ],
+    "tasks": [
+      {
+        "title": "Svar i Spond om deltakelse i Høstcupen",
+        "date": "2026-09-08",
+        "dueTime": "21:00"
+      }
+    ]
+  },
+  "resolveCupDayTiming": {
+    "fredag": {
+      "start": "16:40",
+      "end": null,
+      "attendanceTime": "16:40",
+      "attendanceOffsetMinutes": null,
+      "durationMinutes": null,
+      "postEventBufferMinutes": null,
+      "timePrecision": "start_only",
+      "startTimeSource": "explicit",
+      "endTimeSource": "missing_or_unreadable",
+      "requiresManualTimeReview": true
+    },
+    "lørdag": {
+      "start": "08:30",
+      "end": null,
+      "attendanceTime": null,
+      "attendanceOffsetMinutes": null,
+      "durationMinutes": null,
+      "postEventBufferMinutes": null,
+      "timePrecision": "start_only",
+      "startTimeSource": "explicit",
+      "endTimeSource": "missing_or_unreadable",
+      "requiresManualTimeReview": true
+    },
+    "søndag": {
+      "start": null,
+      "end": null,
+      "attendanceTime": "08:30",
+      "attendanceOffsetMinutes": 45,
+      "durationMinutes": 45,
+      "postEventBufferMinutes": 30,
+      "timePrecision": "date_only",
+      "startTimeSource": "missing_or_unreadable",
+      "endTimeSource": "missing_or_unreadable",
+      "requiresManualTimeReview": true,
+      "timeComputation": {
+        "formula": "lastMatch + duration + postEventBuffer = end",
+        "startTime": "21:00",
+        "durationMinutes": 45,
+        "computedEndTime": "22:15"
+      }
+    }
+  },
+  "liveAnalysisSkipped": "OPENAI_API_KEY not set"
+}

@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "category": "cup",
+  "parentCount": 1,
+  "childCount": 3,
+  "childTitles": [
+    "Høstcupen – fredag",
+    "Høstcupen – lørdag",
+    "Høstcupen – søndag"
+  ],
+  "highlightsByDay": {
+    "fredag": ["16:40 Oppmøte", "17:30 Første kamp"],
+    "lørdag": [
+      "08:30 Oppmøte før første kamp",
+      "09:15 Første kamp",
+      "13:55 Oppmøte før andre kamp",
+      "14:40 Andre kamp"
+    ]
+  },
+  "requiredBringItems": [],
+  "forbiddenInNotes": [],
+  "forbiddenHighlights": [
+    { "includes": "21:00" },
+    { "day": "søndag", "includes": "10:00" },
+    { "day": "søndag", "includes": "12:00" }
+  ],
+  "forbiddenProgramTimes": ["21:00"],
+  "tentativeDays": {
+    "fredag": false,
+    "lørdag": false,
+    "søndag": true
+  },
+  "timePrecisionByDay": {
+    "fredag": "exact",
+    "lørdag": "exact",
+    "søndag": "date_only"
+  },
+  "durationMinutesByDay": {
+    "fredag": 45,
+    "lørdag": 45
+  },
+  "inferredEndByDay": {
+    "fredag": "18:45",
+    "lørdag": "15:55"
+  },
+  "inferredEndToleranceMinutes": 5,
+  "endTimeSourceByDay": {
+    "fredag": "computed_from_duration_and_aftertime",
+    "lørdag": "computed_from_duration_and_aftertime"
+  },
+  "requiredTasks": [
+    {
+      "titleIncludes": "Spond",
+      "date": "2026-09-08",
+      "dueTime": "21:00"
+    }
+  ]
+}
