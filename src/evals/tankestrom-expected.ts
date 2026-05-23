@@ -36,6 +36,22 @@ export type TankestromExpected = {
   tentativeDays: Partial<Record<DayKey, boolean>>;
   timePrecisionByDay: Partial<Record<DayKey, TimePrecision>>;
   requiredTasks: RequiredTaskSpec[];
+  /** Forventet utledet sluttid (HH:MM) per dag — eval for varighet/ettertid. */
+  inferredEndByDay?: Partial<Record<DayKey, string>>;
+  /** Tillatt avvik i minutter for inferredEndByDay (default 0). */
+  inferredEndToleranceMinutes?: number;
+  endTimeSourceByDay?: Partial<
+    Record<
+      DayKey,
+      | "explicit"
+      | "computed_from_duration"
+      | "computed_from_duration_and_aftertime"
+      | "missing_or_unreadable"
+    >
+  >;
+  durationMinutesByDay?: Partial<Record<DayKey, number>>;
+  /** Klokkeslett som aldri skal dukke opp som program-highlight (f.eks. Spond-frist). */
+  forbiddenProgramTimes?: string[];
 };
 
 export function loadTankestromExpected(absolutePath: string): TankestromExpected {

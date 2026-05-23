@@ -8,6 +8,9 @@
  */
 
 import type { AIAnalysisResult, DayScheduleEntry } from "@/lib/types";
+import { buildDurationEndFact } from "@/lib/activity-duration";
+import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
+import { extractCupMatchTimes } from "@/lib/cup-match-times";
 
 export type EvidenceValidationStatus =
   | "confirmed"
@@ -49,6 +52,8 @@ export interface AnalysisEvidenceReport {
     reason: string;
   }>;
   questionsForUser: string[];
+  /** Varighet/sluttid utledet deterministisk fra kilden (bakoverkompatibelt tillegg). */
+  durationEndFacts?: import("@/lib/activity-duration").DurationEndFact[];
 }
 
 const NB_WEEKDAYS = [
@@ -413,5 +418,16 @@ export function buildAnalysisEvidenceReport(
     tentativeFacts,
     unsupportedCandidates,
     questionsForUser: [...new Set(questionsForUser)],
+    durationEndFacts: result.scheduleByDay.map((day) => {
+      const dayBlob = extractDayBlobFromCorpus(c, day.dayLabel);
+      const matchTimes = extractCupMatchTimes(dayBlob);
+      const lastMatch = matchTimes.length > 0 ? matchTimes[matchTimes.length - 1]! : null;
+      return buildDurationEndFact({
+        dayLabel: day.dayLabel,
+        dayBlob,
+        corpus: c,
+        lastMatchTime: lastMatch,
+      });
+    }),
   };
 }

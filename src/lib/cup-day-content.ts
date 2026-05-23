@@ -776,16 +776,20 @@ export function enrichCupStructuredContentWithResolvedTiming(
       ? new Set([window.earliestStart, window.latestStart])
       : null;
 
+  const deferConfirmedMatchHighlights =
+    enrichment.tentative && enrichment.timePrecision === "date_only";
+
   const explicitAttendanceTimes = [...extractExplicitAttendanceHhmmTimes(blob)];
-  const extractedMatches = extractCupMatchTimes(blob);
-  const kampAnchored = extractKampAnchoredClockTimes(blob);
+  const extractedMatches = deferConfirmedMatchHighlights ? [] : extractCupMatchTimes(blob);
+  const kampAnchored = deferConfirmedMatchHighlights ? [] : extractKampAnchoredClockTimes(blob);
   const fromRoute = enrichment.orderedMatchTimes;
   /**
    * Når ruta allerede har kamptider for denne dagen: stol på den listen alene.
    * (Å slå inn kampAnchored fra hele blobben kan trekke inn lørdagstider når global ukeplan er med.)
    */
-  const mergedMatchClocks =
-    fromRoute.length > 0
+  const mergedMatchClocks = deferConfirmedMatchHighlights
+    ? []
+    : fromRoute.length > 0
       ? [...fromRoute].sort((a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!)
       : [...new Set([...extractedMatches, ...kampAnchored])].sort(
           (a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!,

@@ -451,6 +451,117 @@ export function scoreNoDeadlineInProgramHighlights(bundle: RegressionPortalBundl
   return { score: failures.length === 0 ? 1 : 0, failures };
 }
 
+function hhmmToMinutes(hhmm: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+export function scoreInferredEndTime(
+  bundle: RegressionPortalBundle,
+  expected: TankestromExpected,
+): ScorerResult {
+  const entries = Object.entries(expected.inferredEndByDay ?? {}) as [DayKey, string][];
+  if (entries.length === 0) return { score: 1, failures: [] };
+  const tol = expected.inferredEndToleranceMinutes ?? 0;
+  const failures: string[] = [];
+  const checks: boolean[] = [];
+  for (const [day, wantEnd] of entries) {
+    const child = childByDay(bundle, day);
+    if (!child) {
+      failures.push(`[${day}] mangler dag for inferredEnd`);
+      checks.push(false);
+      continue;
+    }
+    const got = child.end ?? null;
+    if (!got) {
+      failures.push(`[${day}] mangler inferred end (forventet ${wantEnd})`);
+      checks.push(false);
+      continue;
+    }
+    const wantM = hhmmToMinutes(wantEnd);
+    const gotM = hhmmToMinutes(got);
+    const ok =
+      wantM != null && gotM != null ? Math.abs(wantM - gotM) <= tol : got === wantEnd;
+    checks.push(ok);
+    if (!ok) failures.push(`[${day}] inferred end forventet ${wantEnd}, fikk ${got}`);
+  }
+  if (checks.length === 0) return { score: 1, failures: [] };
+  return { score: checks.filter(Boolean).length / checks.length, failures };
+}
+
+export function scoreDurationMinutes(
+  bundle: RegressionPortalBundle,
+  expected: TankestromExpected,
+): ScorerResult {
+  const entries = Object.entries(expected.durationMinutesByDay ?? {}) as [DayKey, number][];
+  if (entries.length === 0) return { score: 1, failures: [] };
+  const failures: string[] = [];
+  const checks: boolean[] = [];
+  for (const [day, want] of entries) {
+    const child = childByDay(bundle, day);
+    if (!child) {
+      failures.push(`[${day}] mangler dag for durationMinutes`);
+      checks.push(false);
+      continue;
+    }
+    const ok = child.durationMinutes === want;
+    checks.push(ok);
+    if (!ok) {
+      failures.push(`[${day}] durationMinutes forventet ${want}, fikk ${child.durationMinutes ?? "null"}`);
+    }
+  }
+  if (checks.length === 0) return { score: 1, failures: [] };
+  return { score: checks.filter(Boolean).length / checks.length, failures };
+}
+
+export function scoreForbiddenProgramTimes(
+  bundle: RegressionPortalBundle,
+  expected: TankestromExpected,
+): ScorerResult {
+  const forbidden = expected.forbiddenProgramTimes ?? [];
+  if (forbidden.length === 0) return { score: 1, failures: [] };
+  const failures: string[] = [];
+  for (const c of bundle.children) {
+    for (const h of c.highlights) {
+      for (const t of forbidden) {
+        if (h.startsWith(`${t} `) || h.includes(` ${t} `)) {
+          failures.push(`[${c.day}] Forbudt programtid i highlight: "${h}" (forbudt ${t})`);
+        }
+      }
+    }
+  }
+  return { score: failures.length === 0 ? 1 : 0, failures };
+}
+
+export function scoreEndTimeSource(
+  bundle: RegressionPortalBundle,
+  expected: TankestromExpected,
+): ScorerResult {
+  const entries = Object.entries(expected.endTimeSourceByDay ?? {}) as [
+    DayKey,
+    NonNullable<TankestromExpected["endTimeSourceByDay"]>[DayKey],
+  ][];
+  if (entries.length === 0) return { score: 1, failures: [] };
+  const failures: string[] = [];
+  const checks: boolean[] = [];
+  for (const [day, want] of entries) {
+    const child = childByDay(bundle, day);
+    if (!child) {
+      failures.push(`[${day}] mangler dag for endTimeSource`);
+      checks.push(false);
+      continue;
+    }
+    const ok = child.endTimeSource === want;
+    checks.push(ok);
+    if (!ok) {
+      failures.push(`[${day}] endTimeSource forventet ${want}, fikk ${child.endTimeSource ?? "null"}`);
+    }
+  }
+  if (checks.length === 0) return { score: 1, failures: [] };
+  return { score: checks.filter(Boolean).length / checks.length, failures };
+}
+
 export function scoreForbiddenInNotes(bundle: RegressionPortalBundle, expected: TankestromExpected): ScorerResult {
   if (expected.forbiddenInNotes.length === 0) return { score: 1, failures: [] };
   const failures: string[] = [];
@@ -492,6 +603,10 @@ export function runAllTankestromScorers(
     ["bringItemsCorrect", scoreBringItemsCorrect(bundle, expected)],
     ["deadlineCorrect", scoreDeadlineCorrect(bundle, expected)],
     ["noDeadlineInProgramHighlights", scoreNoDeadlineInProgramHighlights(bundle)],
+    ["inferredEndCorrect", scoreInferredEndTime(bundle, expected)],
+    ["durationMinutesCorrect", scoreDurationMinutes(bundle, expected)],
+    ["endTimeSourceCorrect", scoreEndTimeSource(bundle, expected)],
+    ["forbiddenProgramTimes", scoreForbiddenProgramTimes(bundle, expected)],
   ];
 
   const baseScores: Record<string, number> = {};
