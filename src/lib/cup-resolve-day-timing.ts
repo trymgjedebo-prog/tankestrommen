@@ -1,8 +1,8 @@
 import {
   computeInferredDayEnd,
-  parsePostEventBufferMinutes,
   parseScopedAttendanceOffsetMinutes,
   resolveMatchDurationMinutes,
+  resolvePostEventBufferForDay,
 } from "@/lib/activity-duration";
 import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
 import { lineLooksLikeAdministrativeDeadline, parseCupTimeWindow } from "@/lib/cup-day-content";
@@ -28,6 +28,14 @@ function normalizeSpace(input: string): string {
 
 export function extractAttendanceTimeFromDay(day: DayScheduleEntry): string | null {
   const pool = [day.time ?? "", day.details ?? "", ...day.highlights, ...day.notes].join("\n");
+  for (const line of [day.time ?? "", ...day.highlights]) {
+    const timeFirst = /\b(\d{1,2})[.:](\d{2})\s+oppm[oø]te\b/i.exec(normalizeSpace(line));
+    if (timeFirst) {
+      const h = Number(timeFirst[1]);
+      const mm = timeFirst[2]!;
+      if (h >= 0 && h <= 23) return `${String(h).padStart(2, "0")}:${mm}`;
+    }
+  }
   const fromPhrases = extractExplicitAttendanceHhmmTimes(pool);
   if (fromPhrases.size === 1) return [...fromPhrases][0]!;
   const m = /\boppm[oø]te(?:\s*kl\.?)?\s*(\d{1,2})[.:](\d{2})\b/i.exec(pool);
@@ -44,7 +52,11 @@ export type CupDayTiming = {
   attendanceTime: string | null;
   attendanceOffsetMinutes: number | null;
   durationMinutes: number | null;
+  activityDurationMinutes?: number | null;
+  breakMinutes?: number | null;
   postEventBufferMinutes: number | null;
+  afterBufferMinutes?: number | null;
+  inferredEndTime?: boolean;
   timeWindow?: { earliestStart: string; latestStart: string };
   timePrecision: "exact" | "start_only" | "date_only" | "time_window";
   startTimeSource: "explicit" | "missing_or_unreadable";
@@ -63,6 +75,102 @@ export type CupDayTiming = {
     computedStartTime?: string;
   };
 };
+
+function hhmmFromHighlightLine(line: string): string | null {
+  const m = /^(\d{1,2}):(\d{2})\b/.exec(normalizeSpace(line));
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const mm = m[2]!;
+  if (hour < 0 || hour > 23) return null;
+  return `${String(hour).padStart(2, "0")}:${mm}`;
+}
+
+/** Siste kamp-klokkeslett fra highlights (hopper over oppmøte-rader). */
+export function lastKampTimeFromHighlights(highlights: string[]): string | null {
+  let last: string | null = null;
+  for (const line of highlights) {
+    const n = normalizeNorwegianLetters(line);
+    if (/\boppm[oø]te\b/.test(n) && !/\b(første|andre|tredje)\s+kamp\b/.test(n)) continue;
+    if (!/\bkamp\b/.test(n) && !/\bførste\s+kamp\b/.test(n) && !/\bandre\s+kamp\b/.test(n)) continue;
+    const t = hhmmFromHighlightLine(line);
+    if (t) last = t;
+  }
+  return last;
+}
+
+/** Oppmøte fra highlights når klokka er før første kamp (ekskl. feilmerket «kamp som oppmøte»). */
+export function attendanceTimeFromOppmoteHighlights(
+  highlights: string[],
+  kampClocks: string[],
+): string | null {
+  const kampMins = kampClocks
+    .map((t) => hhmmToMinutesLocal(t))
+    .filter((x): x is number => x != null);
+  const firstKampMin = kampMins.length > 0 ? Math.min(...kampMins) : null;
+  for (const line of highlights) {
+    if (!/\boppm[oø]te\b/i.test(line)) continue;
+    const t = hhmmFromHighlightLine(line);
+    if (!t) continue;
+    const tm = hhmmToMinutesLocal(t);
+    if (tm == null) continue;
+    if (firstKampMin != null && tm >= firstKampMin) continue;
+    return t;
+  }
+  return null;
+}
+
+function highlightIsKampNotOppmote(h: string): boolean {
+  const n = normalizeNorwegianLetters(h);
+  if (/\b(første|andre|tredje)\s+kamp\b/.test(n)) return true;
+  if (/\bkamp\b/.test(n) && !/\boppm[oø]te\b/.test(n)) return true;
+  return false;
+}
+
+/**
+ * Kamptider for dag (sortert), uten rene oppmøte-klokker som ikke er kampankret.
+ * Brukes av evidence og portal-enrich.
+ */
+export function extractOrderedCupMatchTimesForDay(
+  dayBlob: string,
+  corpus: string,
+  highlights: string[] = [],
+  dayLabel?: string | null,
+): string[] {
+  const scopedParts = [dayBlob.trim()];
+  if (dayLabel && corpus.trim()) {
+    const section = extractDayBlobFromCorpus(corpus, dayLabel).trim();
+    if (section) scopedParts.push(section);
+  }
+  const scoped = scopedParts.filter(Boolean).join("\n").trim() || extractDayBlobFromCorpus(corpus, "");
+  const kampAnchored = extractKampAnchoredClockTimes(scoped);
+  const raw =
+    kampAnchored.length > 0 ? kampAnchored : extractCupMatchTimes(scoped);
+  const kampFromBlob = new Set(kampAnchored);
+  const out: string[] = [];
+
+  for (const t of raw) {
+    const mislabeledOppmote =
+      highlights.some((h) => {
+        const ht = hhmmFromHighlightLine(h);
+        if (ht !== t) return false;
+        return /\boppm[oø]te\b/i.test(h) && !highlightIsKampNotOppmote(h);
+      }) && !kampFromBlob.has(t);
+    if (mislabeledOppmote) continue;
+    const onlyOppmoteHighlight =
+      highlights.some((h) => hhmmFromHighlightLine(h) === t && /\boppm[oø]te\b/i.test(h) && !highlightIsKampNotOppmote(h)) &&
+      !highlights.some((h) => hhmmFromHighlightLine(h) === t && highlightIsKampNotOppmote(h));
+    if (onlyOppmoteHighlight && !kampFromBlob.has(t)) continue;
+    if (!out.includes(t)) out.push(t);
+  }
+
+  for (const h of highlights) {
+    if (!highlightIsKampNotOppmote(h)) continue;
+    const t = hhmmFromHighlightLine(h);
+    if (t && !out.includes(t)) out.push(t);
+  }
+
+  return out.sort((a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!);
+}
 
 function hhmmToMinutesLocal(hhmm: string): number | null {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
@@ -232,24 +340,61 @@ export function resolveCupDayTiming(input: {
     .split(/\n/)
     .filter((l) => !lineLooksLikeAdministrativeDeadline(l.trim()))
     .join("\n");
-  const matchTimesRaw = extractCupMatchTimes(timingBlob.length ? timingBlob : dayScopedBlob);
-  const matchTimes =
-    extractKampAnchoredClockTimes(timingBlob.length ? timingBlob : dayScopedBlob).length > 0
-      ? extractKampAnchoredClockTimes(timingBlob.length ? timingBlob : dayScopedBlob)
-      : matchTimesRaw;
-  const durationEvidence = resolveMatchDurationMinutes(timingBlob || dayScopedBlob, fullCorpus);
+  const timingSource = timingBlob.length ? timingBlob : dayScopedBlob;
+  const matchTimes = extractOrderedCupMatchTimesForDay(
+    timingSource,
+    fullCorpus,
+    input.highlightsForEventFinal,
+  );
+  const durationEvidence = resolveMatchDurationMinutes(
+    timingSource,
+    fullCorpus,
+    input.day.dayLabel,
+  );
   const durationMinutes = durationEvidence?.totalMinutes ?? null;
-  const offsetEvidence = parseScopedAttendanceOffsetMinutes(timingBlob || dayScopedBlob);
+  const breakMinutes = durationEvidence?.breakMinutes ?? null;
+  const offsetEvidence = parseScopedAttendanceOffsetMinutes(timingSource);
   const attendanceOffsetMinutes = offsetEvidence?.minutes ?? null;
-  const bufferEvidence = parsePostEventBufferMinutes(timingBlob || dayScopedBlob);
+  const bufferEvidence = resolvePostEventBufferForDay(
+    timingSource,
+    fullCorpus,
+    input.day.dayLabel,
+  );
   const postEventBufferMinutes = bufferEvidence?.minutes ?? null;
+  const afterBufferMinutes = postEventBufferMinutes;
   const firstMatch = matchTimes[0] ?? r.start;
-  const lastMatch = matchTimes.length > 0 ? matchTimes[matchTimes.length - 1]! : r.start;
+  let lastMatch =
+    matchTimes.length > 0
+      ? matchTimes[matchTimes.length - 1]!
+      : lastKampTimeFromHighlights(input.highlightsForEventFinal) ?? r.start;
   const explicitAttendanceFromDay = extractAttendanceTimeFromDay(input.day);
   const explicitTimesBlob = extractExplicitAttendanceHhmmTimes(blob);
   const explicitFromBlob =
     explicitTimesBlob.size === 1 ? [...explicitTimesBlob][0]! : null;
-  const explicitAttendance = explicitAttendanceFromDay ?? explicitFromBlob;
+  const attendanceFromHighlights = attendanceTimeFromOppmoteHighlights(
+    input.highlightsForEventFinal,
+    matchTimes,
+  );
+  const timeFieldMatch = input.day.time?.trim()
+    ? /^(\d{1,2}):(\d{2})$/.exec(input.day.time.trim())
+    : null;
+  const timeFieldHhmm = timeFieldMatch
+    ? `${String(Number(timeFieldMatch[1])).padStart(2, "0")}:${timeFieldMatch[2]}`
+    : null;
+  const timeFieldAsAttendance =
+    timeFieldHhmm &&
+    lastMatch &&
+    hhmmToMinutesLocal(timeFieldHhmm) != null &&
+    hhmmToMinutesLocal(lastMatch) != null &&
+    hhmmToMinutesLocal(timeFieldHhmm)! < hhmmToMinutesLocal(lastMatch)! &&
+    !matchTimes.includes(timeFieldHhmm)
+      ? timeFieldHhmm
+      : null;
+  const explicitAttendance =
+    attendanceFromHighlights ??
+    explicitAttendanceFromDay ??
+    timeFieldAsAttendance ??
+    explicitFromBlob;
   const attendanceTime =
     explicitAttendance ??
     (matchTimes[0] && attendanceOffsetMinutes != null
@@ -261,6 +406,7 @@ export function resolveCupDayTiming(input: {
   let endTimeSource: CupDayTiming["endTimeSource"] = r.end ? "explicit" : "missing_or_unreadable";
   let timeComputation: CupDayTiming["timeComputation"] | undefined;
 
+  let inferredEndTime = false;
   if (lastMatch && durationMinutes != null) {
     end = null;
     const inferred = computeInferredDayEnd({
@@ -270,6 +416,7 @@ export function resolveCupDayTiming(input: {
     });
     if (inferred.endTime) {
       end = inferred.endTime;
+      inferredEndTime = true;
       endTimeSource =
         inferred.endTimeSource == null || inferred.endTimeSource === "missing_or_unreadable"
           ? "missing_or_unreadable"
@@ -328,7 +475,11 @@ export function resolveCupDayTiming(input: {
     attendanceTime,
     attendanceOffsetMinutes: attendanceOffsetMinutes ?? null,
     durationMinutes: durationMinutes ?? null,
+    activityDurationMinutes: durationMinutes ?? null,
+    breakMinutes: breakMinutes ?? null,
     postEventBufferMinutes: postEventBufferMinutes ?? null,
+    afterBufferMinutes: afterBufferMinutes ?? null,
+    inferredEndTime: inferredEndTime || undefined,
     timePrecision,
     startTimeSource: start ? "explicit" : "missing_or_unreadable",
     endTimeSource,

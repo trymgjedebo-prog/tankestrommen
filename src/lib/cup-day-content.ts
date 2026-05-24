@@ -3,6 +3,7 @@
  * Holdes i egen modul for testbarhet uten å laste hele analyze-route.
  */
 
+import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
 import {
   extractCupMatchTimes,
   extractExplicitAttendanceHhmmTimes,
@@ -714,6 +715,27 @@ function uniqueSortedClocksFromHighlights(
   return out.sort((a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!);
 }
 
+/** Modell-/portal-highlights der kampstart er feilmerket som oppmøte på samme klokkeslett. */
+export function relabelOppmoteHighlightsAtKampTimes(
+  highlights: string[],
+  corpusBlob: string,
+  dayLabel?: string | null,
+): string[] {
+  const scoped =
+    dayLabel && corpusBlob.trim()
+      ? extractDayBlobFromCorpus(corpusBlob, dayLabel).trim() || corpusBlob
+      : corpusBlob;
+  const kamp = kampAnchoredHhmmInText(`${scoped}\n${highlights.join("\n")}`);
+  if (kamp.size === 0) return highlights;
+  return highlights.map((h) => {
+    const m = /^(\d{1,2}):(\d{2})\s+oppm[oø]te\b/i.exec(normalizeSpace(h));
+    if (!m) return h;
+    const t = `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
+    if (!kamp.has(t)) return h;
+    return `${t} Første kamp`;
+  });
+}
+
 /**
  * Beriker strukturerte highlights med anker-tider fra kalender-/blob-resolving,
  * uten å bruke event-tittel som highlight-label.
@@ -810,7 +832,11 @@ export function enrichCupStructuredContentWithResolvedTiming(
     explicitAttendanceTimes,
     kampAnchoredHhmmInText(blob),
   );
-  const matchClocksOrdered = [...new Set([...suppressedFiltered, ...clocksFromHighlights])]
+  const matchClocksOrdered = (
+    fromRoute.length > 0
+      ? [...fromRoute]
+      : [...new Set([...suppressedFiltered, ...clocksFromHighlights])]
+  )
     .filter((t) => !explicitAttendanceTimes.includes(t))
     .sort((a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!);
 
@@ -862,13 +888,22 @@ export function enrichCupStructuredContentWithResolvedTiming(
     if (!m) return h;
     const time = m[1]!;
     const label = (m[2] ?? "").trim();
-    const target = labelForMatchClock(time);
-    if (!target) return h;
     const n = normalizeNorwegianLetters(label);
     const genericMatchLabel = /^(kamp|kampstart)(\s+kl\.?)?$/.test(n);
+    const kampClocksFromBlob = kampAnchoredHhmmInText(blob);
     const wrongAttendanceOnMatchTime =
-      /^oppm[oø]te\b/i.test(label) && !explicitAttendanceTimes.includes(time);
-    if (genericMatchLabel || wrongAttendanceOnMatchTime) return `${time} ${target}`;
+      /^oppm[oø]te\b/i.test(label) &&
+      (kampClocksFromBlob.has(time) ||
+        fromRoute.includes(time) ||
+        matchClocksOrdered.includes(time) ||
+        !explicitAttendanceTimes.includes(time));
+    if (wrongAttendanceOnMatchTime) {
+      const target = labelForMatchClock(time) ?? defaultMatchLabelByIndex(0);
+      return `${time} ${target}`;
+    }
+    const target = labelForMatchClock(time);
+    if (!target) return h;
+    if (genericMatchLabel) return `${time} ${target}`;
     return h;
   });
 

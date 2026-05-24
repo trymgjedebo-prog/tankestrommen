@@ -10,7 +10,8 @@
 import type { AIAnalysisResult, DayScheduleEntry } from "@/lib/types";
 import { buildDurationEndFact } from "@/lib/activity-duration";
 import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
-import { extractCupMatchTimes } from "@/lib/cup-match-times";
+import { extractOrderedCupMatchTimesForDay } from "@/lib/cup-resolve-day-timing";
+import { isConditionalTournamentTextForDay } from "@/lib/cup-timing-context";
 
 export type EvidenceValidationStatus =
   | "confirmed"
@@ -173,6 +174,19 @@ function extractPrimaryHhmm(highlight: string): string | null {
   return null;
 }
 
+function highlightLooksLikeTentativeTimeWindow(highlightText: string): boolean {
+  const t = normalizeSpace(highlightText);
+  const n = normalizeNorwegianLetters(t);
+  if (/\b\d{1,2}:\d{2}\s*[-–—\u2212]\s*\d{1,2}:\d{2}\b/.test(t)) return true;
+  if (/\bmellom\b/.test(n) && /\d{1,2}:\d{2}/.test(t)) return true;
+  if (/\bforel[oø]pig\b/.test(n)) return true;
+  if (/\b(dersom|hvis)\s+vi\b/.test(n)) return true;
+  if (/\btrolig\b/.test(n) && /\b(lunsj|sluttspill|kamp)\b/.test(n)) return true;
+  if (/\bikke\s+n[oø]yaktig\s+tidspunkt\b/.test(n)) return true;
+  if (/\bkommer\s+senere\b/.test(n)) return true;
+  return false;
+}
+
 function highlightLabelKind(h: string): "oppmote" | "kamp" | "unknown" {
   const n = normalizeNorwegianLetters(h);
   if (/\boppm[oø]te\b/.test(n)) return "oppmote";
@@ -303,9 +317,11 @@ export function buildAnalysisEvidenceReport(
 
   for (const day of result.scheduleByDay) {
     const daySection = extractDaySourceSection(c, day);
+    const cupDayBlob = extractDayBlobFromCorpus(c, day.dayLabel);
     const daySectionLines = daySection.split(/\n/).map((l) => normalizeSpace(l)).filter(Boolean);
     const dayKey = weekdayKeyFromLabel(day.dayLabel);
-    const tentativeDay = dayBlobTentative(day);
+    const tentativeDay =
+      dayBlobTentative(day) || isConditionalTournamentTextForDay(cupDayBlob, day.dayLabel);
     const dayRecords: HighlightEvidenceRecord[] = [];
 
     for (const h of day.highlights) {
@@ -346,6 +362,10 @@ export function buildAnalysisEvidenceReport(
           confidence = sourceQuote ? 0.55 : 0.35;
           reason =
             "Dagen er merket som foreløpig/usikker i kildetekst; konkret klokkeslett krever eksplisitt oppgitt tid for denne dagen.";
+        } else if (highlightLooksLikeTentativeTimeWindow(highlightText)) {
+          validation = "tentative";
+          confidence = sourceQuote ? 0.55 : 0.4;
+          reason = "Tidsvindu eller foreløpig formulering — ikke bekreftet programtid.";
         } else if (sourceQuote && lineSupportsLabelKind(sourceQuote, labelKind)) {
           validation = "confirmed";
           confidence = 0.88;
@@ -420,14 +440,35 @@ export function buildAnalysisEvidenceReport(
     questionsForUser: [...new Set(questionsForUser)],
     durationEndFacts: result.scheduleByDay.map((day) => {
       const dayBlob = extractDayBlobFromCorpus(c, day.dayLabel);
-      const matchTimes = extractCupMatchTimes(dayBlob);
-      const lastMatch = matchTimes.length > 0 ? matchTimes[matchTimes.length - 1]! : null;
-      return buildDurationEndFact({
+      const conditional = isConditionalTournamentTextForDay(dayBlob, day.dayLabel);
+      const matchTimes = extractOrderedCupMatchTimesForDay(dayBlob, c, day.highlights, day.dayLabel);
+      let lastMatch = matchTimes.length > 0 ? matchTimes[matchTimes.length - 1]! : null;
+      if (!lastMatch) {
+        for (let i = day.highlights.length - 1; i >= 0; i--) {
+          const h = day.highlights[i]!;
+          if (!/\bkamp\b/i.test(h)) continue;
+          const m = /^(\d{1,2}):(\d{2})\b/.exec(normalizeSpace(h));
+          if (m) {
+            lastMatch = `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
+            break;
+          }
+        }
+      }
+      const fact = buildDurationEndFact({
         dayLabel: day.dayLabel,
         dayBlob,
         corpus: c,
         lastMatchTime: lastMatch,
       });
+      if (conditional) {
+        return {
+          ...fact,
+          inferredEndTime: null,
+          endTimeSource: "missing_or_unreadable",
+          validation: "tentative" as const,
+        };
+      }
+      return fact;
     }),
   };
 }

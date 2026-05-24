@@ -5,6 +5,7 @@ import {
   formatCupEventNotesFlat,
   isNoiseFragment,
 } from "./cup-day-content";
+import { extractOrderedCupMatchTimesForDay } from "./cup-resolve-day-timing";
 
 describe("buildCupStructuredDayContent (Høstcupen-regresjon)", () => {
   const base = {
@@ -259,6 +260,47 @@ describe("buildCupStructuredDayContent (Høstcupen-regresjon)", () => {
     expect(enriched.highlights).toContain("13:55 Oppmøte før andre kamp");
     expect(enriched.highlights).toContain("14:40 Andre kamp");
     expect(new Set(enriched.highlights).size).toBe(enriched.highlights.length);
+  });
+
+  it("Vårcup mislabeled: «18:40 Oppmøte» + Kampstart i notat → Første kamp", () => {
+    const structured = buildCupStructuredDayContent({
+      ...base,
+      date: "2026-06-12",
+      childTitle: "Vårcupen – fredag",
+      details: null,
+      highlights: [
+        "18:40 Oppmøte",
+        "Mye prat om oppmøte og logistikk uten kamp-ord i denne linjen",
+      ],
+      notes: [
+        "Oppmøte kl. 17:45 ved banen. Kampstart kl. 18:40.",
+        "Det er meldt ustabilt vær.",
+      ],
+      rememberItems: [],
+      deadlines: [],
+    });
+    const blob = [
+      "17:45",
+      ...structured.highlights,
+      ...structured.generalNotes,
+      "Oppmøte kl. 17:45 ved banen. Kampstart kl. 18:40.",
+      "Det er meldt ustabilt vær.",
+    ].join("\n");
+    const enriched = enrichCupStructuredContentWithResolvedTiming(structured, {
+      date: "2026-06-12",
+      parentTitleNorm: "varcupen",
+      childTitleNorm: "varcupen fredag",
+      sourceBlob: blob,
+      attendanceTime: "17:45",
+      orderedMatchTimes: ["18:40"],
+      daySegmentStart: "17:45",
+      daySegmentEnd: null,
+      timeWindow: null,
+      timePrecision: "start_only",
+      tentative: false,
+    });
+    expect(enriched.highlights.some((h) => /^18:40\s+Oppmøte\b/i.test(h))).toBe(false);
+    expect(enriched.highlights.some((h) => /^18:40\s+Første kamp\b/i.test(h))).toBe(true);
   });
 
   it("én kamptid: mye oppmøte-tekst i blob skal ikke gi kamp-raden «18:40 Oppmøte»", () => {

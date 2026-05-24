@@ -90,7 +90,9 @@ export function parseStructuredMatchDuration(text: string): DurationEvidence | n
     return null;
   }
   let breakMinutes = 0;
-  const pause = /(?:\+\s*|med\s+|og\s+)(\d{1,2})\s*min(?:utter)?\s*pause\b/.exec(normalized);
+  const pause =
+    /(?:\+\s*|med\s+|,\s*og\s+|og\s+)(\d{1,2})\s*min(?:utter)?s?\s*pause\b/.exec(normalized) ??
+    /\b(\d{1,2})\s*min(?:utter)?s?\s*pause\b/.exec(normalized);
   if (pause) {
     const p = Number(pause[1]);
     if (Number.isFinite(p) && p > 0 && p <= 45) breakMinutes = p;
@@ -148,8 +150,39 @@ export function parseInheritedMatchDuration(dayBlob: string, corpus: string): Du
   return null;
 }
 
-export function resolveMatchDurationMinutes(dayBlob: string, corpus: string): DurationEvidence | null {
-  return parseStructuredMatchDuration(dayBlob) ?? parseInheritedMatchDuration(dayBlob, corpus);
+export function resolveMatchDurationMinutes(
+  dayBlob: string,
+  corpus: string,
+  dayLabel?: string | null,
+): DurationEvidence | null {
+  const blobs = [dayBlob];
+  if (dayLabel) {
+    const section = extractDayBlobFromCorpus(corpus, dayLabel);
+    if (section.trim() && section !== dayBlob) blobs.push(section);
+  }
+  for (const blob of blobs) {
+    const parsed = parseStructuredMatchDuration(blob);
+    if (parsed) return parsed;
+  }
+  return parseInheritedMatchDuration(dayBlob, corpus);
+}
+
+/** Buffer/ettertid: dag-blob først, deretter hel dagseksjon fra korpus. */
+export function resolvePostEventBufferForDay(
+  dayBlob: string,
+  corpus: string,
+  dayLabel?: string | null,
+): BufferEvidence | null {
+  const blobs = [dayBlob];
+  if (dayLabel) {
+    const section = extractDayBlobFromCorpus(corpus, dayLabel);
+    if (section.trim() && section !== dayBlob) blobs.push(section);
+  }
+  for (const blob of blobs) {
+    const parsed = parsePostEventBufferMinutes(blob);
+    if (parsed) return parsed;
+  }
+  return null;
 }
 
 /** Ettertid / buffer etter siste kamp (inkl. «omtrent en halvtime etter kampslutt»). */
@@ -271,8 +304,8 @@ export function buildDurationEndFact(input: {
   corpus: string;
   lastMatchTime: string | null;
 }): DurationEndFact {
-  const duration = resolveMatchDurationMinutes(input.dayBlob, input.corpus);
-  const buffer = parsePostEventBufferMinutes(input.dayBlob);
+  const duration = resolveMatchDurationMinutes(input.dayBlob, input.corpus, input.dayLabel);
+  const buffer = resolvePostEventBufferForDay(input.dayBlob, input.corpus, input.dayLabel);
   const { endTime, endTimeSource } = computeInferredDayEnd({
     lastMatchTime: input.lastMatchTime,
     duration,
