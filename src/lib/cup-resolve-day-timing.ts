@@ -478,11 +478,10 @@ export function resolveCupDayTiming(input: {
   const breakMinutes = durationEvidence?.breakMinutes ?? null;
   const offsetEvidence = parseScopedAttendanceOffsetMinutes(timingSource);
   const attendanceOffsetMinutes = offsetEvidence?.minutes ?? null;
-  const bufferEvidence = resolvePostEventBufferForDay(
-    timingSource,
-    fullCorpus,
-    input.day.dayLabel,
-  );
+  const structuredBlob = blob.replace(/\r\n/g, "\n").trim();
+  const bufferEvidence =
+    resolvePostEventBufferForDay(timingSource, fullCorpus, input.day.dayLabel) ??
+    resolvePostEventBufferForDay(structuredBlob, fullCorpus, input.day.dayLabel);
   const postEventBufferMinutes = bufferEvidence?.minutes ?? null;
   const afterBufferMinutes = postEventBufferMinutes;
   const firstMatch = matchTimes[0] ?? r.start;

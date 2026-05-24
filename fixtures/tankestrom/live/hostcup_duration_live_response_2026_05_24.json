@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-05-24T20:30:00.000Z",
+  "source": "reproduced via toPortalBundle(hostcupLiveDevToolsInput) — matches Foreldre-App DevTools live contract path",
+  "liveObservedBug": {
+    "childEndTimeSources": [
+      "computed_from_duration",
+      "computed_from_duration_and_aftertime",
+      "missing_or_unreadable"
+    ],
+    "durationEndFactsFredag": {
+      "afterBufferMinutes": null,
+      "inferredEndTime": "18:15",
+      "endTimeSource": "computed_from_duration"
+    }
+  },
+  "input": {
+    "title": "Høstcupen håndball 2026",
+    "scheduleByDay": [
+      {
+        "dayLabel": "fredag",
+        "date": "2026-09-18",
+        "highlights": [
+          "16:40 Oppmøte",
+          "17:30 Første kamp"
+        ],
+        "notes": [
+          "Møt ferdig skiftet 50 minutter før kampstart.",
+          "Regn med at dere ikke er ute av hallen før ca. en halvtime etter kampen",
+          "Mobiltelefoner skal ligge i bagen under kampen."
+        ]
+      },
+      {
+        "dayLabel": "lørdag",
+        "date": "2026-09-19",
+        "highlights": [
+          "08:30 Oppmøte før første kamp",
+          "09:15 Første kamp",
+          "13:55 Oppmøte før andre kamp",
+          "14:40 Andre kamp"
+        ],
+        "notes": [
+          "Oppmøte 45 minutter før hver kamp.",
+          "Kampene har samme spilletid som fredag.",
+          "Beregn litt tid etter siste kamp før dere drar hjem."
+        ]
+      },
+      {
+        "dayLabel": "søndag",
+        "date": "2026-09-20",
+        "highlights": [
+          "A-sluttspill: første kamp mellom kl. 10:00 og 12:00 (foreløpig)"
+        ],
+        "notes": [
+          "Foreløpig sluttspillopplegg.",
+          "B-sluttspill etter lunsj dersom vi havner der.",
+          "Detaljert søndagsprogram kommer senere."
+        ]
+      }
+    ],
+    "rawTextExcerpt": "Høstcupen håndball 2026\r\nHelg: fredag 18. september, lørdag 19. september, søndag 20. september 2026.\r\n\r\nKampoppsett: fredag kl. 17:30 i Nadderud Arena, lørdag kl. 09:15 og kl. 14:40 i Nadderud Arena.\r\nVed A-sluttspill kan det bli søndagskamp mellom kl. 10:00 og 12:00. Ved B-sluttspill trolig etter lunsj.\r\n\r\nFredag 18. september:\r\nFørste kamp i Nadderud Arena kl. 17:30.\r\nMøt ferdig skiftet 50 minu"
+  },
+  "contract": {
+    "embeddedSchedule": [
+      {
+        "index": 0,
+        "dayLabel": "fredag",
+        "start": "16:40",
+        "end": "18:45",
+        "afterBufferMinutes": 30,
+        "endTimeSource": "computed_from_duration_and_aftertime"
+      },
+      {
+        "index": 1,
+        "dayLabel": "lørdag",
+        "start": "08:30",
+        "end": "15:55",
+        "afterBufferMinutes": 30,
+        "endTimeSource": "computed_from_duration_and_aftertime"
+      },
+      {
+        "index": 2,
+        "dayLabel": "søndag",
+        "start": null,
+        "end": null,
+        "afterBufferMinutes": 30,
+        "endTimeSource": "missing_or_unreadable"
+      }
+    ],
+    "childEndTimeSources": [
+      "computed_from_duration_and_aftertime",
+      "computed_from_duration_and_aftertime",
+      "missing_or_unreadable"
+    ],
+    "durationEndFacts": [
+      {
+        "dayLabel": "fredag",
+        "activityDurationMinutes": 45,
+        "breakMinutes": 5,
+        "afterBufferMinutes": 30,
+        "inferredEndTime": "18:45",
+        "endTimeSource": "computed_from_duration_and_aftertime"
+      },
+      {
+        "dayLabel": "lørdag",
+        "activityDurationMinutes": 45,
+        "breakMinutes": 5,
+        "afterBufferMinutes": 30,
+        "inferredEndTime": "15:55",
+        "endTimeSource": "computed_from_duration_and_aftertime"
+      },
+      {
+        "dayLabel": "søndag",
+        "activityDurationMinutes": null,
+        "breakMinutes": null,
+        "afterBufferMinutes": null,
+        "inferredEndTime": null,
+        "endTimeSource": "missing_or_unreadable"
+      }
+    ]
+  }
+}
