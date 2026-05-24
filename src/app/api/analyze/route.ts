@@ -60,8 +60,10 @@ import {
   extractAttendanceTimeFromDay,
   extractOrderedCupMatchTimesForDay,
   resolveCupDayTiming,
+  syncCupDayTimingInferredEnd,
 } from "@/lib/cup-resolve-day-timing";
 import { registerPortalBundleRuntime, toPortalBundle } from "@/lib/portal-bundle";
+import { buildAnalysisCorpus } from "@/lib/analysis-evidence";
 
 function asNullableString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -3941,6 +3943,24 @@ function mergedTimeContextBlobFromResult(result: AIAnalysisResult): string | nul
   return `${d}\n\n${r}`;
 }
 
+/** Samme bredde som evidence + scheduleByDay (varighet/ettertid/buffer). */
+function cupFullTimingCorpusFromResult(result: AIAnalysisResult): string {
+  return [
+    buildAnalysisCorpus(result),
+    ...result.scheduleByDay.flatMap((d) => [
+      d.details ?? "",
+      ...(d.notes ?? []),
+      ...(d.highlights ?? []),
+    ]),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function isSundayCupDayLabel(dayLabel: string | null | undefined): boolean {
+  return /\bs[øo]ndag\b/i.test(dayLabel ?? "");
+}
+
 const NB_MONTH_NAMES_EXCERPT = [
   "januar",
   "februar",
@@ -4581,7 +4601,7 @@ async function buildProposalItems(
       const globalDayMatchTimes = cupLike
         ? extractGlobalCupScheduleTimesForDay(cupGlobalScheduleBlob, day.dayLabel)
         : [];
-      const cupTimingCorpus = mergedTimeContextBlobFromResult(result) ?? "";
+      const cupTimingCorpus = cupFullTimingCorpusFromResult(result);
       const fHighlightsForEventBaseRelabeled = cupLike
         ? relabelOppmoteHighlightsAtKampTimes(
             fHighlightsForEventBase,
@@ -4749,13 +4769,27 @@ async function buildProposalItems(
           day,
           detailsForEvent,
           highlightsForEventFinal,
+          matchHighlightSources: [
+            ...day.highlights,
+            ...fHighlightsForEvent,
+            ...fNotesRaw,
+          ],
           notesOnlyForEvent: fNotesRaw,
           rememberForEvent: fRemember,
           deadlinesForEvent,
           conditionalDay,
           supplementalTimeContextBlob: cupTimingSupplement || undefined,
-          fullCorpus: mergedTimeContextBlobFromResult(result),
+          fullCorpus: cupTimingCorpus,
         });
+        const cupCorpusForEndSync = cupTimingCorpus;
+        if (cupTiming) {
+          cupTiming = syncCupDayTimingInferredEnd(cupTiming, {
+            dayLabel: day.dayLabel,
+            corpus: cupCorpusForEndSync,
+            matchHighlights: [...day.highlights, ...fHighlightsForEvent, ...fNotesRaw],
+            conditionalDay,
+          });
+        }
         if (structuredDayContent && cupTiming) {
           const cupTimingResolved = cupTiming;
           const parentTitleForTiming = buildCupParentCalendarTitle(result);
@@ -4768,7 +4802,7 @@ async function buildProposalItems(
             ...fRemember,
             ...deadlinesForEvent,
           ].join("\n");
-          const cupCorpusForTiming = mergedTimeContextBlobFromResult(result) ?? "";
+          const cupCorpusForTiming = cupTimingCorpus;
           const activityTimingBlob = [
             detailsForEvent ?? "",
             ...highlightsForEventFinal,
@@ -4818,7 +4852,10 @@ async function buildProposalItems(
             orderedMatchTimes: orderedMatchTimesForHighlights,
             daySegmentStart: cupTimingResolved.start,
             daySegmentEnd: cupTimingResolved.end,
-            timeWindow: cupTimingResolved.timeWindow ?? null,
+            timeWindow:
+              conditionalDay || isSundayCupDayLabel(day.dayLabel)
+                ? (cupTimingResolved.timeWindow ?? null)
+                : null,
             timePrecision: cupTimingResolved.timePrecision,
             tentative:
               conditionalDay ||
@@ -4833,6 +4870,46 @@ async function buildProposalItems(
             ...structuredDayContent.uncertaintyNotes,
           ];
         }
+      }
+
+      if (cupLike && structuredDayContent) {
+        const relabeledHighlights = relabelOppmoteHighlightsAtKampTimes(
+          structuredDayContent.highlights,
+          cupTimingCorpus,
+          day.dayLabel,
+        );
+        let highlightSourceIdx = 0;
+        const sourceOrder = structuredDayContent.sourceOrder.map((entry) => {
+          if (!entry.startsWith("highlight:")) return entry;
+          const next = relabeledHighlights[highlightSourceIdx++];
+          return next ? `highlight:${next}` : entry;
+        });
+        structuredDayContent = {
+          ...structuredDayContent,
+          highlights: relabeledHighlights,
+          sourceOrder,
+        };
+        highlightsForEventFinal = relabeledHighlights;
+      }
+
+      if (
+        cupLike &&
+        structuredDayContent &&
+        day.dayLabel &&
+        !conditionalDay &&
+        !isSundayCupDayLabel(day.dayLabel)
+      ) {
+        structuredDayContent = {
+          ...structuredDayContent,
+          timeWindowCandidates: [],
+          highlights: structuredDayContent.highlights.filter(
+            (h) => !/\d{2}:\d{2}[–-]\d{2}:\d{2}\s+.+\(foreløpig\)/i.test(h),
+          ),
+          uncertaintyNotes: structuredDayContent.uncertaintyNotes.filter(
+            (n) => !/\d{2}:\d{2}[–-]\d{2}:\d{2}/.test(n),
+          ),
+        };
+        highlightsForEventFinal = structuredDayContent.highlights;
       }
 
       const removedFragmentNotes = rawNotesBeforeCleanup.filter((n) => {
@@ -5292,7 +5369,10 @@ async function buildProposalItems(
             (c) => c.event.date,
           );
           cupParentEvent.event.metadata.cupProposalDebug.childEndTimeSources = childSegments.map(
-            (c) => (c.event.metadata?.endTimeSource as string | undefined) ?? null,
+            (c, i) =>
+              (c.event.metadata?.endTimeSource as string | undefined) ??
+              cupEmbeddedScheduleSegments[i]?.endTimeSource ??
+              null,
           );
           cupParentEvent.event.metadata.cupProposalDebug.childTimePrecisions = childSegments.map(
             (c) => (c.event.metadata?.timePrecision as string | undefined) ?? null,
@@ -5371,7 +5451,10 @@ async function buildProposalItems(
         }
         if (!it.event.metadata.cupProposalDebug.childEndTimeSources) {
           it.event.metadata.cupProposalDebug.childEndTimeSources = finalChildEvents.map(
-            (c) => (c.event.metadata?.endTimeSource as string | undefined) ?? null,
+            (c, i) =>
+              (c.event.metadata?.endTimeSource as string | undefined) ??
+              cupEmbeddedScheduleSegments?.[i]?.endTimeSource ??
+              null,
           );
         }
         if (!it.event.metadata.cupProposalDebug.childTimePrecisions) {

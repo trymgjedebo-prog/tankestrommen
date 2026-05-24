@@ -91,5 +91,17 @@ describe("activity-duration", () => {
     expect(
       parsePostEventBufferMinutes("Beregn litt tid etter siste kamp før dere drar hjem.")?.estimated,
     ).toBe(true);
+    expect(parsePostEventBufferMinutes("Beregn tid etter siste kamp")?.minutes).toBe(30);
+    expect(
+      parsePostEventBufferMinutes("ca. en halvtime etter kampen")?.minutes,
+    ).toBe(30);
+    expect(
+      parsePostEventBufferMinutes(
+        "Ikke ute av hallen før ca. en halvtime etter kampen",
+      )?.minutes,
+    ).toBe(30);
+    expect(
+      parsePostEventBufferMinutes("Rydding av fellesutstyr og kort prat etter siste kamp")?.minutes,
+    ).toBe(30);
   });
 });

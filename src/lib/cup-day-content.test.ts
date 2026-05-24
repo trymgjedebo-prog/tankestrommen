@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   buildCupStructuredDayContent,
   enrichCupStructuredContentWithResolvedTiming,
   formatCupEventNotesFlat,
   isNoiseFragment,
+  relabelOppmoteHighlightsAtKampTimes,
 } from "./cup-day-content";
 import { extractOrderedCupMatchTimesForDay } from "./cup-resolve-day-timing";
 
@@ -415,5 +418,17 @@ describe("buildCupStructuredDayContent (Høstcupen-regresjon)", () => {
     expect(enriched.highlights).toContain("10:00–12:00 Første kamp (foreløpig)");
     expect(enriched.highlights.some((h) => /^10:00\s/.test(h) && !h.includes("–"))).toBe(false);
     expect(enriched.highlights.some((h) => /^12:00\s/.test(h) && !h.includes("–"))).toBe(false);
+  });
+
+  it("relabelOppmoteHighlightsAtKampTimes: route-lignende corpus for Vårcup mislabeled", () => {
+    const raw = readFileSync(resolve("fixtures/tankestrom/vaacup_original.txt"), "utf8");
+    const corpus = [
+      raw.slice(0, 400),
+      raw,
+      "Oppmøte kl. 17:45 ved banen. Kampstart kl. 18:40.",
+      "18:40 Oppmøte",
+    ].join("\n");
+    const out = relabelOppmoteHighlightsAtKampTimes(["18:40 Oppmøte"], corpus, "fredag");
+    expect(out[0]).toBe("18:40 Første kamp");
   });
 });

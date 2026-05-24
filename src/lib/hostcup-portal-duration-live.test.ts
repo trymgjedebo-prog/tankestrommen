@@ -117,6 +117,17 @@ describe("Høstcup live portal shape (toPortalBundle)", () => {
     expect(fri?.breakMinutes).toBe(5);
     expect(fri?.afterBufferMinutes ?? fri?.postEventBufferMinutes).toBe(30);
     expect(fri?.timePrecision).toBe("exact");
+    expect(fri?.timeWindow).toBeUndefined();
+    const friContent = (
+      bundle.items as Array<{
+        event?: { metadata?: { embeddedSchedule?: Array<{ dayContent?: { highlights?: string[] } }> } };
+      }>
+    )
+      .flatMap((i) => i.event?.metadata?.embeddedSchedule ?? [])
+      .find((s) => /fredag/i.test(JSON.stringify(s)));
+    const friHl = (friContent?.dayContent?.highlights ?? []).join(" ");
+    expect(friHl).not.toMatch(/10:00[–-]12:00/);
+    expect(JSON.stringify(friContent?.dayContent ?? {})).not.toMatch(/10:00[–-]12:00/);
 
     expect(lor?.start).toBe("08:30");
     expect(lor?.end).toBe("15:55");
@@ -124,6 +135,8 @@ describe("Høstcup live portal shape (toPortalBundle)", () => {
     expect(lor?.inferredEndTime).toBe(true);
     expect(lor?.activityDurationMinutes ?? lor?.durationMinutes).toBe(45);
     expect(lor?.afterBufferMinutes ?? lor?.postEventBufferMinutes).toBe(30);
+    expect(lor?.timeWindow).toBeUndefined();
+    expect(lor?.endTimeSource).toBe("computed_from_duration_and_aftertime");
 
     expect(sun?.end).toBeNull();
     expect(sun?.isConditional).toBe(true);
@@ -137,6 +150,18 @@ describe("Høstcup live portal shape (toPortalBundle)", () => {
     expect(debug?.[0]).toBe("computed_from_duration_and_aftertime");
     expect(debug?.[1]).toBe("computed_from_duration_and_aftertime");
     expect(debug?.[2]).toBe("missing_or_unreadable");
+
+    const childEvents = (
+      bundle.items as Array<{
+        kind: string;
+        event?: { end?: string | null; metadata?: { endTimeSource?: string; isArrangementChild?: boolean } };
+      }>
+    ).filter((i) => i.kind === "event" && i.event?.metadata?.isArrangementChild);
+    const friChild = childEvents.find(
+      (c) => c.event?.metadata?.endTimeSource === "computed_from_duration_and_aftertime",
+    );
+    expect(friChild?.event?.end).toMatch(/18:45/);
+    expect(friChild?.event?.metadata?.endTimeSource).toBe("computed_from_duration_and_aftertime");
   });
 
   it("evidence: søndag 10:00–12:00 ikke i confirmedFacts; durationEndFacts riktig", () => {
@@ -155,7 +180,9 @@ describe("Høstcup live portal shape (toPortalBundle)", () => {
     expect(friFact?.endTimeSource).toBe("computed_from_duration_and_aftertime");
 
     expect(lorFact?.activityDurationMinutes).toBe(45);
+    expect(lorFact?.afterBufferMinutes).toBe(30);
     expect(lorFact?.inferredEndTime).toBe("15:55");
+    expect(lorFact?.endTimeSource).toBe("computed_from_duration_and_aftertime");
 
     expect(sunFact?.inferredEndTime).toBeNull();
     expect(sunFact?.validation).toBe("tentative");
