@@ -173,6 +173,47 @@ export function parseCupTimeWindow(text: string): {
   return { earliestStart: a, latestStart: b, ...(label ? { label } : {}), tentative: true };
 }
 
+function cupWeekdayKeyFromLabel(label: string | null | undefined): "fredag" | "lordag" | "sondag" | null {
+  if (!label?.trim()) return null;
+  const n = normalizeNorwegianLetters(label);
+  if (/\bfri(day)?|fredag\b/.test(n)) return "fredag";
+  if (/\blordag|l[øo]rdag|saturday\b/.test(n)) return "lordag";
+  if (/\bsondag|s[øo]ndag|sunday\b/.test(n)) return "sondag";
+  return null;
+}
+
+/**
+ * «Mellom … og …» scoped til dag: søndags-sluttspill-vindu skal ikke gi timeWindow på fredag/lørdag.
+ */
+export function parseCupTimeWindowForDayScoped(
+  text: string,
+  dayLabel: string | null | undefined,
+): ReturnType<typeof parseCupTimeWindow> {
+  const key = cupWeekdayKeyFromLabel(dayLabel);
+  for (const raw of text.replace(/\r\n/g, "\n").split(/\n/)) {
+    const line = normalizeSpace(raw);
+    if (!line) continue;
+    const tw = parseCupTimeWindow(line);
+    if (!tw) continue;
+    const n = normalizeNorwegianLetters(line);
+    if (key && key !== "sondag") {
+      if (/\b(sondagskamp|a-?sluttspill|sluttspill)\b/.test(n) && /\b(sondag|sondags)\b/.test(n)) {
+        continue;
+      }
+      if (/\b(sondagskamp|kamp\s+p[aå]\s+sondag)\b/.test(n)) continue;
+      const mentionsThisDay =
+        (key === "fredag" && /\bfredag\b/.test(n)) ||
+        (key === "lordag" && /\b(lordag|l[øo]rdag)\b/.test(n));
+      const mentionsOtherWeekendDay =
+        (key === "fredag" && /\b(lordag|l[øo]rdag|sondag|sondags)\b/.test(n)) ||
+        (key === "lordag" && /\b(fredag|sondag|sondags)\b/.test(n));
+      if (mentionsOtherWeekendDay && !mentionsThisDay) continue;
+    }
+    return tw;
+  }
+  return null;
+}
+
 export function isNoiseFragment(text: string): boolean {
   const t = normalizeSpace(text);
   if (!t) return true;
@@ -437,7 +478,8 @@ export function buildCupStructuredDayContent(input: {
     ...input.rememberItems,
     ...input.deadlines,
   ].join("\n");
-  const globalTw = parseCupTimeWindow(fullBlobForWindow);
+  const dayFromTitle = /\b(fredag|l[øo]rdag|s[øo]ndag)\b/i.exec(input.childTitle)?.[1] ?? null;
+  const globalTw = parseCupTimeWindowForDayScoped(fullBlobForWindow, dayFromTitle);
   if (globalTw) {
     timeWindowCandidates.push(globalTw);
     uncertaintyNotes.push(
@@ -725,13 +767,17 @@ export function relabelOppmoteHighlightsAtKampTimes(
     dayLabel && corpusBlob.trim()
       ? extractDayBlobFromCorpus(corpusBlob, dayLabel).trim() || corpusBlob
       : corpusBlob;
-  const kamp = kampAnchoredHhmmInText(`${scoped}\n${highlights.join("\n")}`);
-  if (kamp.size === 0) return highlights;
+  const probe = `${scoped}\n${highlights.join("\n")}`;
+  const matchTimes = new Set([
+    ...extractCupMatchTimes(probe),
+    ...extractCupMatchTimes(corpusBlob),
+  ]);
+  if (matchTimes.size === 0) return highlights;
   return highlights.map((h) => {
     const m = /^(\d{1,2}):(\d{2})\s+oppm[oø]te\b/i.exec(normalizeSpace(h));
     if (!m) return h;
     const t = `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
-    if (!kamp.has(t)) return h;
+    if (!matchTimes.has(t)) return h;
     return `${t} Første kamp`;
   });
 }
@@ -955,6 +1001,28 @@ export function enrichCupStructuredContentWithResolvedTiming(
       highlights.push(`${att} Oppmøte`);
     }
   }
+
+  /** Etter oppmøte-normalisering: fiks feilmerket «HH:MM Oppmøte» på kamptid (skal ikke overskrives tilbake). */
+  const kampScheduleTimes = new Set(extractCupMatchTimes(blob));
+  highlights = highlights.map((h) => {
+    const m = /^(\d{2}:\d{2})\s+(.+)$/.exec(h);
+    if (!m) return h;
+    const time = m[1]!;
+    const label = (m[2] ?? "").trim();
+    if (!/^oppm[oø]te\b/i.test(label)) return h;
+    if (att === time) return h;
+    if (kampScheduleTimes.has(time)) {
+      const target = labelForMatchClock(time) ?? defaultMatchLabelByIndex(0);
+      return `${time} ${target}`;
+    }
+    if (fromRoute.includes(time) && !explicitAttendanceTimes.includes(time)) {
+      const idx = fromRoute.indexOf(time);
+      const target =
+        labelForMatchClock(time) ?? defaultMatchLabelByIndex(idx >= 0 ? idx : 0);
+      return `${time} ${target}`;
+    }
+    return h;
+  });
 
   const noPointHighlight = !highlights.some((h) => /^\d{2}:\d{2}\s+/.test(h) && !/\d{2}:\d{2}[–-]\d{2}:\d{2}/.test(h));
   if (

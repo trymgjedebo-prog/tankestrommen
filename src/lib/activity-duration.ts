@@ -188,21 +188,50 @@ export function resolvePostEventBufferForDay(
 /** Ettertid / buffer etter siste kamp (inkl. «omtrent en halvtime etter kampslutt»). */
 export function parsePostEventBufferMinutes(text: string): BufferEvidence | null {
   const normalized = normalizeNorwegianLetters(text).toLowerCase();
-  if (/\bberegn\s+litt\s+tid\s+etter\s+siste\s+kamp\b/.test(normalized)) {
+  if (
+    /\bberegn\s+(?:litt\s+)?tid\s+etter\s+siste\s+kamp\b/.test(normalized) ||
+    /\btid\s+etter\s+siste\s+kamp\b/.test(normalized)
+  ) {
     return {
       minutes: DEFAULT_VAGUE_AFTER_BUFFER_MINUTES,
-      sourceQuote: findSourceLine(text, /beregn\s+litt\s+tid\s+etter\s+siste\s+kamp/i),
+      sourceQuote:
+        findSourceLine(text, /beregn\s+(?:litt\s+)?tid\s+etter\s+siste\s+kamp/i) ??
+        findSourceLine(text, /tid\s+etter\s+siste\s+kamp/i),
+      estimated: true,
+    };
+  }
+  if (
+    /\brydding\b/.test(normalized) &&
+    /\b(etter\s+siste\s+kamp|siste\s+kamp)\b/.test(normalized)
+  ) {
+    return {
+      minutes: DEFAULT_VAGUE_AFTER_BUFFER_MINUTES,
+      sourceQuote: findSourceLine(text, /rydding/i),
+      estimated: true,
+    };
+  }
+  if (/\bkort\s+prat\b/.test(normalized) && /\b(etter\s+siste\s+kamp|siste\s+kamp)\b/.test(normalized)) {
+    return {
+      minutes: DEFAULT_VAGUE_AFTER_BUFFER_MINUTES,
+      sourceQuote: findSourceLine(text, /kort\s+prat/i),
       estimated: true,
     };
   }
   const halfAfter =
-    /\b(?:omtrent\s+)?(?:en\s+)?halvtime\s+etter\s+(?:kampslutt|kampen|siste\s+kamp)\b/.exec(normalized) ||
-    /\b(?:omtrent\s+)?(?:en\s+)?halv\s+time\s+etter\s+(?:kampslutt|kampen|siste\s+kamp)\b/.exec(normalized);
+    /\b(?:ca\.?\s+|omtrent\s+)?(?:en\s+)?halvtime\s+etter\s+(?:kampslutt|kampen|siste\s+kamp)\b/.exec(
+      normalized,
+    ) ||
+    /\b(?:ca\.?\s+|omtrent\s+)?(?:en\s+)?halv\s+time\s+etter\s+(?:kampslutt|kampen|siste\s+kamp)\b/.exec(
+      normalized,
+    ) ||
+    /\bikke\s+ute\s+(?:av\s+\w+\s+)?(?:for|før)\s+(?:ca\.?\s+|omtrent\s+)?(?:en\s+)?halvtime\s+etter\s+(?:kampslutt|kampen|siste\s+kamp)\b/.exec(
+      normalized,
+    );
   if (halfAfter) {
     return {
       minutes: 30,
       sourceQuote: findSourceLine(text, /halv\s*time\s+etter|halvtime\s+etter/i),
-      estimated: /\bomtrent\b/.test(halfAfter[0] ?? ""),
+      estimated: /\b(?:ca\.?|omtrent)\b/.test(halfAfter[0] ?? ""),
     };
   }
   const m =

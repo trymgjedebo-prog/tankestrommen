@@ -1,11 +1,13 @@
 import {
+  buildDurationEndFact,
   computeInferredDayEnd,
   parseScopedAttendanceOffsetMinutes,
   resolveMatchDurationMinutes,
   resolvePostEventBufferForDay,
 } from "@/lib/activity-duration";
 import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
-import { lineLooksLikeAdministrativeDeadline, parseCupTimeWindow } from "@/lib/cup-day-content";
+import { lineLooksLikeAdministrativeDeadline, parseCupTimeWindowForDayScoped } from "@/lib/cup-day-content";
+import { extractGlobalCupScheduleTimesForDay } from "@/lib/cup-timing-context";
 import {
   extractCupMatchTimes,
   extractExplicitAttendanceHhmmTimes,
@@ -221,16 +223,8 @@ function cupWeekdayKeyFromDayLabel(label: string | null): CupWeekdayKey | null {
 function parseCupTimeWindowForScheduleDay(
   blob: string,
   dayLabel: string | null,
-): ReturnType<typeof parseCupTimeWindow> | null {
-  const tw = parseCupTimeWindow(blob);
-  if (!tw) return null;
-  const key = cupWeekdayKeyFromDayLabel(dayLabel);
-  if (!key || key === "sondag") return tw;
-  const n = normalizeNorwegianLetters(blob);
-  const sundayPlayoffMellom =
-    /\bmellom\b/.test(n) && /\b(sondagskamp|kamp\s+p[aå]\s+sondag)\b/.test(n);
-  if (sundayPlayoffMellom) return null;
-  return tw;
+): ReturnType<typeof parseCupTimeWindowForDayScoped> {
+  return parseCupTimeWindowForDayScoped(blob, dayLabel);
 }
 
 /**
@@ -281,10 +275,134 @@ function mellomWindowLineLooksCupOriented(mellomLine: string): boolean {
   );
 }
 
+function resolveLastMatchTimeForDay(input: {
+  dayLabel: string | null;
+  corpus: string;
+  matchHighlights: string[];
+}): string | null {
+  const dayBlob = extractDayBlobFromCorpus(input.corpus, input.dayLabel);
+  const matchTimes = extractOrderedCupMatchTimesForDay(
+    dayBlob,
+    input.corpus,
+    input.matchHighlights,
+    input.dayLabel,
+  );
+  if (matchTimes.length > 0) return matchTimes[matchTimes.length - 1]!;
+  const fromHighlights = lastKampTimeFromHighlights(input.matchHighlights);
+  if (fromHighlights) return fromHighlights;
+  const global = extractGlobalCupScheduleTimesForDay(input.corpus, input.dayLabel);
+  if (global.length > 0) return global[global.length - 1]!;
+  return null;
+}
+
+/**
+ * Synkroniserer inferred end fra samme kilde som `durationEndFacts` (evidence).
+ * Brukes når `resolveCupDayTiming` mangler end pga. strukturerte highlights uten kamp-anker.
+ */
+function durationFactShouldOverrideTiming(
+  timing: CupDayTiming,
+  fact: ReturnType<typeof buildDurationEndFact>,
+): boolean {
+  if (!fact.inferredEndTime) return false;
+  if (!timing.end) return true;
+  const timingBuf = timing.afterBufferMinutes ?? timing.postEventBufferMinutes ?? 0;
+  const factBuf = fact.afterBufferMinutes ?? 0;
+  if (factBuf > 0 && timingBuf === 0) return true;
+  if (
+    fact.endTimeSource === "computed_from_duration_and_aftertime" &&
+    timing.endTimeSource === "computed_from_duration"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function syncCupDayTimingInferredEnd(
+  timing: CupDayTiming,
+  input: {
+    dayLabel: string | null;
+    corpus: string;
+    matchHighlights: string[];
+    conditionalDay: boolean;
+  },
+): CupDayTiming {
+  if (input.conditionalDay) {
+    return {
+      ...timing,
+      end: null,
+      inferredEndTime: undefined,
+      endTimeSource: "missing_or_unreadable",
+      requiresManualTimeReview: true,
+      timePrecision:
+        timing.timePrecision === "time_window" ? timing.timePrecision : "date_only",
+    };
+  }
+
+  const dayBlob = extractDayBlobFromCorpus(input.corpus, input.dayLabel);
+  const lastMatch = resolveLastMatchTimeForDay({
+    dayLabel: input.dayLabel,
+    corpus: input.corpus,
+    matchHighlights: input.matchHighlights,
+  });
+  const fact = buildDurationEndFact({
+    dayLabel: input.dayLabel,
+    dayBlob,
+    corpus: input.corpus,
+    lastMatchTime: lastMatch,
+  });
+
+  const preferFact = durationFactShouldOverrideTiming(timing, fact);
+  const end = preferFact ? fact.inferredEndTime : (timing.end ?? fact.inferredEndTime);
+  const endTimeSource = preferFact
+    ? (fact.endTimeSource ?? timing.endTimeSource)
+    : !timing.end && fact.inferredEndTime && fact.endTimeSource
+      ? fact.endTimeSource
+      : timing.endTimeSource;
+  const inferredEndTime = Boolean(timing.inferredEndTime || fact.inferredEndTime);
+  const start = timing.attendanceTime ?? timing.start;
+  const durationMinutes = fact.activityDurationMinutes ?? timing.durationMinutes;
+  const afterBufferMinutes = preferFact
+    ? (fact.afterBufferMinutes ?? timing.afterBufferMinutes)
+    : (fact.afterBufferMinutes ?? timing.afterBufferMinutes);
+  const hasExactEnd = Boolean(start && end);
+
+  return {
+    ...timing,
+    durationMinutes,
+    activityDurationMinutes: durationMinutes,
+    breakMinutes: fact.breakMinutes ?? timing.breakMinutes,
+    postEventBufferMinutes: afterBufferMinutes ?? timing.postEventBufferMinutes,
+    afterBufferMinutes: afterBufferMinutes ?? timing.afterBufferMinutes,
+    end,
+    endTimeSource,
+    inferredEndTime: inferredEndTime || undefined,
+    timePrecision: hasExactEnd ? "exact" : timing.timePrecision,
+    requiresManualTimeReview: !hasExactEnd,
+    ...(hasExactEnd && !input.conditionalDay ? { timeWindow: undefined } : {}),
+    ...(end && lastMatch && durationMinutes != null
+      ? {
+          timeComputation: {
+            formula:
+              (afterBufferMinutes ?? 0) > 0
+                ? "lastMatch + duration + postEventBuffer = end"
+                : "lastMatch + duration = end",
+            startTime: lastMatch,
+            durationMinutes,
+            computedEndTime: end,
+          },
+        }
+      : timing.timeComputation
+        ? { timeComputation: timing.timeComputation }
+        : {}),
+  };
+}
+
 export function resolveCupDayTiming(input: {
   day: DayScheduleEntry;
   detailsForEvent: string | null;
   highlightsForEventFinal: string[];
+  /** Rå/modell-highlights + notater for kamptid (bredere enn strukturerte highlights). */
+  matchHighlightSources?: string[];
   notesOnlyForEvent: string[];
   rememberForEvent: string[];
   deadlinesForEvent: string[];
@@ -341,10 +459,15 @@ export function resolveCupDayTiming(input: {
     .filter((l) => !lineLooksLikeAdministrativeDeadline(l.trim()))
     .join("\n");
   const timingSource = timingBlob.length ? timingBlob : dayScopedBlob;
+  const matchHighlights =
+    input.matchHighlightSources && input.matchHighlightSources.length > 0
+      ? input.matchHighlightSources
+      : input.highlightsForEventFinal;
   const matchTimes = extractOrderedCupMatchTimesForDay(
     timingSource,
     fullCorpus,
-    input.highlightsForEventFinal,
+    matchHighlights,
+    input.day.dayLabel,
   );
   const durationEvidence = resolveMatchDurationMinutes(
     timingSource,
@@ -366,13 +489,13 @@ export function resolveCupDayTiming(input: {
   let lastMatch =
     matchTimes.length > 0
       ? matchTimes[matchTimes.length - 1]!
-      : lastKampTimeFromHighlights(input.highlightsForEventFinal) ?? r.start;
+      : lastKampTimeFromHighlights(matchHighlights) ?? r.start;
   const explicitAttendanceFromDay = extractAttendanceTimeFromDay(input.day);
   const explicitTimesBlob = extractExplicitAttendanceHhmmTimes(blob);
   const explicitFromBlob =
     explicitTimesBlob.size === 1 ? [...explicitTimesBlob][0]! : null;
   const attendanceFromHighlights = attendanceTimeFromOppmoteHighlights(
-    input.highlightsForEventFinal,
+    matchHighlights,
     matchTimes,
   );
   const timeFieldMatch = input.day.time?.trim()
@@ -464,10 +587,26 @@ export function resolveCupDayTiming(input: {
     }
   }
 
-  const timeWindowForPortal =
+  const timeWindowForPortalRaw =
     timePrecision === "time_window" && start && end
       ? { earliestStart: start, latestStart: end }
       : undefined;
+  const dayKey = cupWeekdayKeyFromDayLabel(input.day.dayLabel);
+  const timeWindowForPortal =
+    timeWindowForPortalRaw &&
+    dayKey &&
+    dayKey !== "sondag" &&
+    !input.conditionalDay &&
+    matchTimes.some(
+      (t) =>
+        t !== timeWindowForPortalRaw.earliestStart && t !== timeWindowForPortalRaw.latestStart,
+    )
+      ? undefined
+      : timeWindowForPortalRaw;
+  const timePrecisionFinal =
+    timeWindowForPortalRaw && !timeWindowForPortal && start && end && timePrecision === "time_window"
+      ? "exact"
+      : timePrecision;
 
   return {
     start,
@@ -480,7 +619,7 @@ export function resolveCupDayTiming(input: {
     postEventBufferMinutes: postEventBufferMinutes ?? null,
     afterBufferMinutes: afterBufferMinutes ?? null,
     inferredEndTime: inferredEndTime || undefined,
-    timePrecision,
+    timePrecision: timePrecisionFinal,
     startTimeSource: start ? "explicit" : "missing_or_unreadable",
     endTimeSource,
     requiresManualTimeReview: !(start && end),

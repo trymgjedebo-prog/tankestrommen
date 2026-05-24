@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parseCupTimeWindow } from "./cup-day-content";
-import { resolveCupDayTiming } from "./cup-resolve-day-timing";
+import { resolveCupDayTiming, syncCupDayTimingInferredEnd } from "./cup-resolve-day-timing";
 import type { DayScheduleEntry } from "@/lib/types";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -199,5 +199,103 @@ describe("resolveCupDayTiming", () => {
     expect(r.end).toBe("18:45");
     expect(r.endTimeSource).toBe("computed_from_duration_and_aftertime");
     expect(r.inferredEndTime).toBe(true);
+  });
+
+  it("syncCupDayTimingInferredEnd: oppgraderer end når timing mangler buffer", () => {
+    const corpus = readFileSync(
+      resolve(__dirname, "../../fixtures/tankestrom/hostcup_duration_endtime_rich.txt"),
+      "utf8",
+    );
+    const partial: ReturnType<typeof resolveCupDayTiming> = {
+      start: "16:40",
+      end: "18:15",
+      attendanceTime: "16:40",
+      attendanceOffsetMinutes: null,
+      durationMinutes: 45,
+      activityDurationMinutes: 45,
+      breakMinutes: 5,
+      postEventBufferMinutes: null,
+      afterBufferMinutes: null,
+      timePrecision: "exact",
+      startTimeSource: "explicit",
+      endTimeSource: "computed_from_duration",
+      requiresManualTimeReview: false,
+      inferredEndTime: true,
+    };
+
+    const synced = syncCupDayTimingInferredEnd(partial, {
+      dayLabel: "fredag",
+      corpus,
+      matchHighlights: ["16:40 Oppmøte", "17:30 Første kamp"],
+      conditionalDay: false,
+    });
+    expect(synced.end).toBe("18:45");
+    expect(synced.afterBufferMinutes).toBe(30);
+    expect(synced.endTimeSource).toBe("computed_from_duration_and_aftertime");
+    expect(synced.timeWindow).toBeUndefined();
+  });
+
+  it("fredag: global søndags-sluttspill-vindu i fullCorpus skal ikke gi timeWindow", () => {
+    const corpus = readFileSync(
+      resolve(__dirname, "../../fixtures/tankestrom/hostcup_duration_endtime_rich.txt"),
+      "utf8",
+    );
+    const day: DayScheduleEntry = {
+      dayLabel: "fredag",
+      date: "2026-09-18",
+      time: "16:40",
+      details: null,
+      highlights: ["16:40 Oppmøte", "17:30 Første kamp"],
+      rememberItems: [],
+      deadlines: [],
+      notes: [],
+    };
+    const r = resolveCupDayTiming({
+      day,
+      detailsForEvent: null,
+      highlightsForEventFinal: day.highlights,
+      notesOnlyForEvent: [],
+      rememberForEvent: [],
+      deadlinesForEvent: [],
+      conditionalDay: false,
+      supplementalTimeContextBlob: corpus,
+      fullCorpus: corpus,
+    });
+    expect(r.timeWindow).toBeUndefined();
+    expect(r.timePrecision).toBe("exact");
+    expect(r.end).toBe("18:45");
+    expect(r.afterBufferMinutes).toBe(30);
+  });
+
+  it("syncCupDayTimingInferredEnd: fyller end når cupTiming mangler end men evidence har lastMatch", () => {
+    const corpus = readFileSync(
+      resolve(__dirname, "../../fixtures/tankestrom/hostcup_duration_endtime_rich.txt"),
+      "utf8",
+    );
+    const partial: ReturnType<typeof resolveCupDayTiming> = {
+      start: "16:40",
+      end: null,
+      attendanceTime: "16:40",
+      attendanceOffsetMinutes: null,
+      durationMinutes: 45,
+      activityDurationMinutes: 45,
+      breakMinutes: 5,
+      postEventBufferMinutes: null,
+      afterBufferMinutes: null,
+      timePrecision: "start_only",
+      startTimeSource: "explicit",
+      endTimeSource: "missing_or_unreadable",
+      requiresManualTimeReview: true,
+    };
+
+    const synced = syncCupDayTimingInferredEnd(partial, {
+      dayLabel: "fredag",
+      corpus,
+      matchHighlights: ["16:40 Oppmøte", "17:30 Første kamp"],
+      conditionalDay: false,
+    });
+    expect(synced.end).toBe("18:45");
+    expect(synced.endTimeSource).toBe("computed_from_duration_and_aftertime");
+    expect(synced.inferredEndTime).toBe(true);
   });
 });
