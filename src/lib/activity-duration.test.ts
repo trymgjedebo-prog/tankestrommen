@@ -26,6 +26,12 @@ describe("activity-duration", () => {
     expect(d?.breakMinutes).toBe(5);
   });
 
+  it("parser 2 x 20 min, og 5 minutter pause (komma)", () => {
+    const d = parseStructuredMatchDuration("Kampen varer 2 x 20 minutter, og 5 minutter pause.");
+    expect(d?.totalMinutes).toBe(45);
+    expect(d?.breakMinutes).toBe(5);
+  });
+
   it("parser 2x20 min og halvtime etter kampslutt", () => {
     expect(parseStructuredMatchDuration("2x20 min + 5 min pause")?.totalMinutes).toBe(45);
     const buf = parsePostEventBufferMinutes(

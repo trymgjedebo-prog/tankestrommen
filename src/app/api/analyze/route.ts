@@ -46,9 +46,11 @@ import {
 import {
   buildCupStructuredDayContent,
   enrichCupStructuredContentWithResolvedTiming,
+  relabelOppmoteHighlightsAtKampTimes,
   formatCupEventNotesFlat,
   parseCupTimeWindow,
 } from "@/lib/cup-day-content";
+import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
 import {
   extractGlobalCupScheduleTimesForDay,
   isConditionalTournamentTextForDay,
@@ -56,9 +58,9 @@ import {
 import {
   type CupDayTiming,
   extractAttendanceTimeFromDay,
+  extractOrderedCupMatchTimesForDay,
   resolveCupDayTiming,
 } from "@/lib/cup-resolve-day-timing";
-import { extractCupMatchTimes } from "@/lib/cup-match-times";
 import { registerPortalBundleRuntime, toPortalBundle } from "@/lib/portal-bundle";
 
 function asNullableString(value: unknown): string | null {
@@ -1709,7 +1711,12 @@ type EmbeddedScheduleSegment = {
   timePrecision?: "exact" | "start_only" | "date_only" | "time_window";
   endTimeSource?: "explicit" | "computed_from_duration" | "computed_from_duration_and_aftertime" | "missing_or_unreadable";
   durationMinutes?: number | null;
+  activityDurationMinutes?: number | null;
+  breakMinutes?: number | null;
   postEventBufferMinutes?: number | null;
+  afterBufferMinutes?: number | null;
+  inferredEndTime?: boolean;
+  timeComputation?: CupDayTiming["timeComputation"];
   title: string;
   location?: string;
   notes?: string;
@@ -3232,7 +3239,7 @@ function buildCupEmbeddedScheduleSegment(args: {
   let start: string | null = null;
   let end: string | null = null;
   if (args.cupTiming) {
-    start = args.cupTiming.start;
+    start = args.cupTiming.attendanceTime ?? args.cupTiming.start;
     end = args.cupTiming.end;
   } else if (args.explicitStartEnd) {
     start = args.explicitStartEnd.start;
@@ -3351,12 +3358,21 @@ function buildCupEmbeddedScheduleSegment(args: {
     ...(args.cupTiming?.timeWindow ? { timeWindow: args.cupTiming.timeWindow } : {}),
     ...(args.cupTiming?.timePrecision ? { timePrecision: args.cupTiming.timePrecision } : {}),
     ...(args.cupTiming?.endTimeSource ? { endTimeSource: args.cupTiming.endTimeSource } : {}),
+    ...(args.cupTiming?.inferredEndTime ? { inferredEndTime: true } : {}),
     ...(args.cupTiming?.durationMinutes != null
       ? { durationMinutes: args.cupTiming.durationMinutes }
       : {}),
+    ...(args.cupTiming?.activityDurationMinutes != null
+      ? { activityDurationMinutes: args.cupTiming.activityDurationMinutes }
+      : {}),
+    ...(args.cupTiming?.breakMinutes != null ? { breakMinutes: args.cupTiming.breakMinutes } : {}),
     ...(args.cupTiming?.postEventBufferMinutes != null
       ? { postEventBufferMinutes: args.cupTiming.postEventBufferMinutes }
       : {}),
+    ...(args.cupTiming?.afterBufferMinutes != null
+      ? { afterBufferMinutes: args.cupTiming.afterBufferMinutes }
+      : {}),
+    ...(args.cupTiming?.timeComputation ? { timeComputation: args.cupTiming.timeComputation } : {}),
     title,
     ...(args.result.location ? { location: args.result.location } : {}),
     ...(notes ? { notes } : {}),
@@ -4203,7 +4219,7 @@ async function buildProposalItems(
       start = tf.departureTime;
       end = tf.endTime;
     } else if (cupTiming) {
-      start = cupTiming.start;
+      start = cupTiming.attendanceTime ?? cupTiming.start;
       end = cupTiming.end;
     } else if (explicitStartEnd) {
       start = explicitStartEnd.start;
@@ -4394,6 +4410,10 @@ async function buildProposalItems(
       ...(!tf && cupTiming && !enforceFlightNoTfFallback
         ? {
             ...(cupTiming.durationMinutes != null ? { durationMinutes: cupTiming.durationMinutes } : {}),
+            ...(cupTiming.activityDurationMinutes != null
+              ? { activityDurationMinutes: cupTiming.activityDurationMinutes }
+              : {}),
+            ...(cupTiming.breakMinutes != null ? { breakMinutes: cupTiming.breakMinutes } : {}),
             ...(cupTiming.timeComputation ? { timeComputation: cupTiming.timeComputation } : {}),
             ...(cupTiming.timeWindow ? { timeWindow: cupTiming.timeWindow } : {}),
             ...(cupTiming.attendanceTime ? { attendanceTime: cupTiming.attendanceTime } : {}),
@@ -4403,6 +4423,10 @@ async function buildProposalItems(
             ...(cupTiming.postEventBufferMinutes != null
               ? { postEventBufferMinutes: cupTiming.postEventBufferMinutes }
               : {}),
+            ...(cupTiming.afterBufferMinutes != null
+              ? { afterBufferMinutes: cupTiming.afterBufferMinutes }
+              : {}),
+            ...(cupTiming.inferredEndTime ? { inferredEndTime: true } : {}),
             startTimeSource: cupTiming.startTimeSource,
             endTimeSource: cupTiming.endTimeSource,
             timePrecision: cupTiming.timePrecision,
@@ -4557,20 +4581,33 @@ async function buildProposalItems(
       const globalDayMatchTimes = cupLike
         ? extractGlobalCupScheduleTimesForDay(cupGlobalScheduleBlob, day.dayLabel)
         : [];
+      const cupTimingCorpus = mergedTimeContextBlobFromResult(result) ?? "";
+      const fHighlightsForEventBaseRelabeled = cupLike
+        ? relabelOppmoteHighlightsAtKampTimes(
+            fHighlightsForEventBase,
+            cupTimingCorpus,
+            day.dayLabel,
+          )
+        : fHighlightsForEventBase;
       const fHighlightsForEvent =
         globalDayMatchTimes.length > 0
-          ? [...fHighlightsForEventBase, ...globalDayMatchTimes.map((t) => `${t} Kamp`)]
-          : fHighlightsForEventBase;
+          ? [
+              ...fHighlightsForEventBaseRelabeled,
+              ...globalDayMatchTimes.map((t) => `${t} Kamp`),
+            ]
+          : fHighlightsForEventBaseRelabeled;
 
-      const dayBlob = [
-        fDetails,
-        ...fHighlights,
-        ...fNotesRaw,
-        ...fRemember,
-        day.dayLabel ?? "",
-      ].join(" ");
+      const dayScopedCupSourceBlob = cupLike
+        ? extractDayBlobFromCorpus(cupTimingCorpus, day.dayLabel)
+        : [
+            fDetails,
+            ...fHighlights,
+            ...fNotesRaw,
+            ...fRemember,
+            day.dayLabel ?? "",
+          ].join(" ");
       const conditionalDay =
-        cupLike && isConditionalTournamentTextForDay(dayBlob, day.dayLabel);
+        cupLike && isConditionalTournamentTextForDay(dayScopedCupSourceBlob, day.dayLabel);
       const titleSuffix = day.dayLabel;
       let cupTiming: CupDayTiming | null = null;
 
@@ -4720,6 +4757,7 @@ async function buildProposalItems(
           fullCorpus: mergedTimeContextBlobFromResult(result),
         });
         if (structuredDayContent && cupTiming) {
+          const cupTimingResolved = cupTiming;
           const parentTitleForTiming = buildCupParentCalendarTitle(result);
           const childTitleForTiming = buildCupChildCalendarTitle(result, titleSuffix);
           const timingBlob = [
@@ -4730,32 +4768,63 @@ async function buildProposalItems(
             ...fRemember,
             ...deadlinesForEvent,
           ].join("\n");
+          const cupCorpusForTiming = mergedTimeContextBlobFromResult(result) ?? "";
           const activityTimingBlob = [
             detailsForEvent ?? "",
             ...highlightsForEventFinal,
             ...fNotesRaw,
             ...fRemember,
             ...deadlinesForEvent,
-          ].join("\n");
-          const orderedMatchTimesForHighlights = extractCupMatchTimes(activityTimingBlob);
-          if (orderedMatchTimesForHighlights.length === 0 && cupTiming.start) {
-            orderedMatchTimesForHighlights.push(cupTiming.start);
+            extractDayBlobFromCorpus(cupCorpusForTiming, day.dayLabel),
+          ]
+            .filter(Boolean)
+            .join("\n");
+          const globalScheduleProbe = [cupGlobalScheduleBlob, cupCorpusForTiming]
+            .filter(Boolean)
+            .join("\n");
+          let orderedMatchTimesForHighlights = extractGlobalCupScheduleTimesForDay(
+            globalScheduleProbe,
+            day.dayLabel,
+          );
+          if (orderedMatchTimesForHighlights.length === 0) {
+            orderedMatchTimesForHighlights = extractOrderedCupMatchTimesForDay(
+              activityTimingBlob,
+              cupCorpusForTiming,
+              highlightsForEventFinal,
+              day.dayLabel,
+            );
           }
+          if (cupTimingResolved.attendanceTime) {
+            orderedMatchTimesForHighlights = orderedMatchTimesForHighlights.filter(
+              (t) => t !== cupTimingResolved.attendanceTime,
+            );
+          }
+          if (
+            orderedMatchTimesForHighlights.length === 0 &&
+            cupTimingResolved.start &&
+            cupTimingResolved.start !== cupTimingResolved.attendanceTime
+          ) {
+            orderedMatchTimesForHighlights.push(cupTimingResolved.start);
+          }
+          const enrichSourceBlob = [timingBlob, extractDayBlobFromCorpus(cupCorpusForTiming, day.dayLabel)]
+            .filter(Boolean)
+            .join("\n");
           structuredDayContent = enrichCupStructuredContentWithResolvedTiming(structuredDayContent, {
             date: isoDate,
             parentTitleNorm: cupLineNormKey(parentTitleForTiming),
             childTitleNorm: cupLineNormKey(childTitleForTiming),
-            sourceBlob: timingBlob,
-            attendanceTime: cupTiming.attendanceTime,
+            sourceBlob: enrichSourceBlob,
+            attendanceTime: cupTimingResolved.attendanceTime,
             orderedMatchTimes: orderedMatchTimesForHighlights,
-            daySegmentStart: cupTiming.start,
-            daySegmentEnd: cupTiming.end,
-            timeWindow: cupTiming.timeWindow ?? null,
-            timePrecision: cupTiming.timePrecision,
+            daySegmentStart: cupTimingResolved.start,
+            daySegmentEnd: cupTimingResolved.end,
+            timeWindow: cupTimingResolved.timeWindow ?? null,
+            timePrecision: cupTimingResolved.timePrecision,
             tentative:
               conditionalDay ||
-              cupTiming.timePrecision === "time_window" ||
-              (Boolean(cupTiming.requiresManualTimeReview) && cupTiming.timePrecision !== "exact"),
+              cupTimingResolved.timePrecision === "time_window" ||
+              (Boolean(cupTimingResolved.requiresManualTimeReview) &&
+                cupTimingResolved.timePrecision !== "exact"),
           });
           highlightsForEventFinal = structuredDayContent.highlights;
           notesOnlyForEvent = [

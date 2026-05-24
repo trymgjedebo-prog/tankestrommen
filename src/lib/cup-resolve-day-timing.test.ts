@@ -166,4 +166,38 @@ describe("resolveCupDayTiming", () => {
     expect(r.start).toBe("10:00");
     expect(r.end).toBe("12:00");
   });
+
+  it("Høstcup live-lignende: fredag 16:40 oppmøte, 18:45 inferred end", () => {
+    const corpus = readFileSync(
+      resolve(__dirname, "../../fixtures/tankestrom/hostcup_duration_endtime_rich.txt"),
+      "utf8",
+    );
+    const day: DayScheduleEntry = {
+      dayLabel: "fredag",
+      date: "2026-09-18",
+      time: "16:40",
+      details: null,
+      highlights: ["16:40 Oppmøte", "17:30 Første kamp"],
+      rememberItems: [],
+      deadlines: [],
+      notes: ["Møt ferdig skiftet 50 minutter før kampstart."],
+    };
+    const r = resolveCupDayTiming({
+      day,
+      detailsForEvent: null,
+      highlightsForEventFinal: day.highlights,
+      notesOnlyForEvent: day.notes,
+      rememberForEvent: [],
+      deadlinesForEvent: [],
+      conditionalDay: false,
+      fullCorpus: corpus,
+    });
+    expect(r.attendanceTime).toBe("16:40");
+    expect(r.durationMinutes).toBe(45);
+    expect(r.breakMinutes).toBe(5);
+    expect(r.afterBufferMinutes).toBe(30);
+    expect(r.end).toBe("18:45");
+    expect(r.endTimeSource).toBe("computed_from_duration_and_aftertime");
+    expect(r.inferredEndTime).toBe(true);
+  });
 });
