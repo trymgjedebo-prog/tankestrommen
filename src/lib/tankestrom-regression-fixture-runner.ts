@@ -9,12 +9,13 @@ import {
   lineLooksLikeAdministrativeDeadline,
   parseCupTimeWindow,
 } from "@/lib/cup-day-content";
+import { extractExplicitAttendanceHhmmTimes } from "@/lib/cup-match-times";
 import { extractOrderedHhmmTimesFromText } from "@/lib/timed-activity-highlights";
 import {
   extractGlobalCupScheduleTimesByDay,
   isConditionalTournamentTextForDay,
 } from "@/lib/cup-timing-context";
-import { buildCupWeekendDayBlob } from "@/lib/cup-day-source-blob";
+import { buildCupWeekendDayBlob, filterClockTimesOwnedByCupDay } from "@/lib/cup-day-source-blob";
 import { resolveCupDayTiming } from "@/lib/cup-resolve-day-timing";
 import { parseScopedAttendanceOffsetMinutes } from "@/lib/activity-duration";
 
@@ -319,20 +320,28 @@ export function runTankestromFixture(
         : null;
     const timeWindow = conditional ? null : rawTimeWindow;
 
+    const attendanceExplicit = parseExplicitAttendanceTime(text, day);
+
     let dayTimes =
       day === "fredag" ? global.fredag : day === "lørdag" ? global.lordag : global.sondag;
 
     if (cupDaySectionBlob && !conditional && !rawTimeWindow) {
       const blobTimes = extractOrderedHhmmTimesFromText(sourceBlob);
-      if (blobTimes.length > 0) {
-        const merged = [...dayTimes, ...blobTimes];
+      const ownedBlobTimes = filterClockTimesOwnedByCupDay(blobTimes, text, day, sourceBlob);
+      if (ownedBlobTimes.length > 0) {
+        const merged = [...dayTimes, ...ownedBlobTimes];
         dayTimes = [...new Set(merged)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
       }
     }
 
-    const attendanceExplicit = parseExplicitAttendanceTime(text, day);
+    const attendanceOnly = extractExplicitAttendanceHhmmTimes(sourceBlob);
+    if (attendanceExplicit) attendanceOnly.add(attendanceExplicit);
+    dayTimes = dayTimes.filter((t) => !attendanceOnly.has(t));
+
     const offsetEvidence = parseScopedAttendanceOffsetMinutes(sourceBlob);
-    const offset = offsetEvidence?.perMatch ? offsetEvidence.minutes : parsePerMatchOffset(text, day);
+    const offset =
+      offsetEvidence?.minutes ??
+      parsePerMatchOffset(text, day);
 
     if (highlightStyle === "general" && !rawTimeWindow && dayTimes.length === 0) {
       const fromBlob = extractOrderedHhmmTimesFromText(sourceBlob);
@@ -390,6 +399,8 @@ export function runTankestromFixture(
       parentTitleNorm: cupLineNormKey(parentTitle),
       childTitleNorm: cupLineNormKey(`${parentTitle} – ${day}`),
       sourceBlob,
+      dayLabel: day,
+      ownershipCorpus: text,
       attendanceTime: attendanceForEnrich,
       orderedMatchTimes: effectiveMatchTimes,
       daySegmentStart:

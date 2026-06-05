@@ -3,7 +3,8 @@
  * Holdes i egen modul for testbarhet uten å laste hele analyze-route.
  */
 
-import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
+import { parseScopedAttendanceOffsetMinutes } from "@/lib/activity-duration";
+import { extractDayBlobFromCorpus, clockTimeOwnedByCupDay } from "@/lib/cup-day-source-blob";
 import {
   extractCupMatchTimes,
   extractExplicitAttendanceHhmmTimes,
@@ -631,6 +632,10 @@ export function buildCupStructuredDayContent(input: {
 
 export type CupTimingEnrichmentInput = {
   date: string;
+  /** Cup-ukedag for dag-eierskap av klokkeslett (f.eks. «fredag»). */
+  dayLabel?: string | null;
+  /** Full kildetekst for dag-eierskap (typisk råtekst + scheduleByDay-felt). */
+  ownershipCorpus?: string | null;
   /** `cupLineNormKey` av foreldre- og child-tittel */
   parentTitleNorm: string;
   childTitleNorm: string;
@@ -683,6 +688,45 @@ function parseAttendanceOffsetForEachMatch(text: string): number | null {
   if (!m) return null;
   const v = Number(m[1]);
   return Number.isFinite(v) && v > 0 && v <= 180 ? v : null;
+}
+
+/** Oppmøte utledet fra «X min før hver kamp» + eid kamptid på samme dag. */
+function derivedPerMatchAttendanceOwned(
+  hhmm: string,
+  dayLabel: string | null,
+  ownershipCorpus: string,
+  structuredDayFields: string,
+  matchTimes: string[],
+): boolean {
+  const offset = parseAttendanceOffsetForEachMatch(structuredDayFields);
+  if (offset == null || matchTimes.length === 0) return false;
+  for (const mt of matchTimes) {
+    if (!clockTimeOwnedByCupDay(ownershipCorpus, mt, dayLabel, structuredDayFields)) continue;
+    const derived = shiftHhmmLocal(mt, -offset);
+    if (derived === hhmm) return true;
+  }
+  return false;
+}
+
+/** Oppmøte utledet fra «X min før kamp(start)» på samme dag (én kamp eller første kamp). */
+function derivedAttendanceFromOffsetOwned(
+  hhmm: string,
+  dayLabel: string | null,
+  ownershipCorpus: string,
+  structuredDayFields: string,
+  matchTimes: string[],
+): boolean {
+  if (derivedPerMatchAttendanceOwned(hhmm, dayLabel, ownershipCorpus, structuredDayFields, matchTimes)) {
+    return true;
+  }
+  const evidence = parseScopedAttendanceOffsetMinutes(structuredDayFields);
+  if (!evidence || evidence.perMatch || matchTimes.length === 0) return false;
+  const firstOwned = matchTimes.find((mt) =>
+    clockTimeOwnedByCupDay(ownershipCorpus, mt, dayLabel, structuredDayFields),
+  );
+  if (!firstOwned) return false;
+  const derived = shiftHhmmLocal(firstOwned, -evidence.minutes);
+  return derived === hhmm;
 }
 
 function ordinalAttendanceLabel(
@@ -765,7 +809,7 @@ export function relabelOppmoteHighlightsAtKampTimes(
 ): string[] {
   const scoped =
     dayLabel && corpusBlob.trim()
-      ? extractDayBlobFromCorpus(corpusBlob, dayLabel).trim() || corpusBlob
+      ? extractDayBlobFromCorpus(corpusBlob, dayLabel).trim()
       : corpusBlob;
   const probe = `${scoped}\n${highlights.join("\n")}`;
   const matchTimes = new Set([
@@ -791,10 +835,23 @@ export function enrichCupStructuredContentWithResolvedTiming(
   enrichment: CupTimingEnrichmentInput,
 ): CupStructuredDayContent {
   const highlightStyle = enrichment.activityHighlightStyle ?? "cup";
+  const dayLabel = enrichment.dayLabel ?? null;
+  const blob = enrichment.sourceBlob;
+  const ownershipCorpus = enrichment.ownershipCorpus ?? blob;
+  const ownedTime = (hhmm: string) => {
+    if (!dayLabel) return true;
+    if (clockTimeOwnedByCupDay(ownershipCorpus, hhmm, dayLabel, blob)) return true;
+    return derivedAttendanceFromOffsetOwned(
+      hhmm,
+      dayLabel,
+      ownershipCorpus,
+      blob,
+      enrichment.orderedMatchTimes,
+    );
+  };
   const titleBlock = new Set(
     [enrichment.parentTitleNorm, enrichment.childTitleNorm].filter((x) => x && x.length > 0),
   );
-  const blob = enrichment.sourceBlob;
 
   function bestSourceLineForHhmm(blobText: string, hhmm: string): string | null {
     for (const raw of blobText.split(/\n+/).map(normalizeSpace).filter(Boolean)) {
@@ -847,7 +904,10 @@ export function enrichCupStructuredContentWithResolvedTiming(
   const deferConfirmedMatchHighlights =
     enrichment.tentative && enrichment.timePrecision === "date_only";
 
-  const explicitAttendanceTimes = [...extractExplicitAttendanceHhmmTimes(blob)];
+  const ownedAttendance = (times: Set<string>) =>
+    [...times].filter((t) => ownedTime(t));
+
+  const explicitAttendanceTimes = ownedAttendance(extractExplicitAttendanceHhmmTimes(blob));
   const extractedMatches = deferConfirmedMatchHighlights ? [] : extractCupMatchTimes(blob);
   const kampAnchored = deferConfirmedMatchHighlights ? [] : extractKampAnchoredClockTimes(blob);
   const fromRoute = enrichment.orderedMatchTimes;
@@ -865,6 +925,13 @@ export function enrichCupStructuredContentWithResolvedTiming(
   const suppressedFiltered = mergedMatchClocks.filter(
     (t) => !suppressTimes?.has(t) && !explicitAttendanceTimes.includes(t),
   );
+  if (dayLabel) {
+    for (let i = suppressedFiltered.length - 1; i >= 0; i--) {
+      if (!ownedTime(suppressedFiltered[i]!)) {
+        suppressedFiltered.splice(i, 1);
+      }
+    }
+  }
 
   highlights = highlights.filter((h) => {
     const m = /^(\d{2}:\d{2})\s+(.+)$/.exec(h);
@@ -955,6 +1022,7 @@ export function enrichCupStructuredContentWithResolvedTiming(
 
   for (let i = 0; i < matchClocksOrdered.length; i++) {
     const t = matchClocksOrdered[i]!;
+    if (!ownedTime(t)) continue;
     if (highlightCoversTime(highlights, t)) continue;
     const label = timeLabelByMatch.get(t) ?? matchRowLabelForIndex(i);
     if (!label || titleBlock.has(normKeyTimed(label))) continue;
@@ -967,9 +1035,24 @@ export function enrichCupStructuredContentWithResolvedTiming(
       const t = matchClocksOrdered[i]!;
       const attPerMatch = shiftHhmmLocal(t, -perMatchOffset);
       if (!attPerMatch || highlightCoversTime(highlights, attPerMatch)) continue;
+      if (!ownedTime(attPerMatch)) continue;
       highlights.push(
         `${attPerMatch} ${ordinalAttendanceLabel(i, matchClocksOrdered.length, highlightStyle)}`,
       );
+    }
+  }
+
+  const scopedOffset = parseScopedAttendanceOffsetMinutes(blob);
+  if (
+    scopedOffset &&
+    !scopedOffset.perMatch &&
+    matchClocksOrdered.length > 0 &&
+    perMatchOffset == null
+  ) {
+    const t = matchClocksOrdered[0]!;
+    const attFromOffset = shiftHhmmLocal(t, -scopedOffset.minutes);
+    if (attFromOffset && ownedTime(attFromOffset) && !highlightCoversTime(highlights, attFromOffset)) {
+      highlights.push(`${attFromOffset} Oppmøte`);
     }
   }
 
@@ -982,6 +1065,7 @@ export function enrichCupStructuredContentWithResolvedTiming(
       return `${m[1]} Oppmøte`;
     });
     for (const t of explicitAttendanceTimes) {
+      if (!ownedTime(t)) continue;
       if (!highlightCoversTime(highlights, t)) highlights.push(`${t} Oppmøte`);
     }
   }
@@ -995,7 +1079,7 @@ export function enrichCupStructuredContentWithResolvedTiming(
       return `${att} Oppmøte`;
     });
   }
-  if (att && !highlightCoversTime(highlights, att)) {
+  if (att && ownedTime(att) && !highlightCoversTime(highlights, att)) {
     const firstMatch = enrichment.orderedMatchTimes[0];
     if (!firstMatch || att !== firstMatch || /\boppm[oø]te\b/i.test(blob)) {
       highlights.push(`${att} Oppmøte`);
@@ -1047,6 +1131,12 @@ export function enrichCupStructuredContentWithResolvedTiming(
       highlights.push(`${ds} ${label}`);
     }
   }
+
+  highlights = highlights.filter((h) => {
+    const m = /^(\d{2}:\d{2})(?:[–-]\d{2}:\d{2})?\s+/.exec(h);
+    if (!m) return true;
+    return ownedTime(m[1]!);
+  });
 
   const seenH = new Set<string>();
   highlights = highlights.filter((h) => {

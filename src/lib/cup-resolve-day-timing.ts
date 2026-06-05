@@ -5,7 +5,11 @@ import {
   resolveMatchDurationMinutes,
   resolvePostEventBufferForDay,
 } from "@/lib/activity-duration";
-import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
+import {
+  clockTimeOwnedByCupDay,
+  extractDayBlobFromCorpus,
+  filterClockTimesOwnedByCupDay,
+} from "@/lib/cup-day-source-blob";
 import { lineLooksLikeAdministrativeDeadline, parseCupTimeWindowForDayScoped } from "@/lib/cup-day-content";
 import { extractGlobalCupScheduleTimesForDay } from "@/lib/cup-timing-context";
 import {
@@ -143,7 +147,8 @@ export function extractOrderedCupMatchTimesForDay(
     const section = extractDayBlobFromCorpus(corpus, dayLabel).trim();
     if (section) scopedParts.push(section);
   }
-  const scoped = scopedParts.filter(Boolean).join("\n").trim() || extractDayBlobFromCorpus(corpus, "");
+  const scoped = scopedParts.filter(Boolean).join("\n").trim();
+  if (!scoped.trim()) return [];
   const kampAnchored = extractKampAnchoredClockTimes(scoped);
   const raw =
     kampAnchored.length > 0 ? kampAnchored : extractCupMatchTimes(scoped);
@@ -171,7 +176,17 @@ export function extractOrderedCupMatchTimesForDay(
     if (t && !out.includes(t)) out.push(t);
   }
 
-  return out.sort((a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!);
+  const blobFiltered = dayLabel
+    ? filterClockTimesOwnedByCupDay(
+        out.filter((t) => raw.includes(t)),
+        corpus,
+        dayLabel,
+        dayBlob,
+      )
+    : out.filter((t) => raw.includes(t));
+  const fromHighlights = out.filter((t) => !raw.includes(t));
+  const merged = [...new Set([...blobFiltered, ...fromHighlights])];
+  return merged.sort((a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!);
 }
 
 function hhmmToMinutesLocal(hhmm: string): number | null {
@@ -491,8 +506,24 @@ export function resolveCupDayTiming(input: {
       : lastKampTimeFromHighlights(matchHighlights) ?? r.start;
   const explicitAttendanceFromDay = extractAttendanceTimeFromDay(input.day);
   const explicitTimesBlob = extractExplicitAttendanceHhmmTimes(blob);
+  const structuredFields = [
+    input.day.time ?? "",
+    input.detailsForEvent ?? "",
+    ...input.highlightsForEventFinal,
+    ...input.notesOnlyForEvent,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const ownedExplicit = [...explicitTimesBlob].filter((t) =>
+    clockTimeOwnedByCupDay(
+      input.fullCorpus ?? blob,
+      t,
+      input.day.dayLabel,
+      structuredFields,
+    ),
+  );
   const explicitFromBlob =
-    explicitTimesBlob.size === 1 ? [...explicitTimesBlob][0]! : null;
+    ownedExplicit.length === 1 ? ownedExplicit[0]! : null;
   const attendanceFromHighlights = attendanceTimeFromOppmoteHighlights(
     matchHighlights,
     matchTimes,
@@ -607,10 +638,17 @@ export function resolveCupDayTiming(input: {
       ? "exact"
       : timePrecision;
 
+  const owned = (hhmm: string | null) =>
+    !hhmm ||
+    !input.day.dayLabel ||
+    clockTimeOwnedByCupDay(fullCorpus, hhmm, input.day.dayLabel, structuredFields);
+  const attendanceTimeFinal = owned(attendanceTime) ? attendanceTime : null;
+  const startFinal = owned(start) ? start : attendanceTimeFinal ?? (owned(firstMatch) ? firstMatch : null);
+
   return {
-    start,
+    start: startFinal,
     end,
-    attendanceTime,
+    attendanceTime: attendanceTimeFinal,
     attendanceOffsetMinutes: attendanceOffsetMinutes ?? null,
     durationMinutes: durationMinutes ?? null,
     activityDurationMinutes: durationMinutes ?? null,

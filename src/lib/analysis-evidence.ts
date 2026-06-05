@@ -181,9 +181,8 @@ export function extractDaySourceSection(
     }
   }
   if (kept.length === 0 && key) {
-    // Linjer med klokkeslett som også nevner en annen dag kan fortsatt inneholde
-    // «fredag kl. …» i samme setning som lørdag — hele korpus som siste utvei.
-    return corpus;
+    // Ikke fall tilbake til hele korpus — det lekker tider på tvers av dager.
+    return "";
   }
   return kept.join("\n");
 }
