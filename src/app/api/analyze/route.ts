@@ -4566,8 +4566,7 @@ async function buildProposalItems(
       cupLike && result.scheduleByDay.length >= 2 ? [] : null;
     const cupGlobalScheduleBlob = cupLike ? [result.title ?? "", result.description ?? ""].join("\n") : "";
     const scheduleDayCount = result.scheduleByDay.length;
-    const mergeGlobalSpondDeadlineSnippets =
-      !cupLike || (cupLike && scheduleDayCount === 1);
+    const mergeGlobalSpondDeadlineSnippets = !cupLike || cupLike;
     const globalSpondDeadlinePieces = mergeGlobalSpondDeadlineSnippets
       ? collectGlobalSpondDeadlineTaskPieces(result, cupLike)
       : [];
@@ -4845,6 +4844,8 @@ async function buildProposalItems(
             .join("\n");
           structuredDayContent = enrichCupStructuredContentWithResolvedTiming(structuredDayContent, {
             date: isoDate,
+            dayLabel: day.dayLabel,
+            ownershipCorpus: cupCorpusForTiming,
             parentTitleNorm: cupLineNormKey(parentTitleForTiming),
             childTitleNorm: cupLineNormKey(childTitleForTiming),
             sourceBlob: enrichSourceBlob,
