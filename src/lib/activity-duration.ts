@@ -224,7 +224,10 @@ export function parsePostEventBufferMinutes(text: string): BufferEvidence | null
     /\b(?:ca\.?\s+|omtrent\s+)?(?:en\s+)?halv\s+time\s+etter\s+(?:kampslutt|kampen|siste\s+kamp)\b/.exec(
       normalized,
     ) ||
-    /\bikke\s+ute\s+(?:av\s+\w+\s+)?(?:for|før)\s+(?:ca\.?\s+|omtrent\s+)?(?:en\s+)?halvtime\s+etter\s+(?:kampslutt|kampen|siste\s+kamp)\b/.exec(
+    /\bikke\s+(?:er\s+)?ute\s+(?:av\s+\S+\s+)?(?:for|før)\s+(?:ca\.?\s+|omtrent\s+)?(?:en\s+)?halv(?:time|\s+time)\s+etter\s+(?:kampslutt|kampen|siste\s+kamp)\b/.exec(
+      normalized,
+    ) ||
+    /\bregn\s+med\s+at\s+dere\s+ikke\s+(?:er\s+)?ute\s+av\s+\S+\s+før\s+(?:ca\.?\s+|omtrent\s+)?(?:en\s+)?halv(?:time|\s+time)\s+etter\s+kampen\b/.exec(
       normalized,
     );
   if (halfAfter) {

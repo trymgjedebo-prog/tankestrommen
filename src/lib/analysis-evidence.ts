@@ -133,6 +133,28 @@ export function buildAnalysisCorpus(result: AIAnalysisResult): string {
   return parts.join("\n\n");
 }
 
+/** Korpus inkl. scheduleByDay-felt — samme bredde som cup portal-timing (varighet/buffer i LLM-notater). */
+export function buildTimingAnalysisCorpus(result: AIAnalysisResult): string {
+  return [
+    buildAnalysisCorpus(result),
+    ...result.scheduleByDay.flatMap((d) => [
+      d.details ?? "",
+      ...(d.notes ?? []),
+      ...(d.highlights ?? []),
+    ]),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function dayTimingBlobForEvidence(corpus: string, day: DayScheduleEntry): string {
+  const scoped = extractDayBlobFromCorpus(corpus, day.dayLabel);
+  const fromFields = [day.details ?? "", ...(day.notes ?? []), ...(day.highlights ?? [])]
+    .filter(Boolean)
+    .join("\n");
+  return [scoped, fromFields].filter(Boolean).join("\n\n");
+}
+
 /**
  * Grov dag-seksjon: linjer som nevner aktuell ukedag (eller dato-strengen om satt).
  * Brukes til «tid må finnes i riktig dagseksjon» — ikke full semantisk parser.
@@ -439,9 +461,15 @@ export function buildAnalysisEvidenceReport(
     unsupportedCandidates,
     questionsForUser: [...new Set(questionsForUser)],
     durationEndFacts: result.scheduleByDay.map((day) => {
-      const dayBlob = extractDayBlobFromCorpus(c, day.dayLabel);
+      const timingCorpus = buildTimingAnalysisCorpus(result);
+      const dayBlob = dayTimingBlobForEvidence(timingCorpus, day);
       const conditional = isConditionalTournamentTextForDay(dayBlob, day.dayLabel);
-      const matchTimes = extractOrderedCupMatchTimesForDay(dayBlob, c, day.highlights, day.dayLabel);
+      const matchTimes = extractOrderedCupMatchTimesForDay(
+        dayBlob,
+        timingCorpus,
+        day.highlights,
+        day.dayLabel,
+      );
       let lastMatch = matchTimes.length > 0 ? matchTimes[matchTimes.length - 1]! : null;
       if (!lastMatch) {
         for (let i = day.highlights.length - 1; i >= 0; i--) {
@@ -457,7 +485,7 @@ export function buildAnalysisEvidenceReport(
       const fact = buildDurationEndFact({
         dayLabel: day.dayLabel,
         dayBlob,
-        corpus: c,
+        corpus: timingCorpus,
         lastMatchTime: lastMatch,
       });
       if (conditional) {

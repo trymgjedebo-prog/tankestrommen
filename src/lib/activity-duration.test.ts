@@ -101,6 +101,11 @@ describe("activity-duration", () => {
       )?.minutes,
     ).toBe(30);
     expect(
+      parsePostEventBufferMinutes(
+        "Regn med at dere ikke er ute av hallen før ca. en halvtime etter kampen",
+      )?.minutes,
+    ).toBe(30);
+    expect(
       parsePostEventBufferMinutes("Rydding av fellesutstyr og kort prat etter siste kamp")?.minutes,
     ).toBe(30);
   });
