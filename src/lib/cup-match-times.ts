@@ -56,6 +56,14 @@ export function kampAnchoredHhmmInText(text: string): Set<string> {
     const re = /(?:kl\.?\s*)?(\d{1,2})[.:](\d{2})\b/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(line)) !== null) {
+      if (contextSuggestsAttendanceForTime(line, m.index, m[0].length)) continue;
+      const lineN = normalizeNorwegianLetters(line);
+      if (
+        /\b\d{1,3}\s*min(?:utter)?\s*f[oø]r\b/.test(lineN) ||
+        /\bf[oø]r\s+(?:f[oø]rste|andre|tredje|hver)\s+kamp\b/.test(lineN) ||
+        /\boppm[oø]te\s+f[oø]r\b/.test(lineN)
+      )
+        continue;
       const hhmm = `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
       if (hhmmToMinutesLocal(hhmm) != null) seen.add(hhmm);
     }
@@ -75,8 +83,9 @@ export function extractExplicitAttendanceHhmmTimes(text: string): Set<string> {
     s.add(`${hh}:${mm}`);
   };
   let m: RegExpExecArray | null;
+  /** «Møt ferdig skiftet … kl. 17:30» er imperativ, ikke oppmøte-anker — kun oppmøte/møte/møter. */
   const re1 =
-    /\b(?:oppm[oø]te|m[oø]t(?:er)?)\b[^.!?\n]{0,90}?\bkl\.?\s*(\d{1,2})[.:](\d{2})\b/gi;
+    /\b(?:oppm[oø]te|m[oø]te(?:r)?)\b[^.!?\n]{0,90}?\bkl\.?\s*(\d{1,2})[.:](\d{2})\b/gi;
   while ((m = re1.exec(text)) !== null) add(m[1]!, m[2]!);
   const re2 = /\b(\d{1,2})[.:](\d{2})\b[^.!?\n]{0,40}?\boppm[oø]te\b/gi;
   while ((m = re2.exec(text)) !== null) {

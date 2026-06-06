@@ -51,6 +51,7 @@ import {
   parseCupTimeWindow,
 } from "@/lib/cup-day-content";
 import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
+import { augmentCupScheduleByDayFromCorpus } from "@/lib/cup-schedule-synthesis";
 import {
   extractGlobalCupScheduleTimesForDay,
   isConditionalTournamentTextForDay,
@@ -3329,7 +3330,10 @@ function buildCupEmbeddedScheduleSegment(args: {
   if (args.conditionalDay) {
     const cond =
       "Betinget opplegg — avhengig av resultat eller tid som ikke er endelig.";
-    notes = notesBody ? `${cond}\n${notesBody}` : cond;
+    const bodyHasConditional =
+      notesBody.length > 0 &&
+      /\b(avhenger|betinget|usikkert|foreløpig|forelopig|ikke\s+endelig)\b/i.test(notesBody);
+    notes = notesBody ? (bodyHasConditional ? notesBody : `${cond}\n${notesBody}`) : cond;
   } else if (notesBody) {
     notes = notesBody;
   }
@@ -4046,6 +4050,7 @@ async function buildProposalItems(
     weekNumber !== null;
 
   const resolveDate = createPortalWeekDateResolver(result);
+  augmentCupScheduleByDayFromCorpus(result);
 
   const travelBlob = collectTextBlobForTravelInference(result);
   let travelFlightLegs: TravelFlightInference[] = [];
@@ -5100,7 +5105,12 @@ async function buildProposalItems(
           ev.confidence = Math.min(ev.confidence, 0.52);
           const prefix =
             "NB: Usikkert eller betinget opplegg (f.eks. avhengig av resultat eller tid som ikke er endelig). Ikke behandle som fast avtale.\n\n";
-          ev.event.notes = ev.event.notes ? `${prefix}${ev.event.notes}` : prefix.trim();
+          const notesAlreadyConditional =
+            Boolean(ev.event.notes) &&
+            /\b(avhenger|betinget|usikkert|foreløpig|forelopig|ikke\s+endelig)\b/i.test(ev.event.notes!);
+          if (!notesAlreadyConditional) {
+            ev.event.notes = ev.event.notes ? `${prefix}${ev.event.notes}` : prefix.trim();
+          }
         } else if (defaultTimeSuppressed) {
           const softTime =
             "NB: Ingen tydelig klokkeslett i kilden – kalenderen bruker bredt vindu (06:00–22:00). Sjekk oppmøte i Spond/melding.\n\n";

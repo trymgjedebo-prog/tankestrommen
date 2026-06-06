@@ -404,10 +404,28 @@ function dedupeStableOrder(arr: string[]): string[] {
   return out;
 }
 
+function semanticConditionalNoteKey(line: string): string | null {
+  const n = normalizeNorwegianLetters(normalizeSpace(line)).toLowerCase();
+  if (
+    /\b(avhenger|betinget|usikkert|forelopig|foreløpig|ikke\s+endelig|tid\s+ikke\s+klart|kommer\s+senere|trolig\s+etter)\b/.test(
+      n,
+    )
+  ) {
+    return "conditional";
+  }
+  if (/\b(sluttspill|a-?sluttspill|b-?sluttspill)\b/.test(n) && /\b(forelopig|foreløpig|mellom|kl\.?)\b/.test(n)) {
+    return "tentative-slutspill";
+  }
+  return null;
+}
+
 function dedupeSimilarUncertainty(lines: string[]): string[] {
   const out: string[] = [];
+  const semanticSeen = new Set<string>();
   for (const line of lines) {
     const k = cupLineNormKey(line);
+    const sem = semanticConditionalNoteKey(line);
+    if (sem && semanticSeen.has(sem)) continue;
     let skip = false;
     for (let i = 0; i < out.length; i++) {
       const ok = cupLineNormKey(out[i]!);
@@ -421,7 +439,10 @@ function dedupeSimilarUncertainty(lines: string[]): string[] {
         break;
       }
     }
-    if (!skip) out.push(line);
+    if (!skip) {
+      if (sem) semanticSeen.add(sem);
+      out.push(line);
+    }
   }
   return out;
 }
@@ -1008,8 +1029,7 @@ export function enrichCupStructuredContentWithResolvedTiming(
       /^oppm[oø]te\b/i.test(label) &&
       (kampClocksFromBlob.has(time) ||
         fromRoute.includes(time) ||
-        matchClocksOrdered.includes(time) ||
-        !explicitAttendanceTimes.includes(time));
+        matchClocksOrdered.includes(time));
     if (wrongAttendanceOnMatchTime) {
       const target = labelForMatchClock(time) ?? defaultMatchLabelByIndex(0);
       return `${time} ${target}`;
@@ -1029,8 +1049,18 @@ export function enrichCupStructuredContentWithResolvedTiming(
     highlights.push(`${t} ${label}`);
   }
 
+  const kampAnchoredSet = kampAnchoredHhmmInText(blob);
+  const firstMatchClock = matchClocksOrdered[0] ?? null;
+  const firstMatchMin = firstMatchClock ? hhmmToMinutesLocal(firstMatchClock) : null;
+  const hasExplicitPreMatchAttendance =
+    firstMatchMin != null &&
+    explicitAttendanceTimes.some((t) => {
+      const tm = hhmmToMinutesLocal(t);
+      return tm != null && tm < firstMatchMin;
+    });
+
   const perMatchOffset = parseAttendanceOffsetForEachMatch(blob);
-  if (perMatchOffset != null && matchClocksOrdered.length > 0) {
+  if (perMatchOffset != null && matchClocksOrdered.length > 0 && !hasExplicitPreMatchAttendance) {
     for (let i = 0; i < matchClocksOrdered.length; i++) {
       const t = matchClocksOrdered[i]!;
       const attPerMatch = shiftHhmmLocal(t, -perMatchOffset);
@@ -1061,6 +1091,7 @@ export function enrichCupStructuredContentWithResolvedTiming(
       const m = /^(\d{2}:\d{2})\s+(.+)$/.exec(h);
       if (!m) return h;
       if (!explicitAttendanceTimes.includes(m[1]!)) return h;
+      if (kampAnchoredSet.has(m[1]!) || fromRoute.includes(m[1]!)) return h;
       if (isOrdinalAttendanceLabel(m[2] ?? "")) return h;
       return `${m[1]} Oppmøte`;
     });
@@ -1087,26 +1118,37 @@ export function enrichCupStructuredContentWithResolvedTiming(
   }
 
   /** Etter oppmøte-normalisering: fiks feilmerket «HH:MM Oppmøte» på kamptid (skal ikke overskrives tilbake). */
-  const kampScheduleTimes = new Set(extractCupMatchTimes(blob));
+  const kampScheduleTimes = new Set([...extractCupMatchTimes(blob), ...fromRoute]);
   highlights = highlights.map((h) => {
     const m = /^(\d{2}:\d{2})\s+(.+)$/.exec(h);
     if (!m) return h;
     const time = m[1]!;
     const label = (m[2] ?? "").trim();
     if (!/^oppm[oø]te\b/i.test(label)) return h;
+    if (isOrdinalAttendanceLabel(label)) return h;
+    if (explicitAttendanceTimes.includes(time)) return h;
     if (att === time) return h;
     if (kampScheduleTimes.has(time)) {
       const target = labelForMatchClock(time) ?? defaultMatchLabelByIndex(0);
       return `${time} ${target}`;
     }
-    if (fromRoute.includes(time) && !explicitAttendanceTimes.includes(time)) {
-      const idx = fromRoute.indexOf(time);
-      const target =
-        labelForMatchClock(time) ?? defaultMatchLabelByIndex(idx >= 0 ? idx : 0);
-      return `${time} ${target}`;
-    }
     return h;
   });
+
+  if (firstMatchMin != null) {
+    let keptPreMatchAttendance = false;
+    highlights = highlights.filter((h) => {
+      const m = /^(\d{2}:\d{2})\s+(.+)$/.exec(h);
+      if (!m) return true;
+      const tm = hhmmToMinutesLocal(m[1]!);
+      if (tm == null || tm >= firstMatchMin) return true;
+      const lab = (m[2] ?? "").trim();
+      if (!/^oppm[oø]te\b/i.test(lab) && !isOrdinalAttendanceLabel(lab)) return true;
+      if (keptPreMatchAttendance) return false;
+      keptPreMatchAttendance = true;
+      return true;
+    });
+  }
 
   const noPointHighlight = !highlights.some((h) => /^\d{2}:\d{2}\s+/.test(h) && !/\d{2}:\d{2}[–-]\d{2}:\d{2}/.test(h));
   if (
@@ -1202,14 +1244,23 @@ export type CupFlatNotesInput = Pick<
 export function formatCupEventNotesFlat(content: CupFlatNotesInput): string | null {
   const blocks: string[] = [];
   const seen = new Set<string>();
+  const semanticSeen = new Set<string>();
   const push = (s: string) => {
     const t = stripGeneratedCupNoise(s);
     if (!t || isNoiseFragment(t)) return;
     const k = cupLineNormKey(t);
     if (!k || seen.has(k)) return;
+    const sem = semanticConditionalNoteKey(t);
+    if (sem && semanticSeen.has(sem)) return;
     if (/^(høydepunkter|hoydepunkter|notater|husk|dagens\s+innhold|husk\s*\/\s*ta\s+med)\s*:/i.test(t))
       return;
+    if (
+      /^nb:\s*usikkert\s+eller\s+betinget\s+opplegg\b/i.test(t) ||
+      /^betinget\s+opplegg\s*[—-]/i.test(t)
+    )
+      return;
     seen.add(k);
+    if (sem) semanticSeen.add(sem);
     blocks.push(t);
   };
   for (const x of content.logisticsNotes) push(x);
