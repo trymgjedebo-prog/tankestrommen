@@ -75,7 +75,9 @@ function hostcupLiveLikeResult(): AIAnalysisResult {
 }
 
 type EmbSeg = {
+  date?: string;
   dayLabel?: string | null;
+  title?: string | null;
   start?: string | null;
   end?: string | null;
   endTimeSource?: string;
@@ -83,9 +85,13 @@ type EmbSeg = {
   durationMinutes?: number | null;
   breakMinutes?: number | null;
   afterBufferMinutes?: number | null;
+  postEventBufferMinutes?: number | null;
   activityDurationMinutes?: number | null;
   timePrecision?: string;
   isConditional?: boolean;
+  timeWindow?: unknown;
+  dayContent?: { highlights?: string[] };
+  notes?: string;
 };
 
 function embeddedSegments(bundle: Record<string, unknown>): EmbSeg[] {
@@ -95,6 +101,14 @@ function embeddedSegments(bundle: Record<string, unknown>): EmbSeg[] {
   }>;
   const parent = items.find((i) => i.kind === "event" && i.event?.metadata?.embeddedSchedule?.length);
   return parent?.event?.metadata?.embeddedSchedule ?? [];
+}
+
+function embByDayLabel(emb: EmbSeg[], label: string): EmbSeg | undefined {
+  return emb.find((s) => new RegExp(label, "i").test(String(s.dayLabel ?? s.title ?? "")));
+}
+
+function highlightTexts(seg: EmbSeg | undefined): string[] {
+  return seg?.dayContent?.highlights ?? [];
 }
 
 describe("Høstcup live portal shape (toPortalBundle)", () => {
@@ -162,6 +176,65 @@ describe("Høstcup live portal shape (toPortalBundle)", () => {
     );
     expect(friChild?.event?.end).toMatch(/18:45/);
     expect(friChild?.event?.metadata?.endTimeSource).toBe("computed_from_duration_and_aftertime");
+  });
+
+  it("Høstcup day-scoping: embeddedSchedule, Spond task-only, fredag oppmøte, søndag tentative", async () => {
+    const bundle = await toPortalBundle(hostcupLiveLikeResult(), "text", "text", true, {
+      knownPersons: [],
+    });
+    const emb = embeddedSegments(bundle);
+    const embDates = emb.map((s) => s.date).filter(Boolean);
+    expect(embDates).toEqual(["2026-09-18", "2026-09-19", "2026-09-20"]);
+    expect(embDates).not.toContain("2026-09-08");
+    expect(JSON.stringify(emb)).not.toMatch(/2026-09-08/);
+
+    const tasks = (bundle.items as Array<{ kind: string; task?: { date?: string; dueTime?: string } }>).filter(
+      (i) => i.kind === "task",
+    );
+    const spondTask = tasks.find(
+      (t) => t.task?.date === "2026-09-08" && t.task?.dueTime === "21:00",
+    );
+    expect(spondTask).toBeDefined();
+    expect(tasks.filter((t) => t.task?.date === "2026-09-08")).toHaveLength(1);
+
+    const fri = embByDayLabel(emb, "fredag");
+    const friHl = highlightTexts(fri);
+    expect(friHl.some((h) => /^16:40\s+Oppmøte/i.test(h))).toBe(true);
+    expect(friHl.some((h) => /^17:30\s+Første kamp/i.test(h))).toBe(true);
+    expect(friHl.some((h) => /16:45/.test(h))).toBe(false);
+    const friPreMatchOppmote = friHl.filter(
+      (h) => /^(\d{2}:\d{2})\s+Oppmøte/i.test(h) && /^16:/.test(h),
+    );
+    expect(friPreMatchOppmote.length).toBeLessThanOrEqual(1);
+
+    const lor = embByDayLabel(emb, "lørdag");
+    const lorHl = highlightTexts(lor);
+    expect(lorHl.some((h) => /^13:55\s+Oppmøte/i.test(h) || /^13:55\s+Oppmøte\s+før/i.test(h))).toBe(true);
+
+    const sun = embByDayLabel(emb, "søndag");
+    expect(sun?.timePrecision).toBe("date_only");
+    expect(sun?.isConditional).toBe(true);
+    expect(sun?.start).toBeNull();
+    expect(highlightTexts(sun).some((h) => /^\d{2}:\d{2}\s+(?!.*foreløpig)/i.test(h))).toBe(false);
+
+    const sunNotes = sun?.notes ?? "";
+    expect(sunNotes.length).toBeLessThan(220);
+    const conditionalPhrases = sunNotes.match(/\b(avhenger|betinget|ikke\s+endelig|foreløpig)\b/gi) ?? [];
+    expect(conditionalPhrases.length).toBeLessThanOrEqual(3);
+
+    const sunChild = (
+      bundle.items as Array<{
+        kind: string;
+        event?: { date?: string; start?: string | null; notes?: string; metadata?: { isArrangementChild?: boolean } };
+      }>
+    ).find(
+      (i) =>
+        i.kind === "event" &&
+        i.event?.metadata?.isArrangementChild &&
+        i.event?.date === "2026-09-20",
+    );
+    expect(sunChild?.event?.start).toBeNull();
+    expect(sunChild?.event?.notes ?? "").not.toMatch(/^NB:\s*Usikkert eller betinget opplegg/i);
   });
 
   it("evidence: søndag 10:00–12:00 ikke i confirmedFacts; durationEndFacts riktig", () => {
