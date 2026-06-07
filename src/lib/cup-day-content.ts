@@ -8,6 +8,7 @@ import { extractDayBlobFromCorpus, clockTimeOwnedByCupDay } from "@/lib/cup-day-
 import {
   extractCupMatchTimes,
   extractExplicitAttendanceHhmmTimes,
+  extractSourceSupportedAttendanceHhmmTimes,
   extractKampAnchoredClockTimes,
   kampAnchoredHhmmInText,
 } from "@/lib/cup-match-times";
@@ -929,6 +930,9 @@ export function enrichCupStructuredContentWithResolvedTiming(
     [...times].filter((t) => ownedTime(t));
 
   const explicitAttendanceTimes = ownedAttendance(extractExplicitAttendanceHhmmTimes(blob));
+  const sourceSupportedAttendance = ownedAttendance(
+    extractSourceSupportedAttendanceHhmmTimes(blob),
+  );
   const extractedMatches = deferConfirmedMatchHighlights ? [] : extractCupMatchTimes(blob);
   const kampAnchored = deferConfirmedMatchHighlights ? [] : extractKampAnchoredClockTimes(blob);
   const fromRoute = enrichment.orderedMatchTimes;
@@ -1034,6 +1038,9 @@ export function enrichCupStructuredContentWithResolvedTiming(
       const target = labelForMatchClock(time) ?? defaultMatchLabelByIndex(0);
       return `${time} ${target}`;
     }
+    if (genericMatchLabel && sourceSupportedAttendance.includes(time)) {
+      return `${time} Oppmøte`;
+    }
     const target = labelForMatchClock(time);
     if (!target) return h;
     if (genericMatchLabel) return `${time} ${target}`;
@@ -1049,7 +1056,6 @@ export function enrichCupStructuredContentWithResolvedTiming(
     highlights.push(`${t} ${label}`);
   }
 
-  const kampAnchoredSet = kampAnchoredHhmmInText(blob);
   const firstMatchClock = matchClocksOrdered[0] ?? null;
   const firstMatchMin = firstMatchClock ? hhmmToMinutesLocal(firstMatchClock) : null;
   const hasExplicitPreMatchAttendance =
@@ -1091,8 +1097,10 @@ export function enrichCupStructuredContentWithResolvedTiming(
       const m = /^(\d{2}:\d{2})\s+(.+)$/.exec(h);
       if (!m) return h;
       if (!explicitAttendanceTimes.includes(m[1]!)) return h;
-      if (kampAnchoredSet.has(m[1]!) || fromRoute.includes(m[1]!)) return h;
       if (isOrdinalAttendanceLabel(m[2] ?? "")) return h;
+      const isScheduledKamp =
+        fromRoute.includes(m[1]!) || extractCupMatchTimes(blob).includes(m[1]!);
+      if (isScheduledKamp && !sourceSupportedAttendance.includes(m[1]!)) return h;
       return `${m[1]} Oppmøte`;
     });
     for (const t of explicitAttendanceTimes) {

@@ -72,21 +72,43 @@ export function kampAnchoredHhmmInText(text: string): Set<string> {
 }
 
 /**
+ * Oppmøte uttrykt med tydelig frase i kilden (oppmøte/møt opp/vi møter … kl. HH:MM),
+ * ikke bare «HH:MM Oppmøte» fra feilmerket highlight.
+ */
+export function extractSourceSupportedAttendanceHhmmTimes(text: string): Set<string> {
+  const kampTimes = kampAnchoredHhmmInText(text);
+  const s = new Set<string>();
+  const add = (h: string, mm: string) => {
+    const hh = String(Number(h)).padStart(2, "0");
+    const hhmm = `${hh}:${mm}`;
+    if (hhmmToMinutesLocal(hhmm) == null || kampTimes.has(hhmm)) return;
+    s.add(hhmm);
+  };
+  let m: RegExpExecArray | null;
+  const re1 =
+    /\b(?:oppm[oø]te|m[oø]t\s+opp|vi\s+m[oø]te(?:r|s(?:\s+opp)?)?|m[oø]te(?:r)?(?:\s+opp)?)\b[^.!?\n]{0,90}?\bkl\.?\s*(\d{1,2})[.:](\d{2})\b/gi;
+  while ((m = re1.exec(text)) !== null) {
+    const span = text.slice(m.index, m.index + m[0].length + 40);
+    if (/\bm[oø]t\s+ferdig\b/i.test(span)) continue;
+    add(m[1]!, m[2]!);
+  }
+  const re3 = /\boppm[oø]te(?:\s*kl\.?)?\s*(\d{1,2})[.:](\d{2})\b/gi;
+  while ((m = re3.exec(text)) !== null) add(m[1]!, m[2]!);
+  return s;
+}
+
+/**
  * Alle klokkeslett som tydelig er oppmøte (ikke kampstart), for filtrering fra kamptidslisten.
  */
 export function extractExplicitAttendanceHhmmTimes(text: string): Set<string> {
   const kampTimes = kampAnchoredHhmmInText(text);
-  const s = new Set<string>();
+  const s = new Set(extractSourceSupportedAttendanceHhmmTimes(text));
   const add = (h: string, mm: string) => {
     const hh = String(Number(h)).padStart(2, "0");
     if (hhmmToMinutesLocal(`${hh}:${mm}`) == null) return;
     s.add(`${hh}:${mm}`);
   };
   let m: RegExpExecArray | null;
-  /** «Møt ferdig skiftet … kl. 17:30» er imperativ, ikke oppmøte-anker — kun oppmøte/møte/møter. */
-  const re1 =
-    /\b(?:oppm[oø]te|m[oø]te(?:r)?)\b[^.!?\n]{0,90}?\bkl\.?\s*(\d{1,2})[.:](\d{2})\b/gi;
-  while ((m = re1.exec(text)) !== null) add(m[1]!, m[2]!);
   const re2 = /\b(\d{1,2})[.:](\d{2})\b[^.!?\n]{0,40}?\boppm[oø]te\b/gi;
   while ((m = re2.exec(text)) !== null) {
     const hh = String(Number(m[1])).padStart(2, "0");
@@ -94,8 +116,6 @@ export function extractExplicitAttendanceHhmmTimes(text: string): Set<string> {
     if (kampTimes.has(`${hh}:${mm}`)) continue;
     add(m[1]!, m[2]!);
   }
-  const re3 = /\boppm[oø]te(?:\s*kl\.?)?\s*(\d{1,2})[.:](\d{2})\b/gi;
-  while ((m = re3.exec(text)) !== null) add(m[1]!, m[2]!);
   return s;
 }
 
