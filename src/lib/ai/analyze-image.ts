@@ -29,6 +29,7 @@ import {
   selectInitialAnalysisModel,
   type AnalysisModelRoutingInput,
 } from "@/lib/ai/analysis-model-router";
+import { shouldMergeSourceTextForCupScheduleSynthesis } from "@/lib/cup-schedule-synthesis";
 import { textHasActivityClockWindowCue } from "@/lib/event-time-resolve";
 
 const EVENT_CATEGORIES: EventCategory[] = [
@@ -2266,6 +2267,7 @@ export function ensureTextAnalysisSourceExcerpt(
   const needsSourceForTimeSemantics =
     (windowCue && !textHasActivityClockWindowCue(rawExisting)) ||
     (softDurationCue && !/\bvalgfritt\b|\bca\.\s*\d|\bcirka\b/i.test(rawExisting));
+  const needsSourceForCupSynthesis = shouldMergeSourceTextForCupScheduleSynthesis(src, result);
 
   if (!rawExisting) {
     return {
@@ -2277,7 +2279,7 @@ export function ensureTextAnalysisSourceExcerpt(
       },
     };
   }
-  if (!needsSourceForTimeSemantics) return result;
+  if (!needsSourceForTimeSemantics && !needsSourceForCupSynthesis) return result;
   const raw = rawExisting.includes(src) ? rawExisting : `${rawExisting}\n\n${src}`;
   return {
     ...result,
