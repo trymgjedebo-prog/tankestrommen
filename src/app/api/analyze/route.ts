@@ -51,7 +51,7 @@ import {
   parseCupTimeWindow,
 } from "@/lib/cup-day-content";
 import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
-import { augmentCupScheduleByDayFromCorpus } from "@/lib/cup-schedule-synthesis";
+import { augmentCupScheduleByDayFromCorpus, collectCupSynthesisCorpus } from "@/lib/cup-schedule-synthesis";
 import {
   extractGlobalCupScheduleTimesForDay,
   isConditionalTournamentTextForDay,
@@ -2762,9 +2762,18 @@ function resolveCupTaskDeadlineAndMeta(
     derivedLine = true;
   } else if (
     nearbyContextBlob.length > 20 &&
-    /\b(innen|senest|frist|inne|kl\.?\s*\d)\b/i.test(line)
+    (/\b(innen|senest|frist|inne|kl\.?\s*\d)\b/i.test(line) || /\bspond\b/i.test(ln))
   ) {
-    const ctxDate = pickBestDeadlineDateFromTaskLine(nearbyContextBlob, fallbackYear);
+    let ctxDate: string | null = null;
+    if (/\bspond\b/i.test(ln)) {
+      for (const chunk of nearbyContextBlob.split(/\n+/)) {
+        const t = normalizeSpace(chunk);
+        if (!t || !isDeadlineResponseSpondTaskLine(t)) continue;
+        ctxDate = pickBestDeadlineDateFromTaskLine(t, fallbackYear);
+        if (ctxDate) break;
+      }
+    }
+    if (!ctxDate) ctxDate = pickBestDeadlineDateFromTaskLine(nearbyContextBlob, fallbackYear);
     if (ctxDate) {
       taskDate = ctxDate;
       derivedContext = true;
@@ -5149,13 +5158,18 @@ async function buildProposalItems(
         ...day.notes,
         ...day.rememberItems,
         ...day.deadlines,
-        ...(mergeGlobalSpondDeadlineSnippets
-          ? [result.description ?? "", result.extractedText?.raw ?? "", result.title ?? ""]
-          : []),
+        ...(mergeGlobalSpondDeadlineSnippets ? [collectCupSynthesisCorpus(result)] : []),
       ].join("\n");
       const taskCtxLabel = deriveTaskContextLabel(result);
 
       for (const taskText of taskTexts) {
+        if (
+          mergeGlobalSpondDeadlineSnippets &&
+          /\bspond\b/i.test(normalizeNorwegianLetters(taskText)) &&
+          emittedGlobalSpondDeadlineTaskKeys.size > 0
+        ) {
+          continue;
+        }
         let taskDate = isoDate;
         let dueTime: string | null = null;
         let taskDebug: TaskProposalDebug | null = null;
@@ -5224,7 +5238,7 @@ async function buildProposalItems(
         }
         if (cupMergeBuffer) cupMergeBuffer.push(tk);
         else items.push(tk);
-        if (mergeGlobalSpondDeadlineSnippets && isDeadlineResponseSpondTaskLine(taskText)) {
+        if (mergeGlobalSpondDeadlineSnippets && /\bspond\b/i.test(normalizeNorwegianLetters(taskText))) {
           emittedGlobalSpondDeadlineTaskKeys.add(cupParentTaskDedupeKey(taskText));
         }
       }
@@ -5312,7 +5326,7 @@ async function buildProposalItems(
 
       const cupParentEvent = buildEventItem(
         firstSeg.date,
-        null,
+        firstSeg.start ?? null,
         parentTitleSuffix,
         parentNoteBase,
         undefined,
@@ -5491,14 +5505,19 @@ async function buildProposalItems(
         new Date().toISOString().slice(0, 10);
 
       const keyHit = new Set<string>();
+      const existingSpondDeadlineTask = items.some(
+        (it) => it.kind === "task" && /\bspond\b/i.test(normalizeNorwegianLetters(it.task.title)),
+      );
       for (const it of items) {
         if (it.kind !== "task") continue;
         keyHit.add(cupParentTaskDedupeKey(it.task.title));
+        keyHit.add(cupParentTaskDedupeKey(portalTaskTitleAfterDayPrefix(it.task.title)));
         keyHit.add(cupLineNormKey(it.task.title));
         keyHit.add(cupLineNormKey(portalTaskTitleAfterDayPrefix(it.task.title)));
       }
 
       for (const snip of globalSnips) {
+        if (existingSpondDeadlineTask && /\bspond\b/i.test(normalizeNorwegianLetters(snip))) continue;
         const dedupeSnip = cupParentTaskDedupeKey(snip);
         const draftTitle = normalizeTaskTitle(stripCupNoteLikePrefixes(snip));
         const titleFin = finalizePortalTaskTitleForProposal(snip, draftTitle, result);
@@ -9045,8 +9064,9 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
         sourceRoute: "text",
         analysisResponseMode: portalMode ? "portal" : "raw",
       });
+      const { ensureTextAnalysisSourceExcerpt } = await import("@/lib/ai/analyze-image");
       const result: AIAnalysisResult = {
-        ...routing.result,
+        ...ensureTextAnalysisSourceExcerpt(routing.result, trimmed),
         analysisModelTrace: routing.modelTrace,
       };
       stage = "wrap_portal_bundle_text";

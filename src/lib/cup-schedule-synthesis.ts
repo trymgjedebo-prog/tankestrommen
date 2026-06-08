@@ -94,7 +94,10 @@ function hhmmOnLine(line: string): boolean {
 }
 
 export function dayScheduleEntryHasConfirmedProgramTimes(day: DayScheduleEntry): boolean {
-  if (day.time && /^\d{1,2}:\d{2}$/.test(day.time.trim())) return true;
+  if (day.time && /^\d{1,2}:\d{2}$/.test(day.time.trim())) {
+    const timeContext = `${day.time.trim()} ${day.details ?? ""} ${day.highlights.join(" ")}`.trim();
+    if (!lineLooksLikeAdministrativeDeadline(timeContext)) return true;
+  }
   for (const h of day.highlights) {
     const line = normalizeSpace(h);
     if (!hhmmOnLine(line) || lineLooksLikeAdministrativeDeadline(line)) continue;
@@ -122,6 +125,20 @@ export function collectCupSynthesisCorpus(result: AIAnalysisResult): string {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** Original paste har bekreftede kamptider som LLM-/portal-corpus mangler. */
+export function shouldMergeSourceTextForCupScheduleSynthesis(
+  sourceText: string,
+  result: AIAnalysisResult,
+): boolean {
+  const src = sourceText.trim();
+  if (!src) return false;
+  if (!corpusHasConfirmedCupProgramTimes(src)) return false;
+  const currentCorpus = collectCupSynthesisCorpus(result);
+  if (corpusHasConfirmedCupProgramTimes(currentCorpus)) return false;
+  const cupLikeBlob = [src, result.title ?? "", currentCorpus].filter(Boolean).join("\n");
+  return looksLikeCupWeekendCorpus(cupLikeBlob);
 }
 
 /** Bygg scheduleByDay fra narrativ cup-/helgetekst når modellen ikke strukturerte dagene. */
