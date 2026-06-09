@@ -119,6 +119,84 @@ describe("Vårcup live-degraded portal shape", () => {
     expect(parentEmbedded(items).length).toBeGreaterThanOrEqual(3);
   });
 
+  it("LLM partial 2-dagers scheduleByDay med 17:45 skal ikke blokkere full embeddedSchedule (live Frist 17:45)", async () => {
+    const items = (
+      await portalBundle(
+        ensureTextAnalysisSourceExcerpt(
+          {
+            title: "Vårcupen 2026",
+            schedule: [],
+            scheduleByDay: [
+              {
+                dayLabel: "fredag",
+                date: "2026-06-12",
+                time: "17:45",
+                details: spondOnly,
+                highlights: ["17:45 Oppmøte"],
+                rememberItems: [],
+                deadlines: [],
+                notes: [],
+              },
+              {
+                dayLabel: "lørdag",
+                date: "2026-06-13",
+                time: "09:20",
+                details: null,
+                highlights: ["09:20 Første kamp"],
+                rememberItems: [],
+                deadlines: [],
+                notes: [],
+              },
+            ],
+            location: null,
+            description: spondOnly,
+            category: "cup",
+            targetGroup: null,
+            organizer: null,
+            contactPerson: null,
+            sourceUrl: null,
+            confidence: 0.9,
+            extractedText: { raw: spondOnly, language: "no", confidence: 1 },
+          },
+          fullSource,
+        ),
+      )
+    ).items as PortalItem[];
+
+    expect(parentEmbedded(items).length).toBeGreaterThanOrEqual(3);
+    const parent = items.find(
+      (i) => i.kind === "event" && i.event?.metadata?.isArrangementParent,
+    );
+    expect(parent).toBeDefined();
+    expect(String(parent?.event?.start ?? "")).toBe("");
+    expect(
+      items.some(
+        (i) =>
+          i.kind === "task" &&
+          i.task?.date === "2026-06-12" &&
+          i.task?.dueTime === "17:45",
+      ),
+    ).toBe(false);
+
+    const emb = parentEmbedded(items);
+    const fri = emb.find((s) => s.dayLabel === "fredag");
+    const lor = emb.find((s) => s.dayLabel === "lørdag");
+    expect(fri?.dayContent?.highlights).toEqual(
+      expect.arrayContaining(["17:45 Oppmøte", "18:40 Første kamp"]),
+    );
+    expect(lor?.dayContent?.highlights).toEqual(
+      expect.arrayContaining([
+        "08:35 Oppmøte før første kamp",
+        "09:20 Første kamp",
+        "14:25 Oppmøte før andre kamp",
+        "15:10 Andre kamp",
+      ]),
+    );
+    expect(
+      items.filter((i) => i.kind === "task").some((t) => t.task?.dueTime === "20:00"),
+    ).toBe(true);
+  });
+
   it("LLM scheduleByDay med 20:00 på cup-fredag skal ikke gi enkelt-event start 20:00 uten embeddedSchedule", async () => {
     const items = (
       await portalBundle(
