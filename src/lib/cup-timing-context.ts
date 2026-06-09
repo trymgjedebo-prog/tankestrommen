@@ -81,6 +81,37 @@ export function extractGlobalCupScheduleTimesForDay(text: string, dayLabel: stri
   return extractGlobalCupScheduleTimesByDay(text)[day];
 }
 
+export function corpusDayHasConfirmedCupMatchTimes(
+  corpus: string,
+  dayLabel: string | null | undefined,
+): boolean {
+  return extractGlobalCupScheduleTimesForDay(corpus, dayLabel).length > 0;
+}
+
+function playoffConditionalTargetsOtherCupDay(
+  n: string,
+  spaced: string,
+  dayKey: CupWeekdayKey | null,
+): boolean {
+  if (!dayKey || dayKey === "sondag") return false;
+  const mentionsSunday = /\b(sondag|søndag)\b/.test(spaced) || /\bsondag\b/.test(n);
+  if (
+    mentionsSunday &&
+    /\b(sluttspill|a-?sluttspill|finale|semifinale|kamp)\b/.test(n) &&
+    /\b(hvis|dersom|eventuell|avhengig)\b/.test(n) &&
+    !new RegExp(`\\b${dayKey}\\b`).test(n)
+  ) {
+    return true;
+  }
+  if (
+    /\b(sluttspilltid|endelig\s+sluttspill)\b/.test(n) &&
+    /\b(publiseres|arrangor|arrangør|appen|senere)\b/.test(n)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function isConditionalTournamentTextForDay(
   blob: string,
   dayLabel: string | null | undefined,
@@ -102,11 +133,26 @@ export function isConditionalTournamentTextForDay(
     if (!currentDayConditional) return false;
   }
 
-  if (/\bhvis\s+vi\s+(går|gar)\s+videre\b/.test(n)) return true;
-  if (/\b(hvis|dersom)\s+(vi|laget|gruppa|dere)\s+(går|gar|kommer)\b/.test(n)) return true;
-  if (/\b(avhengig|evt\.?|eventuell|eventuelle)\b/.test(n) && /\b(sluttspill|cup|finale|spill|kamp)\b/.test(n))
+  if (dayKey && dayKey !== "sondag" && playoffConditionalTargetsOtherCupDay(n, spaced, dayKey)) {
+    return false;
+  }
+
+  if (/\bhvis\s+vi\s+(går|gar)\s+videre\b/.test(n)) {
+    if (dayKey && dayKey !== "sondag" && playoffConditionalTargetsOtherCupDay(n, spaced, dayKey)) return false;
     return true;
-  if (/\beventuell\w*\b/.test(n) && /\b(sluttspill|kamp|finale|cup|a-)\b/.test(n)) return true;
+  }
+  if (/\b(hvis|dersom)\s+(vi|laget|gruppa|dere)\s+(går|gar|kommer)\b/.test(n)) {
+    if (dayKey && dayKey !== "sondag" && playoffConditionalTargetsOtherCupDay(n, spaced, dayKey)) return false;
+    return true;
+  }
+  if (/\b(avhengig|evt\.?|eventuell|eventuelle)\b/.test(n) && /\b(sluttspill|cup|finale|spill|kamp)\b/.test(n)) {
+    if (dayKey && dayKey !== "sondag" && playoffConditionalTargetsOtherCupDay(n, spaced, dayKey)) return false;
+    return true;
+  }
+  if (/\beventuell\w*\b/.test(n) && /\b(sluttspill|kamp|finale|cup|a-)\b/.test(n)) {
+    if (dayKey && dayKey !== "sondag" && playoffConditionalTargetsOtherCupDay(n, spaced, dayKey)) return false;
+    return true;
+  }
   if (/\ba-?sluttspill\b/.test(n)) {
     const sundayOnlyPlayoffMention =
       dayKey &&

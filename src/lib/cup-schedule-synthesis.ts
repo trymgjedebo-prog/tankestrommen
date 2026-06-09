@@ -136,7 +136,21 @@ export function shouldReplacePartialCupScheduleWithSynthesis(
   const existingDays = new Set(existing.map((d) => d.dayLabel).filter(Boolean));
   const synthDays = new Set(synthesized.map((d) => d.dayLabel).filter(Boolean));
   if (synthDays.size > existingDays.size) return true;
-  return countCupProgramTimedHighlights(synthesized) > countCupProgramTimedHighlights(existing);
+  if (countCupProgramTimedHighlights(synthesized) > countCupProgramTimedHighlights(existing)) {
+    return true;
+  }
+  for (const synthDay of synthesized) {
+    if (!synthDay.dayLabel) continue;
+    const existingDay = existing.find((d) => d.dayLabel === synthDay.dayLabel);
+    if (!existingDay) continue;
+    if (
+      !dayScheduleEntryHasConfirmedProgramTimes(existingDay) &&
+      dayScheduleEntryHasConfirmedProgramTimes(synthDay)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function corpusHasConfirmedCupProgramTimes(corpus: string): boolean {

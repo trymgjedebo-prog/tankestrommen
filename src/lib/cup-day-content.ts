@@ -4,7 +4,13 @@
  */
 
 import { parseScopedAttendanceOffsetMinutes } from "@/lib/activity-duration";
-import { extractDayBlobFromCorpus, clockTimeOwnedByCupDay } from "@/lib/cup-day-source-blob";
+import {
+  cupProgramNoteLineOwnedByDay,
+  cupWeekendDayKeyFromLabel,
+  extractDayBlobFromCorpus,
+  clockTimeOwnedByCupDay,
+  type CupWeekendDayKey,
+} from "@/lib/cup-day-source-blob";
 import {
   extractCupMatchTimes,
   extractExplicitAttendanceHhmmTimes,
@@ -252,6 +258,9 @@ export function isCupParentPracticalLine(line: string): boolean {
   if (/\bekstra\s+stor\s+bag\b/.test(n)) return true;
   if (/\bén\s+voksen\b/.test(n) && /\btrengs\b/.test(n)) return true;
   if (/\be[nn]\s+voksen\b/.test(n) && /\btrengs\b/.test(n)) return true;
+  if (/\bto\s+voksne\b/.test(n) && /\b(trengs|ansvar|frukt)\b/.test(n)) return true;
+  if (/\bfrukt\b/.test(n) && /\b(voksne|ansvar|trengs)\b/.test(n)) return true;
+  if (/\b(medisin|medisiner|allergi)\b/.test(n) && /\b(beskjed|meld|gi|informer)\b/.test(n)) return true;
   if (/\bmatpause\b/.test(n) && /\boversikt\b/.test(n)) return true;
   if (/\bforeldre\b/.test(n) && /\b(trengs|må|ma\s+)\b/.test(n) && /\b(oversikt|koordin|mat)\b/.test(n))
     return true;
@@ -448,8 +457,19 @@ function dedupeSimilarUncertainty(lines: string[]): string[] {
   return out;
 }
 
+function filterCupDayScopedSourceLines(
+  lines: string[],
+  dayKey: CupWeekendDayKey | null,
+): string[] {
+  if (!dayKey) return lines;
+  return lines
+    .map((raw) => normalizeSpace(raw))
+    .filter((l) => l && cupProgramNoteLineOwnedByDay(l, dayKey));
+}
+
 export function buildCupStructuredDayContent(input: {
   date: string;
+  dayLabel?: string | null;
   details: string | null;
   highlights: string[];
   notes: string[];
@@ -457,7 +477,15 @@ export function buildCupStructuredDayContent(input: {
   deadlines: string[];
   parentTitle: string;
   childTitle: string;
+  /** Når satt: dropp generisk betinget-notat på dager med bekreftet kampprogram i kilden. */
+  suppressGenericConditionalNotes?: boolean;
 }): CupStructuredDayContent {
+  const dayKey =
+    cupWeekendDayKeyFromLabel(input.dayLabel) ??
+    cupWeekendDayKeyFromLabel(/\b(fredag|l[øo]rdag|s[øo]ndag)\b/i.exec(input.childTitle)?.[1] ?? null);
+  const notes = filterCupDayScopedSourceLines(input.notes, dayKey);
+  const rememberItems = filterCupDayScopedSourceLines(input.rememberItems, dayKey);
+  const deadlines = filterCupDayScopedSourceLines(input.deadlines, dayKey);
   const titleBlocklist = new Set<string>([
     cupLineNormKey(input.parentTitle),
     cupLineNormKey(input.childTitle),
@@ -497,9 +525,9 @@ export function buildCupStructuredDayContent(input: {
   const fullBlobForWindow = [
     input.details ?? "",
     ...input.highlights,
-    ...input.notes,
-    ...input.rememberItems,
-    ...input.deadlines,
+    ...notes,
+    ...rememberItems,
+    ...deadlines,
   ].join("\n");
   const dayFromTitle = /\b(fredag|l[øo]rdag|s[øo]ndag)\b/i.exec(input.childTitle)?.[1] ?? null;
   const globalTw = parseCupTimeWindowForDayScoped(fullBlobForWindow, dayFromTitle);
@@ -532,7 +560,9 @@ export function buildCupStructuredDayContent(input: {
       return;
     }
     if (globalTw && parseCupTimeWindow(s)) return;
+    if (input.suppressGenericConditionalNotes && semanticConditionalNoteKey(s)) return;
     if (/\b(avhenger|betinget|usikkert|tidspunkt\s+ikke\s+klart|kommer\s+senere|trolig\s+etter|ved\s+B-?sluttspill)\b/i.test(s)) {
+      if (input.suppressGenericConditionalNotes) return;
       uncertaintyNotes.push(s);
       return;
     }
@@ -551,12 +581,12 @@ export function buildCupStructuredDayContent(input: {
   const gatherParts: string[] = [];
   for (const x of expandCupSourceSegments(input.details)) gatherParts.push(x);
   for (const h of input.highlights) gatherParts.push(...expandCupSourceSegments(h));
-  for (const n of input.notes) gatherParts.push(...expandCupSourceSegments(n));
-  for (const r of input.rememberItems) {
+  for (const n of notes) gatherParts.push(...expandCupSourceSegments(n));
+  for (const r of rememberItems) {
     collectBringFromLine(r);
     gatherParts.push(...expandCupSourceSegments(r));
   }
-  for (const d of input.deadlines) gatherParts.push(...expandCupSourceSegments(d));
+  for (const d of deadlines) gatherParts.push(...expandCupSourceSegments(d));
 
   for (const raw of gatherParts) {
     const s = normalizeSpace(raw);
