@@ -238,6 +238,60 @@ export function cupWeekendDayKeyFromLabel(label: string | null | undefined): Cup
   return null;
 }
 
+function lineIsSundayOnlyPlayoffConditional(line: string): boolean {
+  const spaced = normalizeSpace(line);
+  const n = normalizeNorwegianLetters(spaced);
+  if (/\b(sluttspilltid|endelig\s+sluttspill)\b/.test(n) && /\b(publiseres|arrangor|arrangør|appen)\b/.test(n)) {
+    return true;
+  }
+  const mentionsSunday = /\b(sondag|søndag)\b/.test(spaced) || /\bsondag\b/.test(n);
+  if (!mentionsSunday) return false;
+  return (
+    /\b(sluttspill|a-?sluttspill|finale|semifinale|kamp)\b/.test(n) &&
+    /\b(hvis|dersom|eventuell|avhengig|formiddag|ettermiddag|tidlig)\b/.test(n)
+  );
+}
+
+function lineIsParentOrganizerVolunteerNote(line: string): boolean {
+  const n = normalizeNorwegianLetters(normalizeSpace(line));
+  if (/\bfrukt\b/.test(n) && /\b(voksne|ansvar|trengs|koordin)\b/.test(n)) return true;
+  if (/\b(medisin|medisiner|allergi)\b/.test(n) && /\b(beskjed|meld|gi|informer)\b/.test(n)) return true;
+  if (/\btrengs\s+to\s+voksne\b/.test(n) || /\bto\s+voksne\b/.test(n)) return true;
+  return false;
+}
+
+function lineIsPlayoffOrTentativeScheduleLine(line: string): boolean {
+  const n = normalizeNorwegianLetters(normalizeSpace(line));
+  if (/\bb-?sluttspill\b/.test(n)) return true;
+  if (/\ba-?sluttspill\b/.test(n) && /\b(kamp|mellom|kl\.?|formiddag|ettermiddag)\b/.test(n)) return true;
+  return lineIsSundayOnlyPlayoffConditional(line);
+}
+
+/**
+ * Skal linjen inkluderes som programnotat for ett cup-segment (ikke global admin/Spond/søndag-betingelse).
+ */
+export function cupProgramNoteLineOwnedByDay(line: string, day: CupWeekendDayKey): boolean {
+  const l = normalizeSpace(line);
+  if (!l || lineLooksLikeAdministrativeDeadline(l)) return false;
+  if (/^nb:\s*/i.test(l)) return false;
+  if (lineIsParentOrganizerVolunteerNote(l)) return false;
+  if (day !== "søndag" && lineIsPlayoffOrTentativeScheduleLine(l)) return false;
+
+  const mentioned = cupWeekendDaysMentionedInLine(l);
+  if (mentioned.size === 0) {
+    if (/\b45\s+minutter\s+før\s+hver\s+kamp\b/i.test(l) || /\bm[oø]t\s+45\s+minutter\b/i.test(l)) {
+      return day === "lørdag";
+    }
+    if (/\b(betinget|usikkert|avhenger|ikke\s+endelig|forel[oø]pig)\b/i.test(l)) return day === "søndag";
+    return true;
+  }
+  if (!mentioned.has(day)) return false;
+  if (mentioned.size > 1) {
+    return [...mentioned].every((d) => d === day);
+  }
+  return true;
+}
+
 export function extractDayBlobFromCorpus(corpus: string, dayLabel: string | null): string {
   const key = cupWeekendDayKeyFromLabel(dayLabel);
   if (key) {

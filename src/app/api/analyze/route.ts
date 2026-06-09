@@ -50,9 +50,14 @@ import {
   formatCupEventNotesFlat,
   parseCupTimeWindow,
 } from "@/lib/cup-day-content";
-import { extractDayBlobFromCorpus } from "@/lib/cup-day-source-blob";
+import {
+  cupProgramNoteLineOwnedByDay,
+  cupWeekendDayKeyFromLabel,
+  extractDayBlobFromCorpus,
+} from "@/lib/cup-day-source-blob";
 import { augmentCupScheduleByDayFromCorpus, collectCupSynthesisCorpus } from "@/lib/cup-schedule-synthesis";
 import {
+  corpusDayHasConfirmedCupMatchTimes,
   extractGlobalCupScheduleTimesForDay,
   isConditionalTournamentTextForDay,
 } from "@/lib/cup-timing-context";
@@ -4639,8 +4644,12 @@ async function buildProposalItems(
             ...fRemember,
             day.dayLabel ?? "",
           ].join(" ");
+      const dayHasConfirmedMatches =
+        cupLike && corpusDayHasConfirmedCupMatchTimes(cupTimingCorpus, day.dayLabel);
       const conditionalDay =
-        cupLike && isConditionalTournamentTextForDay(dayScopedCupSourceBlob, day.dayLabel);
+        cupLike &&
+        !dayHasConfirmedMatches &&
+        isConditionalTournamentTextForDay(dayScopedCupSourceBlob, day.dayLabel);
       const titleSuffix = day.dayLabel;
       let cupTiming: CupDayTiming | null = null;
 
@@ -4751,10 +4760,17 @@ async function buildProposalItems(
       }
 
       if (cupLike) {
+        const cupDayKey = cupWeekendDayKeyFromLabel(day.dayLabel);
+        if (cupDayKey) {
+          notesOnlyForEvent = notesOnlyForEvent.filter((n) =>
+            cupProgramNoteLineOwnedByDay(n, cupDayKey),
+          );
+        }
         const parentTitle = buildCupParentCalendarTitle(result);
         const childTitle = buildCupChildCalendarTitle(result, titleSuffix);
         structuredDayContent = buildCupStructuredDayContent({
           date: isoDate,
+          dayLabel: day.dayLabel,
           details: detailsForEvent,
           highlights: highlightsForEventFinal,
           notes: notesOnlyForEvent,
@@ -4762,6 +4778,7 @@ async function buildProposalItems(
           deadlines: deadlinesForEvent,
           parentTitle,
           childTitle,
+          suppressGenericConditionalNotes: dayHasConfirmedMatches,
         });
         highlightsForEventFinal = structuredDayContent.highlights;
         rememberForEvent = structuredDayContent.bringItems;

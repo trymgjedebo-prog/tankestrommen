@@ -25,16 +25,58 @@ function vaacupRawTextOnlyInput(): AIAnalysisResult {
   };
 }
 
+type EmbeddedSeg = {
+  dayLabel?: string;
+  start?: string | null;
+  timePrecision?: string;
+  isConditional?: boolean;
+  notes?: string;
+  dayContent?: {
+    highlights?: string[];
+    generalNotes?: string[];
+    uncertaintyNotes?: string[];
+  };
+};
+
 type PortalItem = {
   kind: string;
   event?: {
     title?: string;
     date?: string;
     start?: string | null;
-    metadata?: { embeddedSchedule?: Array<{ dayLabel?: string; dayContent?: { highlights?: string[] } }>; isArrangementParent?: boolean };
+    metadata?: {
+      embeddedSchedule?: EmbeddedSeg[];
+      isArrangementParent?: boolean;
+    };
   };
   task?: { date?: string; dueTime?: string; title?: string };
 };
+
+function embeddedSeg(items: PortalItem[], dayLabel: string): EmbeddedSeg | undefined {
+  return parentEmbedded(items).find((s) => s.dayLabel === dayLabel);
+}
+
+function assertLorSaturdayContract(lor: EmbeddedSeg | undefined) {
+  expect(lor).toBeDefined();
+  expect(lor?.start).toMatch(/^08:35|^09:20/);
+  expect(lor?.timePrecision).not.toBe("date_only");
+  expect(lor?.isConditional).not.toBe(true);
+  expect(lor?.dayContent?.highlights).toEqual(
+    expect.arrayContaining([
+      "08:35 Oppmøte før første kamp",
+      "09:20 Første kamp",
+      "14:25 Oppmøte før andre kamp",
+      "15:10 Andre kamp",
+    ]),
+  );
+  const notesBlob = [
+    lor?.notes ?? "",
+    ...(lor?.dayContent?.generalNotes ?? []),
+    ...(lor?.dayContent?.uncertaintyNotes ?? []),
+  ].join("\n");
+  expect(notesBlob).not.toMatch(/sluttspill|søndag|sondag|frukt|medisin/i);
+  expect(notesBlob).not.toMatch(/^nb:/im);
+}
 
 async function portalBundle(input: AIAnalysisResult) {
   return (await toPortalBundle(input, "text", "text", true, { knownPersons: [] })) as Record<string, unknown>;
@@ -60,20 +102,13 @@ describe("Vårcup live portal shape (raw text only)", () => {
     expect(tasks.some((t) => t.task?.date === "2026-06-08" && t.task?.dueTime === "20:00")).toBe(true);
     expect(items.filter((i) => i.kind === "task").length).toBeLessThan(items.length);
 
-    const emb = parentEmbedded(items);
-    const fri = emb.find((s) => s.dayLabel === "fredag");
-    const lor = emb.find((s) => s.dayLabel === "lørdag");
-    const son = emb.find((s) => s.dayLabel === "søndag");
+    assertLorSaturdayContract(embeddedSeg(items, "lørdag"));
+    const fri = embeddedSeg(items, "fredag");
+    const son = embeddedSeg(items, "søndag");
     expect(fri?.dayContent?.highlights).toEqual(expect.arrayContaining(["17:45 Oppmøte", "18:40 Første kamp"]));
-    expect(lor?.dayContent?.highlights).toEqual(
-      expect.arrayContaining([
-        "08:35 Oppmøte før første kamp",
-        "09:20 Første kamp",
-        "14:25 Oppmøte før andre kamp",
-        "15:10 Andre kamp",
-      ]),
-    );
     expect(son?.dayContent?.highlights ?? []).toHaveLength(0);
+    expect(son?.timePrecision).toBe("date_only");
+    expect(son?.isConditional).toBe(true);
     expect(items.some((i) => i.kind === "event" && i.event?.metadata?.isArrangementParent)).toBe(true);
     expect(
       items.some(
@@ -178,23 +213,79 @@ describe("Vårcup live-degraded portal shape", () => {
       ),
     ).toBe(false);
 
-    const emb = parentEmbedded(items);
-    const fri = emb.find((s) => s.dayLabel === "fredag");
-    const lor = emb.find((s) => s.dayLabel === "lørdag");
-    expect(fri?.dayContent?.highlights).toEqual(
+    assertLorSaturdayContract(embeddedSeg(items, "lørdag"));
+    expect(embeddedSeg(items, "fredag")?.dayContent?.highlights).toEqual(
       expect.arrayContaining(["17:45 Oppmøte", "18:40 Første kamp"]),
-    );
-    expect(lor?.dayContent?.highlights).toEqual(
-      expect.arrayContaining([
-        "08:35 Oppmøte før første kamp",
-        "09:20 Første kamp",
-        "14:25 Oppmøte før andre kamp",
-        "15:10 Andre kamp",
-      ]),
     );
     expect(
       items.filter((i) => i.kind === "task").some((t) => t.task?.dueTime === "20:00"),
     ).toBe(true);
+  });
+
+  it("LLM 3-dagers junk-notater på lørdag skal ikke gjøre lørdag date_only/tentative når corpus har kamptider", async () => {
+    const junkNotes = [
+      "Betinget opplegg — avhengig av resultat eller tid som ikke er endelig.",
+      "Møt 45 minutter før hver kamp",
+      "Dersom laget går videre til A-sluttspill, blir det kamp søndag formiddag eller tidlig ettermiddag",
+      "Endelig sluttspilltid kommer i appen når arrangøren publiserer oppsettet",
+      "Det trengs to voksne som kan ta ansvar for frukt lørdag",
+      "Gi beskjed hvis barnet bruker medisiner",
+      "NB: Usikkert eller betinget opplegg",
+    ];
+    const items = (
+      await portalBundle(
+        ensureTextAnalysisSourceExcerpt(
+          {
+            title: "Vårcupen 2026",
+            schedule: [],
+            scheduleByDay: [
+              {
+                dayLabel: "fredag",
+                date: "2026-06-12",
+                time: "17:45",
+                details: null,
+                highlights: ["17:45 Oppmøte"],
+                rememberItems: [],
+                deadlines: [],
+                notes: [],
+              },
+              {
+                dayLabel: "lørdag",
+                date: "2026-06-13",
+                time: "09:20",
+                details: null,
+                highlights: ["09:20 Første kamp"],
+                rememberItems: [],
+                deadlines: [],
+                notes: junkNotes,
+              },
+              {
+                dayLabel: "søndag",
+                date: "2026-06-14",
+                time: null,
+                details: null,
+                highlights: [],
+                rememberItems: [],
+                deadlines: [],
+                notes: [],
+              },
+            ],
+            location: null,
+            description: fullSource,
+            category: "cup",
+            targetGroup: null,
+            organizer: null,
+            contactPerson: null,
+            sourceUrl: null,
+            confidence: 0.9,
+            extractedText: { raw: fullSource, language: "no", confidence: 1 },
+          },
+          fullSource,
+        ),
+      )
+    ).items as PortalItem[];
+
+    assertLorSaturdayContract(embeddedSeg(items, "lørdag"));
   });
 
   it("LLM scheduleByDay med 20:00 på cup-fredag skal ikke gi enkelt-event start 20:00 uten embeddedSchedule", async () => {
