@@ -260,6 +260,13 @@ function lineIsParentOrganizerVolunteerNote(line: string): boolean {
   return false;
 }
 
+function lineIsPlayoffOrTentativeScheduleLine(line: string): boolean {
+  const n = normalizeNorwegianLetters(normalizeSpace(line));
+  if (/\bb-?sluttspill\b/.test(n)) return true;
+  if (/\ba-?sluttspill\b/.test(n) && /\b(kamp|mellom|kl\.?|formiddag|ettermiddag)\b/.test(n)) return true;
+  return lineIsSundayOnlyPlayoffConditional(line);
+}
+
 /**
  * Skal linjen inkluderes som programnotat for ett cup-segment (ikke global admin/Spond/søndag-betingelse).
  */
@@ -268,7 +275,7 @@ export function cupProgramNoteLineOwnedByDay(line: string, day: CupWeekendDayKey
   if (!l || lineLooksLikeAdministrativeDeadline(l)) return false;
   if (/^nb:\s*/i.test(l)) return false;
   if (lineIsParentOrganizerVolunteerNote(l)) return false;
-  if (lineIsSundayOnlyPlayoffConditional(l) && day !== "søndag") return false;
+  if (day !== "søndag" && lineIsPlayoffOrTentativeScheduleLine(l)) return false;
 
   const mentioned = cupWeekendDaysMentionedInLine(l);
   if (mentioned.size === 0) {
@@ -276,7 +283,7 @@ export function cupProgramNoteLineOwnedByDay(line: string, day: CupWeekendDayKey
       return day === "lørdag";
     }
     if (/\b(betinget|usikkert|avhenger|ikke\s+endelig|forel[oø]pig)\b/i.test(l)) return day === "søndag";
-    return false;
+    return true;
   }
   if (!mentioned.has(day)) return false;
   if (mentioned.size > 1) {
