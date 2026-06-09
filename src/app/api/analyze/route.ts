@@ -5326,7 +5326,7 @@ async function buildProposalItems(
 
       const cupParentEvent = buildEventItem(
         firstSeg.date,
-        firstSeg.start ?? null,
+        null,
         parentTitleSuffix,
         parentNoteBase,
         undefined,
@@ -5360,6 +5360,9 @@ async function buildProposalItems(
       attachEmbeddedScheduleToHostEvent(cupParentEvent, true, {
         endDateIso: lastSeg.date,
       });
+      /** Programtid ligger i embeddedSchedule — unngå Spond/oppmøte som enkeltklokke på parent (Foreldre-App task-fallback). */
+      cupParentEvent.event.start = "";
+      cupParentEvent.event.end = "";
       const parentStableKey = cupParentEvent.event.metadata?.arrangementStableKey ?? null;
       if (cupParentEvent.event.metadata) {
         cupParentEvent.event.metadata.isArrangementParent = true;

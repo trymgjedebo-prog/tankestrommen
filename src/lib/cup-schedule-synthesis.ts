@@ -111,6 +111,34 @@ export function scheduleByDayHasConfirmedCupProgram(days: DayScheduleEntry[]): b
   return withProgram.length >= 2;
 }
 
+function countCupProgramTimedHighlights(days: DayScheduleEntry[]): number {
+  let n = 0;
+  for (const day of days) {
+    if (day.time && /^\d{1,2}:\d{2}$/.test(day.time.trim())) {
+      const timeContext = `${day.time.trim()} ${day.details ?? ""} ${day.highlights.join(" ")}`.trim();
+      if (!lineLooksLikeAdministrativeDeadline(timeContext)) n++;
+    }
+    for (const h of day.highlights) {
+      const line = normalizeSpace(h);
+      if (hhmmOnLine(line) && !lineLooksLikeAdministrativeDeadline(line)) n++;
+    }
+  }
+  return n;
+}
+
+/** LLM kan gi 2-dagers skjelett med oppmøte/kamp som blokkerer full helgesyntese fra paste. */
+export function shouldReplacePartialCupScheduleWithSynthesis(
+  existing: DayScheduleEntry[],
+  synthesized: DayScheduleEntry[],
+): boolean {
+  if (synthesized.length < 2) return false;
+  if (existing.length === 0 || !scheduleByDayHasConfirmedCupProgram(existing)) return true;
+  const existingDays = new Set(existing.map((d) => d.dayLabel).filter(Boolean));
+  const synthDays = new Set(synthesized.map((d) => d.dayLabel).filter(Boolean));
+  if (synthDays.size > existingDays.size) return true;
+  return countCupProgramTimedHighlights(synthesized) > countCupProgramTimedHighlights(existing);
+}
+
 export function corpusHasConfirmedCupProgramTimes(corpus: string): boolean {
   const byDay = extractGlobalCupScheduleTimesByDay(corpus);
   return byDay.fredag.length + byDay.lordag.length > 0;
@@ -136,7 +164,13 @@ export function shouldMergeSourceTextForCupScheduleSynthesis(
   if (!src) return false;
   if (!corpusHasConfirmedCupProgramTimes(src)) return false;
   const currentCorpus = collectCupSynthesisCorpus(result);
-  if (corpusHasConfirmedCupProgramTimes(currentCorpus)) return false;
+  if (corpusHasConfirmedCupProgramTimes(currentCorpus)) {
+    const srcTimes = extractGlobalCupScheduleTimesByDay(src);
+    const curTimes = extractGlobalCupScheduleTimesByDay(currentCorpus);
+    const srcMatches = srcTimes.fredag.length + srcTimes.lordag.length;
+    const curMatches = curTimes.fredag.length + curTimes.lordag.length;
+    if (srcMatches <= curMatches) return false;
+  }
   const cupLikeBlob = [src, result.title ?? "", currentCorpus].filter(Boolean).join("\n");
   return looksLikeCupWeekendCorpus(cupLikeBlob);
 }
@@ -228,7 +262,7 @@ export function augmentCupScheduleByDayFromCorpus(result: AIAnalysisResult): voi
   if (synthesized.length < 2) return;
 
   const existing = Array.isArray(result.scheduleByDay) ? result.scheduleByDay : [];
-  if (existing.length === 0 || !scheduleByDayHasConfirmedCupProgram(existing)) {
+  if (shouldReplacePartialCupScheduleWithSynthesis(existing, synthesized)) {
     result.scheduleByDay = synthesized;
   }
 }
