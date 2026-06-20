@@ -20,5 +20,7 @@
       "dueTime": "20:00"
     }
   ],
-  "forbiddenProgramTimes": ["20:00"]
+  "forbiddenProgramTimes": ["20:00"],
+  "maxChildCount": 0,
+  "maxTaskCount": 1
 }

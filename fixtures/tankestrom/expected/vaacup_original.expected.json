@@ -36,5 +36,7 @@
       "date": "2026-06-08",
       "dueTime": "20:00"
     }
-  ]
+  ],
+  "maxChildCount": 3,
+  "maxTaskCount": 1
 }
