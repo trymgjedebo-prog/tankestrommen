@@ -27,5 +27,7 @@
       "date": "2026-11-06",
       "dueTime": null
     }
-  ]
+  ],
+  "maxChildCount": 1,
+  "maxTaskCount": 1
 }

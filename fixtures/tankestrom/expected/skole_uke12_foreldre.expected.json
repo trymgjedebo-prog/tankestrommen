@@ -28,5 +28,7 @@
     "lørdag": "date_only",
     "søndag": "date_only"
   },
-  "requiredTasks": []
+  "requiredTasks": [],
+  "maxChildCount": 3,
+  "maxTaskCount": 0
 }
