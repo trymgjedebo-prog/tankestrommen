@@ -335,4 +335,48 @@ describe("resolveCupDayTiming", () => {
     expect(["start_only", "exact"]).toContain(r.timePrecision);
     expect(r.timeWindow).toBeUndefined();
   });
+
+  it("betinget søndag arver ikke fredag/lørdag-tider fra delt corpus (date_only, ingen lekkasje)", () => {
+    // Negativ motsats til «bekreftet søndag»-guardrailen over.
+    // Fre/lør har konkrete tider i corpus; søndag er kun betinget → ingen arv.
+    const corpus = [
+      "Fredag 18. september: kl. 17:30 Første kamp.",
+      "Lørdag 19. september: kl. 09:15 Første kamp og kl. 14:40 Andre kamp.",
+      "Søndag 20. september: sluttspill dersom laget går videre. Kampoppsett for søndag kommer senere.",
+    ].join("\n");
+    const day: DayScheduleEntry = {
+      dayLabel: "søndag",
+      date: "2026-09-20",
+      time: null,
+      details: null,
+      highlights: [],
+      rememberItems: [],
+      deadlines: [],
+      notes: [
+        "Eventuell kamp hvis laget går videre til A-sluttspill.",
+        "Kampoppsett for søndag kommer senere.",
+      ],
+    };
+    const r = resolveCupDayTiming({
+      day,
+      detailsForEvent: null,
+      highlightsForEventFinal: day.highlights,
+      notesOnlyForEvent: day.notes,
+      rememberForEvent: [],
+      deadlinesForEvent: [],
+      conditionalDay: true,
+      fullCorpus: corpus,
+    });
+    // Tentativ programdag — ingen konkret start/slutt/oppmøte.
+    expect(r.timePrecision).toBe("date_only");
+    expect(r.start).toBeNull();
+    expect(r.end).toBeNull();
+    expect(r.attendanceTime).toBeNull();
+    expect(r.timeWindow).toBeUndefined();
+    // Ingen fredag/lørdag-tid skal lekke inn i NOEN felt på resultatet.
+    const serialized = JSON.stringify(r);
+    for (const t of ["17:30", "09:15", "14:40"]) {
+      expect(serialized).not.toContain(t);
+    }
+  });
 });
