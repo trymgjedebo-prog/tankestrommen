@@ -14,6 +14,10 @@ export const TANKESTROM_FIXTURE_DEFS: TankestromFixtureDef[] = [
   { id: "speiderhelg", rel: "fixtures/tankestrom/speiderhelg.txt" },
   { id: "turnstevne", rel: "fixtures/tankestrom/turnstevne.txt" },
   { id: "spond_lagtrening_fredag", rel: "fixtures/tankestrom/spond_lagtrening_fredag.txt" },
+  {
+    id: "spond_sommeravslutning_frist",
+    rel: "fixtures/tankestrom/spond_sommeravslutning_frist.txt",
+  },
   { id: "skole_uke12_foreldre", rel: "fixtures/tankestrom/skole_uke12_foreldre.txt" },
   { id: "dugnad_foreldremote_juni", rel: "fixtures/tankestrom/dugnad_foreldremote_juni.txt" },
 ];
