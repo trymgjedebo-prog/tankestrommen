@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "team_message",
+  "parentCount": 1,
+  "childCount": 1,
+  "childTitles": ["Klubbtrening – tirsdag"],
+  "highlightsByDay": {},
+  "requiredBringItems": ["drikkeflaske"],
+  "forbiddenInNotes": [],
+  "forbiddenHighlights": [],
+  "tentativeDays": { "tirsdag": false },
+  "timePrecisionByDay": { "tirsdag": "start_only" },
+  "requiredTasks": [],
+  "maxChildCount": 1,
+  "maxTaskCount": 0
+}

@@ -21,6 +21,7 @@ export const TANKESTROM_FIXTURE_DEFS: TankestromFixtureDef[] = [
   { id: "skole_uke12_foreldre", rel: "fixtures/tankestrom/skole_uke12_foreldre.txt" },
   { id: "dugnad_foreldremote_juni", rel: "fixtures/tankestrom/dugnad_foreldremote_juni.txt" },
   { id: "nyhetsbrev_uten_event", rel: "fixtures/tankestrom/nyhetsbrev_uten_event.txt" },
+  { id: "hverdag_trening_tirsdag", rel: "fixtures/tankestrom/hverdag_trening_tirsdag.txt" },
 ];
 
 /** Standard live-eval (lav kostnad): cup-tekster. */
