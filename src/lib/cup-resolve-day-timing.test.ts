@@ -298,4 +298,41 @@ describe("resolveCupDayTiming", () => {
     expect(synced.endTimeSource).toBe("computed_from_duration_and_aftertime");
     expect(synced.inferredEndTime).toBe(true);
   });
+
+  it("søndag med eksplisitt, bekreftet program: konkret start, ikke degradert til date_only/time_window", () => {
+    // Speiler evidence-testen «Søndag med eksplisitt, bekreftet program …».
+    // Ingen betinget/foreløpig/sluttspill-språk → søndag skal IKKE nedgraderes navnebasert,
+    // men behandles som konkret programdag når kilden gir eksplisitte kamptider.
+    const corpus = [
+      "Høstcupen håndball 2026.",
+      "Søndag 20. september: kl. 09:00 Første kamp, kl. 11:00 Andre kamp.",
+    ].join("\n");
+    const day: DayScheduleEntry = {
+      dayLabel: "søndag",
+      date: "2026-09-20",
+      time: null,
+      details: null,
+      highlights: ["09:00 Første kamp", "11:00 Andre kamp"],
+      rememberItems: [],
+      deadlines: [],
+      notes: [],
+    };
+    const r = resolveCupDayTiming({
+      day,
+      detailsForEvent: null,
+      highlightsForEventFinal: day.highlights,
+      notesOnlyForEvent: [],
+      rememberForEvent: [],
+      deadlinesForEvent: [],
+      conditionalDay: false,
+      fullCorpus: corpus,
+    });
+    // Konkret programdag — ikke date_only/tentativt vindu bare fordi det er søndag.
+    expect(r.start).toBe("09:00");
+    expect(r.startTimeSource).toBe("explicit");
+    expect(r.timePrecision).not.toBe("date_only");
+    expect(r.timePrecision).not.toBe("time_window");
+    expect(["start_only", "exact"]).toContain(r.timePrecision);
+    expect(r.timeWindow).toBeUndefined();
+  });
 });
