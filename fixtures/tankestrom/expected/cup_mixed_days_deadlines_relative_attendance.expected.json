@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "category": "cup",
+  "parentCount": 1,
+  "childCount": 3,
+  "childTitles": [
+    "Cup helg 2026 – fredag",
+    "Cup helg 2026 – lørdag",
+    "Cup helg 2026 – søndag"
+  ],
+  "highlightsByDay": {
+    "fredag": ["17:45 Oppmøte", "18:40 Første kamp"],
+    "lørdag": [
+      "08:35 Oppmøte før første kamp",
+      "09:20 Første kamp",
+      "14:25 Oppmøte før andre kamp",
+      "15:10 Andre kamp"
+    ]
+  },
+  "requiredBringItems": [],
+  "forbiddenInNotes": [],
+  "forbiddenHighlights": [{ "day": "fredag", "includes": "18:40 Oppmøte" }],
+  "tentativeDays": {
+    "fredag": false,
+    "lørdag": false,
+    "søndag": true
+  },
+  "timePrecisionByDay": {
+    "fredag": "start_only",
+    "lørdag": "start_only",
+    "søndag": "date_only"
+  },
+  "requiredTasks": [
+    {
+      "titleIncludes": "Spond",
+      "date": "2026-06-08",
+      "dueTime": "20:00"
+    }
+  ],
+  "forbiddenProgramTimes": ["20:00"]
+}
