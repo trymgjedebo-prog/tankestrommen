@@ -104,11 +104,18 @@ function splitNoteSegmentsForGeneral(line: string): string[] {
     .filter(Boolean);
 }
 
+const DAY_MENTION_PATTERNS: Record<DayKey, RegExp> = {
+  mandag: /\bmandag|monday\b/,
+  tirsdag: /\btirsdag|tuesday\b/,
+  onsdag: /\bonsdag|wednesday\b/,
+  torsdag: /\btorsdag|thursday\b/,
+  fredag: /\bfredag|friday\b/,
+  lørdag: /\blordag|l[øo]rdag|saturday\b/,
+  søndag: /\bsondag|s[øo]ndag|sunday\b/,
+};
+
 function hasDayMention(sentence: string, day: DayKey): boolean {
-  const n = normalizeNorwegianLetters(sentence);
-  if (day === "fredag") return /\bfredag|friday\b/.test(n);
-  if (day === "lørdag") return /\blordag|l[øo]rdag|saturday\b/.test(n);
-  return /\bsondag|s[øo]ndag|sunday\b/.test(n);
+  return DAY_MENTION_PATTERNS[day].test(normalizeNorwegianLetters(sentence));
 }
 
 function parseDayDate(text: string, day: DayKey): string | null {
@@ -128,12 +135,16 @@ function parseDayDate(text: string, day: DayKey): string | null {
     november: "11",
     desember: "12",
   };
-  const dayExpr =
-    day === "fredag"
-      ? "(fredag|friday)"
-      : day === "lørdag"
-        ? "(l[øo]rdag|saturday)"
-        : "(s[øo]ndag|sunday)";
+  const dayExprByDay: Record<DayKey, string> = {
+    mandag: "(mandag|monday)",
+    tirsdag: "(tirsdag|tuesday)",
+    onsdag: "(onsdag|wednesday)",
+    torsdag: "(torsdag|thursday)",
+    fredag: "(fredag|friday)",
+    lørdag: "(l[øo]rdag|saturday)",
+    søndag: "(s[øo]ndag|sunday)",
+  };
+  const dayExpr = dayExprByDay[day];
   const re = new RegExp(`\\b${dayExpr}\\b[^\\n.!?]{0,20}?(\\d{1,2})\\.\\s*([a-zæøå]+)`, "i");
   const m = re.exec(text);
   if (!m) return null;
@@ -142,6 +153,28 @@ function parseDayDate(text: string, day: DayKey): string | null {
   const month = monthMap[monthRaw];
   if (!month || !Number.isFinite(d) || d <= 0 || d > 31) return null;
   return `${year}-${month}-${String(d).padStart(2, "0")}`;
+}
+
+const WEEKDAY_EVENT_KEYS: DayKey[] = ["mandag", "tirsdag", "onsdag", "torsdag"];
+
+/**
+ * Hverdager (man–tor) som opptrer som ekte event i teksten: nevnt på en linje med klokkeslett
+ * som IKKE ser ut som en administrativ frist (Spond/svar/frist). Hindrer at fristlinjer i
+ * helge-fixtures (f.eks. «Svar i Spond senest tirsdag …») gir falske hverdags-barn.
+ */
+function detectEventWeekdays(text: string): DayKey[] {
+  const lines = text
+    .split(/\n+/)
+    .map((l) => normalizeSpace(l))
+    .filter(Boolean);
+  return WEEKDAY_EVENT_KEYS.filter((day) =>
+    lines.some(
+      (line) =>
+        hasDayMention(line, day) &&
+        !lineLooksLikeAdministrativeDeadline(line) &&
+        /\d{1,2}[.:]\d{2}/.test(line),
+    ),
+  );
 }
 
 function parseExplicitAttendanceTime(text: string, day: DayKey): string | null {
@@ -305,9 +338,10 @@ export function runTankestromFixture(
   const parentTitle = inferParentTitle(text);
   const global = extractGlobalCupScheduleTimesByDay(text);
   const sentences = splitSentences(text);
-  // Runneren produserer fortsatt kun helgedager; `as const` gir loop-variabelen den smale
-  // CupWeekendDayKey-typen som cup-hjelpefunksjonene krever, mens RegressionChild.day er vid (man–søn).
-  const days = ["fredag", "lørdag", "søndag"] as const;
+  // Helgedager prosesseres alltid (bakoverkompatibelt). I tillegg tas hverdager (man–tor) med
+  // KUN når de opptrer på en ikke-administrativ linje med klokkeslett (ekte event, ikke frist),
+  // slik at fristlinjer i helge-fixtures ikke gir falske hverdags-barn.
+  const days: DayKey[] = ["fredag", "lørdag", "søndag", ...detectEventWeekdays(text)];
   const children: RegressionChild[] = [];
   const highlightStyle = normalizeActivityHighlightStyle(options?.category);
 
@@ -315,7 +349,12 @@ export function runTankestromFixture(
     const date = parseDayDate(text, day);
 
     const daySentences = sentences.filter((s) => hasDayMention(s, day));
-    const weekendBlob = buildCupWeekendDayBlob(text, day);
+    // Cup-helgeblob er kun definert for helgedager (CupWeekendDayKey). For hverdager faller vi
+    // tilbake til den generelle dag-blobben.
+    const weekendBlob =
+      day === "fredag" || day === "lørdag" || day === "søndag"
+        ? buildCupWeekendDayBlob(text, day)
+        : "";
     const cupDaySectionBlob = weekendBlob.trim().length > 0;
     const sourceBlob =
       highlightStyle === "general"
