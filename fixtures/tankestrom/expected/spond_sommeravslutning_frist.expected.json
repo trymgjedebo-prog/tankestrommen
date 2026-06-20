@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "team_message",
+  "parentCount": 1,
+  "childCount": 0,
+  "childTitles": [],
+  "highlightsByDay": {},
+  "requiredBringItems": [],
+  "forbiddenInNotes": [],
+  "forbiddenHighlights": [
+    { "includes": "Første kamp" },
+    { "includes": "Kamp" }
+  ],
+  "tentativeDays": {},
+  "timePrecisionByDay": {},
+  "requiredTasks": [
+    {
+      "titleIncludes": "Spond",
+      "date": "2026-06-12",
+      "dueTime": "20:00"
+    }
+  ],
+  "forbiddenProgramTimes": ["20:00"]
+}
