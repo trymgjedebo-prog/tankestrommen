@@ -52,6 +52,10 @@ export type TankestromExpected = {
   durationMinutesByDay?: Partial<Record<DayKey, number>>;
   /** Klokkeslett som aldri skal dukke opp som program-highlight (f.eks. Spond-frist). */
   forbiddenProgramTimes?: string[];
+  /** Hard øvre grense på antall program-barn (hallucination guard). No-op når udefinert. */
+  maxChildCount?: number;
+  /** Hard øvre grense på antall tasks/frister (hallucination guard). No-op når udefinert. */
+  maxTaskCount?: number;
 };
 
 export function loadTankestromExpected(absolutePath: string): TankestromExpected {

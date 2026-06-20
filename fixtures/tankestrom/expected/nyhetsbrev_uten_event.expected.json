@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "newsletter",
+  "parentCount": 1,
+  "childCount": 0,
+  "childTitles": [],
+  "highlightsByDay": {},
+  "requiredBringItems": [],
+  "forbiddenInNotes": [],
+  "forbiddenHighlights": [],
+  "tentativeDays": {},
+  "timePrecisionByDay": {},
+  "requiredTasks": [],
+  "maxChildCount": 0,
+  "maxTaskCount": 0
+}

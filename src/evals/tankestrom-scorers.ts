@@ -576,6 +576,29 @@ export function scoreForbiddenInNotes(bundle: RegressionPortalBundle, expected: 
   return { score: failures.length === 0 ? 1 : 0, failures };
 }
 
+/**
+ * Hard hallucination-guard: antall program-barn/tasks skal ikke overstige forventet maks.
+ * No-op (score 1, ingen failures) når verken maxChildCount eller maxTaskCount er satt —
+ * bakoverkompatibelt for eksisterende expected-filer uten feltene.
+ */
+export function scoreNoHallucinatedEvents(
+  bundle: RegressionPortalBundle,
+  expected: TankestromExpected,
+): ScorerResult {
+  const failures: string[] = [];
+  if (expected.maxChildCount != null && bundle.children.length > expected.maxChildCount) {
+    failures.push(
+      `For mange program-hendelser: forventet maks ${expected.maxChildCount}, fikk ${bundle.children.length} (${bundle.children.map((c) => c.day).join(", ")})`,
+    );
+  }
+  if (expected.maxTaskCount != null && bundle.tasks.length > expected.maxTaskCount) {
+    failures.push(
+      `For mange tasks: forventet maks ${expected.maxTaskCount}, fikk ${bundle.tasks.length} (${bundle.tasks.map((t) => t.title).join(", ")})`,
+    );
+  }
+  return { score: failures.length === 0 ? 1 : 0, failures };
+}
+
 /** Kjør alle innebygde scorers og returner map + samlet gjennomsnitt. */
 export function runAllTankestromScorers(
   bundle: RegressionPortalBundle,
@@ -607,6 +630,7 @@ export function runAllTankestromScorers(
     ["durationMinutesCorrect", scoreDurationMinutes(bundle, expected)],
     ["endTimeSourceCorrect", scoreEndTimeSource(bundle, expected)],
     ["forbiddenProgramTimes", scoreForbiddenProgramTimes(bundle, expected)],
+    ["noHallucinatedEvents", scoreNoHallucinatedEvents(bundle, expected)],
   ];
 
   const baseScores: Record<string, number> = {};
