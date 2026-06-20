@@ -34,9 +34,18 @@ const CLASS_CODE = /\b[jJ]\d{3,4}\b|\b[gG]\d{1,2}\b|\b[uU]\d{1,2}\b/;
 const TITLE_TRAILING_LONE_NUMBER = /[–-]\s*\d{1,2}\s*$/;
 
 function weekdayInTitlePattern(day: DayKey): RegExp {
-  if (day === "fredag") return /\bfredag\b/i;
-  if (day === "lørdag") return /\blørdag\b/i;
-  return /\bsøndag\b/i;
+  // Ekshaustiv map over alle ukedager (man–søn). Record<DayKey, …> gjør at tsc
+  // tvinger fullstendighet hvis DayKey utvides videre.
+  const patterns: Record<DayKey, RegExp> = {
+    mandag: /\bmandag\b/i,
+    tirsdag: /\btirsdag\b/i,
+    onsdag: /\bonsdag\b/i,
+    torsdag: /\btorsdag\b/i,
+    fredag: /\bfredag\b/i,
+    lørdag: /\blørdag\b/i,
+    søndag: /\bsøndag\b/i,
+  };
+  return patterns[day];
 }
 
 function titleStructuralViolations(title: string): string[] {

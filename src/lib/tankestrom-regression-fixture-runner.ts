@@ -19,7 +19,17 @@ import { buildCupWeekendDayBlob, filterClockTimesOwnedByCupDay } from "@/lib/cup
 import { resolveCupDayTiming } from "@/lib/cup-resolve-day-timing";
 import { parseScopedAttendanceOffsetMinutes } from "@/lib/activity-duration";
 
-export type DayKey = "fredag" | "lørdag" | "søndag";
+// Typealias utvidet til alle ukedager for eval-/type-kompatibilitet (man–søn).
+// Selve fixture-runneren itererer fortsatt kun helgedager (se `days` i runTankestromFixture);
+// dette er en ren type-utvidelse uten endring i runtime-oppførsel.
+export type DayKey =
+  | "mandag"
+  | "tirsdag"
+  | "onsdag"
+  | "torsdag"
+  | "fredag"
+  | "lørdag"
+  | "søndag";
 export type TimePrecision = "exact" | "start_only" | "date_only" | "time_window";
 
 export type RegressionChild = {
@@ -295,7 +305,9 @@ export function runTankestromFixture(
   const parentTitle = inferParentTitle(text);
   const global = extractGlobalCupScheduleTimesByDay(text);
   const sentences = splitSentences(text);
-  const days: DayKey[] = ["fredag", "lørdag", "søndag"];
+  // Runneren produserer fortsatt kun helgedager; `as const` gir loop-variabelen den smale
+  // CupWeekendDayKey-typen som cup-hjelpefunksjonene krever, mens RegressionChild.day er vid (man–søn).
+  const days = ["fredag", "lørdag", "søndag"] as const;
   const children: RegressionChild[] = [];
   const highlightStyle = normalizeActivityHighlightStyle(options?.category);
 

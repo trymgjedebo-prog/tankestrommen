@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-export type DayKey = "fredag" | "lørdag" | "søndag";
+export type DayKey =
+  | "mandag"
+  | "tirsdag"
+  | "onsdag"
+  | "torsdag"
+  | "fredag"
+  | "lørdag"
+  | "søndag";
 export type TimePrecision = "exact" | "start_only" | "date_only" | "time_window";
 
 export type ForbiddenHighlightRule = {
