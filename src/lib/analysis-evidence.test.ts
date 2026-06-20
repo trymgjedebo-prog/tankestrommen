@@ -158,4 +158,45 @@ describe("buildAnalysisEvidenceReport (Vårcup / Høstcup)", () => {
     expect(h?.sourceQuote?.toLowerCase()).toContain("10:00");
     expect(["confirmed", "needs_review", "tentative"]).toContain(h?.validation ?? "");
   });
+
+  it("Søndag med eksplisitt, bekreftet program skal ikke nedgraderes til tentativ", () => {
+    // Ren søndag uten betinget/foreløpig-språk (ingen «foreløpig», «dersom», «sluttspill»,
+    // «kampoppsett kommer senere» osv.). Symmetrisk grense til søndag-regelen: når programmet
+    // ER endelig og eksplisitt i kilden, skal tidene bekreftes — ikke nedgraderes navnebasert.
+    const corpus = [
+      "Høstcupen håndball 2026.",
+      "Søndag 20. september: kl. 09:00 Første kamp, kl. 11:00 Andre kamp.",
+    ].join("\n");
+    const result: AIAnalysisResult = {
+      title: "Høstcupen håndball 2026",
+      schedule: [],
+      scheduleByDay: [
+        day({
+          dayLabel: "søndag",
+          date: "20. september 2026",
+          highlights: ["09:00 Første kamp", "11:00 Andre kamp"],
+        }),
+      ],
+      location: null,
+      description: "",
+      category: "arrangement",
+      targetGroup: null,
+      organizer: null,
+      contactPerson: null,
+      sourceUrl: null,
+      confidence: 0.9,
+      extractedText: { raw: corpus, language: "no", confidence: 1 },
+    };
+    const report = buildAnalysisEvidenceReport(buildAnalysisCorpus(result), result);
+    const sun = report.perDay.find((d) => /søndag/i.test(String(d.dayLabel)));
+    // Begge eksplisitte søndagstider skal være bekreftet.
+    expect(sun?.highlights.length).toBe(2);
+    expect(sun?.highlights.every((h) => h.validation === "confirmed")).toBe(true);
+    // Tidene skal ligge i confirmedFacts ...
+    expect(report.confirmedFacts.some((f) => f.highlightText.includes("09:00"))).toBe(true);
+    expect(report.confirmedFacts.some((f) => f.highlightText.includes("11:00"))).toBe(true);
+    // ... og verken i tentativeFacts eller unsupportedCandidates.
+    expect(report.tentativeFacts.some((f) => /09:00|11:00/.test(f.highlightText))).toBe(false);
+    expect(report.unsupportedCandidates.some((u) => /09:00|11:00/.test(u.highlightText))).toBe(false);
+  });
 });
