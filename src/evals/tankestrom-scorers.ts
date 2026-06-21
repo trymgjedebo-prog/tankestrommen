@@ -466,6 +466,30 @@ function hhmmToMinutes(hhmm: string): number | null {
   return Number(m[1]) * 60 + Number(m[2]);
 }
 
+/** Beregnet/forventet starttid per dag (HH:MM). No-op når `startByDay` ikke er satt. */
+export function scoreStartTime(
+  bundle: RegressionPortalBundle,
+  expected: TankestromExpected,
+): ScorerResult {
+  const entries = Object.entries(expected.startByDay ?? {}) as [DayKey, string][];
+  if (entries.length === 0) return { score: 1, failures: [] };
+  const failures: string[] = [];
+  const checks: boolean[] = [];
+  for (const [day, wantStart] of entries) {
+    const child = childByDay(bundle, day);
+    if (!child) {
+      failures.push(`[${day}] mangler dag for startTime`);
+      checks.push(false);
+      continue;
+    }
+    const ok = child.start === wantStart;
+    checks.push(ok);
+    if (!ok) failures.push(`[${day}] startTime forventet ${wantStart}, fikk ${child.start ?? "null"}`);
+  }
+  if (checks.length === 0) return { score: 1, failures: [] };
+  return { score: checks.filter(Boolean).length / checks.length, failures };
+}
+
 export function scoreInferredEndTime(
   bundle: RegressionPortalBundle,
   expected: TankestromExpected,
@@ -635,6 +659,7 @@ export function runAllTankestromScorers(
     ["bringItemsCorrect", scoreBringItemsCorrect(bundle, expected)],
     ["deadlineCorrect", scoreDeadlineCorrect(bundle, expected)],
     ["noDeadlineInProgramHighlights", scoreNoDeadlineInProgramHighlights(bundle)],
+    ["startTimeCorrect", scoreStartTime(bundle, expected)],
     ["inferredEndCorrect", scoreInferredEndTime(bundle, expected)],
     ["durationMinutesCorrect", scoreDurationMinutes(bundle, expected)],
     ["endTimeSourceCorrect", scoreEndTimeSource(bundle, expected)],

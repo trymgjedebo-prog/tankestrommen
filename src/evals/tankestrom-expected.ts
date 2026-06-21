@@ -57,6 +57,11 @@ export type TankestromExpected = {
     >
   >;
   durationMinutesByDay?: Partial<Record<DayKey, number>>;
+  /**
+   * Forventet (ev. beregnet) starttid (HH:MM) per dag — f.eks. oppmøte = første kamp − offset.
+   * No-op i scoring når udefinert.
+   */
+  startByDay?: Partial<Record<DayKey, string>>;
   /** Klokkeslett som aldri skal dukke opp som program-highlight (f.eks. Spond-frist). */
   forbiddenProgramTimes?: string[];
   /** Hard øvre grense på antall program-barn (hallucination guard). No-op når udefinert. */

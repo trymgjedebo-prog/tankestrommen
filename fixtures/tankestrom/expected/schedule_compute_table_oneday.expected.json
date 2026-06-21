@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "cup",
+  "parentCount": 1,
+  "childCount": 1,
+  "childTitles": ["Lørdagscup – lørdag"],
+  "highlightsByDay": {
+    "lørdag": ["09:20 Første kamp", "10:50 Andre kamp"]
+  },
+  "requiredBringItems": [],
+  "forbiddenInNotes": [],
+  "forbiddenHighlights": [],
+  "tentativeDays": { "lørdag": false },
+  "timePrecisionByDay": { "lørdag": "exact" },
+  "requiredTasks": [],
+  "startByDay": { "lørdag": "08:30" },
+  "durationMinutesByDay": { "lørdag": 40 },
+  "inferredEndByDay": { "lørdag": "12:00" },
+  "maxChildCount": 1,
+  "maxTaskCount": 0
+}

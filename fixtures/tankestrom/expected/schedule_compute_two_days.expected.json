@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "category": "cup",
+  "parentCount": 1,
+  "childCount": 2,
+  "childTitles": ["Helgecup – fredag", "Helgecup – lørdag"],
+  "highlightsByDay": {
+    "fredag": ["16:40 Første kamp"],
+    "lørdag": ["08:30 Første kamp", "10:00 Andre kamp"]
+  },
+  "requiredBringItems": [],
+  "forbiddenInNotes": [],
+  "forbiddenHighlights": [
+    { "day": "fredag", "includes": "08:30" },
+    { "day": "fredag", "includes": "10:00" },
+    { "day": "lørdag", "includes": "16:40" }
+  ],
+  "tentativeDays": { "fredag": false, "lørdag": false },
+  "timePrecisionByDay": { "fredag": "exact", "lørdag": "exact" },
+  "requiredTasks": [],
+  "startByDay": { "fredag": "16:40", "lørdag": "08:30" },
+  "durationMinutesByDay": { "fredag": 45, "lørdag": 45 },
+  "inferredEndByDay": { "fredag": "17:55", "lørdag": "11:15" },
+  "maxChildCount": 2,
+  "maxTaskCount": 0
+}
