@@ -76,48 +76,50 @@ describe("schedule time computation — gjeldende oppførsel (grønt i dag)", ()
   });
 });
 
-describe("schedule time computation — ØNSKET fasit (feiler i dag = produksjonsgap)", () => {
-  // GAP A — oppmøte-offset «50 minutter før første kamp» gir ikke beregnet starttid.
-  it.fails("F1: start beregnes fra oppmøte-offset (08:30 = 09:20 − 50 min)", () => {
+describe("schedule time computation — beregnet start/varighet/slutt (fikset i denne PR-en)", () => {
+  // Oppmøte-offset «50 minutter før første kamp» → beregnet starttid.
+  it("F1: start beregnes fra oppmøte-offset (08:30 = 09:20 − 50 min)", () => {
     const b = run("schedule_compute_text_oneday");
     const exp = fasit("schedule_compute_text_oneday");
     expect(childByDay(b, "lørdag")?.start).toBe(exp.startByDay?.lørdag); // 08:30
   });
 
-  // GAP B — kampvarighet «Kampene varer 40 minutter» parses ikke (kun «N x M min» i dag).
-  it.fails("F1: activityDurationMinutes = 40", () => {
+  // Kampvarighet «Kampene varer 40 minutter».
+  it("F1: activityDurationMinutes = 40", () => {
     const b = run("schedule_compute_text_oneday");
     const exp = fasit("schedule_compute_text_oneday");
     expect(childByDay(b, "lørdag")?.durationMinutes).toBe(exp.durationMinutesByDay?.lørdag); // 40
   });
 
-  // GAP C — sluttid = siste kamp + varighet + etterbuffer.
-  it.fails("F1: end = 12:00 (10:50 + 40 min kamp + 30 min buffer)", () => {
+  // Sluttid = siste kamp + varighet + etterbuffer.
+  it("F1: end = 12:00 (10:50 + 40 min kamp + 30 min buffer)", () => {
     const b = run("schedule_compute_text_oneday");
     const exp = fasit("schedule_compute_text_oneday");
     expect(childByDay(b, "lørdag")?.end).toBe(exp.inferredEndByDay?.lørdag); // 12:00
   });
 
-  it.fails("F2 tabell: end = 12:00 fra samme beregningsprinsipp", () => {
+  it("F2 tabell: end = 12:00 fra samme beregningsprinsipp", () => {
     const b = run("schedule_compute_table_oneday");
     const exp = fasit("schedule_compute_table_oneday");
     expect(childByDay(b, "lørdag")?.end).toBe(exp.inferredEndByDay?.lørdag); // 12:00
   });
 
-  it.fails("F3 fredag: end = 17:55 (16:40 + 45 + 30)", () => {
+  it("F3 fredag: end = 17:55 (16:40 + 45 + 30)", () => {
     const b = run("schedule_compute_two_days");
     const exp = fasit("schedule_compute_two_days");
     expect(childByDay(b, "fredag")?.end).toBe(exp.inferredEndByDay?.fredag); // 17:55
   });
 
-  it.fails("F3 lørdag: end = 11:15 (10:00 + 45 + 30)", () => {
+  it("F3 lørdag: end = 11:15 (10:00 + 45 + 30)", () => {
     const b = run("schedule_compute_two_days");
     const exp = fasit("schedule_compute_two_days");
     expect(childByDay(b, "lørdag")?.end).toBe(exp.inferredEndByDay?.lørdag); // 11:15
   });
+});
 
-  // GAP D — frist «Svar i Spond innen tirsdag kl. 20:00»: 20:00 lekker inn i programmet,
-  // og task-dueTime fanger feil tid (første kamp i stedet for 20:00).
+describe("schedule time computation — gjenstående gap (Spond/deadline → egen PR: fix/spond-deadline-time-separation)", () => {
+  // «Svar i Spond innen tirsdag kl. 20:00»: 20:00 lekker inn i programmet, og task-dueTime
+  // fanger feil tid (første kamp i stedet for 20:00). Fikses i fix/spond-deadline-time-separation.
   it.fails("F4: frist-tid 20:00 skal IKKE være program-highlight", () => {
     const b = run("schedule_compute_deadline_separation");
     expect(highlightsJoined(b, "lørdag")).not.toContain("20:00");

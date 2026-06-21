@@ -83,9 +83,23 @@ export function parseStructuredMatchDuration(text: string): DurationEvidence | n
   const mult =
     /\b(\d{1,2})\s*x\s*(\d{1,2})\s*min(?:utter)?\b/.exec(normalized) ||
     /\b(\d{1,2})\s*omganger?[^\d]{0,14}(\d{1,2})\s*min(?:utter)?\b/.exec(normalized);
-  if (!mult) return null;
-  const periodCount = Number(mult[1]);
-  const periodMinutes = Number(mult[2]);
+  // Fallback: «(Én) kamp(ene) varer (ca.) N minutter» → én periode på N minutter.
+  const single = mult
+    ? null
+    : /\bkamp(?:ene|en|er)?\b[^.!?\n]{0,30}?\bvarer\b[^.!?\n]{0,20}?(\d{1,3})\s*min(?:utter)?\b/.exec(
+        normalized,
+      );
+  let periodCount: number;
+  let periodMinutes: number;
+  if (mult) {
+    periodCount = Number(mult[1]);
+    periodMinutes = Number(mult[2]);
+  } else if (single) {
+    periodCount = 1;
+    periodMinutes = Number(single[1]);
+  } else {
+    return null;
+  }
   if (!Number.isFinite(periodCount) || !Number.isFinite(periodMinutes) || periodCount <= 0 || periodMinutes <= 0) {
     return null;
   }
@@ -100,7 +114,8 @@ export function parseStructuredMatchDuration(text: string): DurationEvidence | n
   const totalMinutes = periodCount * periodMinutes + breakMinutes;
   const sourceQuote =
     findSourceLine(text, /\b\d{1,2}\s*x\s*\d{1,2}\s*min/i) ??
-    findSourceLine(text, /\b\d{1,2}\s*omganger?/i);
+    findSourceLine(text, /\b\d{1,2}\s*omganger?/i) ??
+    findSourceLine(text, /\bvarer\s+\d{1,3}\s*min/i);
   return {
     totalMinutes,
     periodCount,
@@ -237,6 +252,19 @@ export function parsePostEventBufferMinutes(text: string): BufferEvidence | null
       estimated: /\b(?:ca\.?|omtrent)\b/.test(halfAfter[0] ?? ""),
     };
   }
+  // Tall-først: «N minutter etter siste kamp (er vi ferdige)».
+  const numberFirst =
+    /\b(\d{1,3})\s*min(?:utter)?\s+etter\s+(?:siste\s+kamp|kampen|kampslutt)\b/.exec(normalized);
+  if (numberFirst) {
+    const n = Number(numberFirst[1]);
+    if (Number.isFinite(n) && n > 0 && n <= 180) {
+      return {
+        minutes: n,
+        sourceQuote: findSourceLine(text, /\d{1,3}\s*min(?:utter)?\s+etter\s+(?:siste\s+kamp|kampen|kampslutt)/i),
+        estimated: false,
+      };
+    }
+  }
   const m =
     /\b(?:ikke\s+ute\s+for|ikke\s+ferdig\s+for|etter\s+kampen|etter\s+siste\s+kamp)\b[^.!?\n]{0,80}?(\d{1,3})\s*min(?:utter)?\b/.exec(
       normalized,
@@ -271,7 +299,7 @@ export function parseScopedAttendanceOffsetMinutes(dayBlob: string): AttendanceO
     }
   }
   const beforeStart =
-    /\b(?:m[oø]t(?:er)?(?:\s+ferdig\s+skiftet)?|oppm[oø]te)\b[^.!?\n]{0,70}?(\d{1,3})\s*min(?:utter)?\s*f[øo]r\s+(?:kampstart|kamp)\b/.exec(
+    /\b(?:m[oø]t(?:er)?(?:\s+ferdig\s+skiftet)?|oppm[oø]te)\b[^.!?\n]{0,70}?(\d{1,3})\s*min(?:utter)?\s*f[øo]r\s+(?:kampstart|(?:f[øo]rste\s+|andre\s+|tredje\s+)?kamp)\b/.exec(
       normalized,
     ) ||
     /\b(\d{1,3})\s*min(?:utter)?\s*f[øo]r\s+kampstart\b/.exec(normalized);
