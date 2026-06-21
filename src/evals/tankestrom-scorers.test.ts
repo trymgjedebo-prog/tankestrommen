@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { runAllTankestromScorers, scoreNoHallucinatedEvents } from "./tankestrom-scorers";
+import {
+  runAllTankestromScorers,
+  scoreNoHallucinatedEvents,
+  scoreStartTime,
+} from "./tankestrom-scorers";
 import type { TankestromExpected } from "./tankestrom-expected";
 import type { RegressionPortalBundle } from "@/lib/tankestrom-regression-fixture-runner";
 
@@ -70,6 +74,43 @@ describe("scoreNoHallucinatedEvents", () => {
         ],
       }),
       expectedWith({ maxChildCount: 0, maxTaskCount: 0 }),
+    );
+    expect(r.score).toBe(0);
+    expect(r.failures.length).toBeGreaterThan(0);
+  });
+});
+
+describe("scoreStartTime", () => {
+  const dayChild = (day: "fredag" | "lørdag", start: string | null) => ({
+    day,
+    title: `X – ${day}`,
+    date: "2026-06-13",
+    start,
+    timePrecision: "start_only" as const,
+    tentative: false,
+    highlights: [],
+    bringItems: [],
+    notes: null,
+  });
+
+  it("no-op (score 1) når startByDay ikke er satt", () => {
+    const r = scoreStartTime(bundleWith({ children: [dayChild("lørdag", "09:20")] }), expectedWith({}));
+    expect(r.score).toBe(1);
+    expect(r.failures).toEqual([]);
+  });
+
+  it("grønt når start matcher forventet per dag", () => {
+    const r = scoreStartTime(
+      bundleWith({ children: [dayChild("lørdag", "08:30")] }),
+      expectedWith({ startByDay: { lørdag: "08:30" } }),
+    );
+    expect(r.score).toBe(1);
+  });
+
+  it("feiler når start avviker fra forventet (beregnet starttid mangler)", () => {
+    const r = scoreStartTime(
+      bundleWith({ children: [dayChild("lørdag", "09:20")] }),
+      expectedWith({ startByDay: { lørdag: "08:30" } }),
     );
     expect(r.score).toBe(0);
     expect(r.failures.length).toBeGreaterThan(0);
