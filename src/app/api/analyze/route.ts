@@ -7,6 +7,7 @@ import {
 import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
+import { looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
 import type {
   AnalysisSourceHint,
   AIAnalysisResult,
@@ -2908,6 +2909,9 @@ function looksLikeCupOrSpondBroadcast(result: AIAnalysisResult): boolean {
   ].join("\n");
   const n = normalizeNorwegianLetters(blob);
   if (/\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) return false;
+  // Skole-/klasseplan (klassekoder som 2STA/2STB + skoleord, uten sportssignal) er ikke cup —
+  // hindrer at «oppmøte»/«samling» alene drar en klasseplan inn i cup-/kamp-stien.
+  if (looksLikeSchoolClassSchedule(blob)) return false;
   // Ikke bruk «spond» alene: foreldre/dugnad-meldinger med Svar i Spond er ikke cup-kringkasting.
   return /\b(cup|turnering|stevne|sluttspill|seriekamp|idrett|fotball|håndball|oppm[oø]te|samling|pulje|finale|bronse|semifinale)\b/.test(
     n,

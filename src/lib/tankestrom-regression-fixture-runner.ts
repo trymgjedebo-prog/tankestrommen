@@ -19,6 +19,7 @@ import { buildCupWeekendDayBlob, filterClockTimesOwnedByCupDay } from "@/lib/cup
 import { resolveCupDayTiming } from "@/lib/cup-resolve-day-timing";
 import { parseScopedAttendanceOffsetMinutes } from "@/lib/activity-duration";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
+import { looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
 
 // Typealias utvidet til alle ukedager for eval-/type-kompatibilitet (man–søn).
 // Selve fixture-runneren itererer fortsatt kun helgedager (se `days` i runTankestromFixture);
@@ -403,7 +404,11 @@ export function runTankestromFixture(
   // slik at fristlinjer i helge-fixtures ikke gir falske hverdags-barn.
   const days: DayKey[] = ["fredag", "lørdag", "søndag", ...detectEventWeekdays(text)];
   const children: RegressionChild[] = [];
-  const highlightStyle = normalizeActivityHighlightStyle(options?.category);
+  // Skole-/klasseplan tvinges til nøytral («general») stil uansett category, slik at
+  // klasseplan-tider aldri får cup-/kamp-labels.
+  const highlightStyle: "cup" | "general" = looksLikeSchoolClassSchedule(text)
+    ? "general"
+    : normalizeActivityHighlightStyle(options?.category);
 
   for (const day of days) {
     const date = parseDayDate(text, day);
