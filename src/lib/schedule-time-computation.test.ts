@@ -16,6 +16,8 @@ import {
   type DayKey,
 } from "@/evals/tankestrom-expected";
 import {
+  parseDeadlineTask,
+  parseVolunteerHelpTasks,
   runTankestromFixture,
   type RegressionPortalBundle,
 } from "@/lib/tankestrom-regression-fixture-runner";
@@ -117,18 +119,63 @@ describe("schedule time computation — beregnet start/varighet/slutt (fikset i 
   });
 });
 
-describe("schedule time computation — gjenstående gap (Spond/deadline → egen PR: fix/spond-deadline-time-separation)", () => {
-  // «Svar i Spond innen tirsdag kl. 20:00»: 20:00 lekker inn i programmet, og task-dueTime
-  // fanger feil tid (første kamp i stedet for 20:00). Fikses i fix/spond-deadline-time-separation.
-  it.fails("F4: frist-tid 20:00 skal IKKE være program-highlight", () => {
+describe("Spond/deadline-separasjon + task-intent (fikset i denne PR-en)", () => {
+  it("F4: frist-tid 20:00 er IKKE program-highlight, ekte kamptider bevart", () => {
     const b = run("schedule_compute_deadline_separation");
     expect(highlightsJoined(b, "lørdag")).not.toContain("20:00");
+    expect(highlightsJoined(b, "lørdag")).toContain("09:20");
+    expect(highlightsJoined(b, "lørdag")).toContain("10:50");
   });
 
-  it.fails("F4: Spond-task dueTime = 20:00 (ikke første kamptid)", () => {
+  it("F4: deadline-task dueTime = 20:00 (ikke første kamptid) og taskIntent must_do", () => {
     const b = run("schedule_compute_deadline_separation");
     const exp = fasit("schedule_compute_deadline_separation");
     const spond = b.tasks.find((t) => /spond/i.test(t.title));
     expect(spond?.dueTime).toBe(exp.requiredTasks[0]?.dueTime); // 20:00
+    expect(spond?.taskIntent).toBe("must_do");
+  });
+
+  it("F4: fristtid 20:00 påvirker ikke start/slutt-beregning for cupdagen", () => {
+    const b = run("schedule_compute_deadline_separation");
+    const lor = childByDay(b, "lørdag");
+    expect(lor?.start).toBe("09:20"); // første kamp, ikke 20:00
+    expect(lor?.end ?? "").not.toBe("20:00");
+  });
+});
+
+describe("deadline task parsing — fristformuleringer (parseDeadlineTask)", () => {
+  const cases: Array<[string, string]> = [
+    ["Svar i Spond innen tirsdag kl. 20", "20:00"],
+    ["Svar i Spond innen tirsdag kl. 20:00", "20:00"],
+    ["Svar senest kl. 20", "20:00"],
+    ["Frist for påmelding er kl. 20", "20:00"],
+    ["Gi beskjed innen kl. 20", "20:00"],
+  ];
+  for (const [text, dueTime] of cases) {
+    it(`«${text}» → task dueTime ${dueTime}, taskIntent must_do`, () => {
+      const task = parseDeadlineTask(text, "Lørdagscup");
+      expect(task).not.toBeNull();
+      expect(task?.dueTime).toBe(dueTime);
+      expect(task?.taskIntent).toBe("must_do");
+    });
+  }
+});
+
+describe("volunteer task parsing — can_help (parseVolunteerHelpTasks)", () => {
+  const cases = [
+    "Kan noen kutte frukt?",
+    "Vi trenger noen som kan ta med frukt",
+    "Hvem kan hjelpe med kake?",
+  ];
+  for (const text of cases) {
+    it(`«${text}» → task taskIntent can_help`, () => {
+      const tasks = parseVolunteerHelpTasks(text);
+      expect(tasks.length).toBeGreaterThan(0);
+      expect(tasks[0]?.taskIntent).toBe("can_help");
+    });
+  }
+
+  it("frist-/svarlinjer blir IKKE can_help (de er must_do)", () => {
+    expect(parseVolunteerHelpTasks("Svar i Spond innen tirsdag kl. 20:00")).toHaveLength(0);
   });
 });

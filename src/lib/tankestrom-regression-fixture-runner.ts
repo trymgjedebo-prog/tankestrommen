@@ -18,6 +18,7 @@ import {
 import { buildCupWeekendDayBlob, filterClockTimesOwnedByCupDay } from "@/lib/cup-day-source-blob";
 import { resolveCupDayTiming } from "@/lib/cup-resolve-day-timing";
 import { parseScopedAttendanceOffsetMinutes } from "@/lib/activity-duration";
+import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 
 // Typealias utvidet til alle ukedager for eval-/type-kompatibilitet (man–søn).
 // Selve fixture-runneren itererer fortsatt kun helgedager (se `days` i runTankestromFixture);
@@ -48,14 +49,20 @@ export type RegressionChild = {
   notes: string | null;
 };
 
+export type { TaskIntent };
+
+export type RegressionTask = {
+  title: string;
+  date: string | null;
+  dueTime: string | null;
+  /** must_do: svar/frist/påmelding. can_help: frivillig «kan noen …». No-op-felt i eldre scorere. */
+  taskIntent?: TaskIntent;
+};
+
 export type RegressionPortalBundle = {
   parentTitle: string;
   children: RegressionChild[];
-  tasks: Array<{
-    title: string;
-    date: string | null;
-    dueTime: string | null;
-  }>;
+  tasks: RegressionTask[];
 };
 
 function normalizeSpace(input: string): string {
@@ -293,25 +300,49 @@ function parseMonthToken(raw: string): string | null {
   return monthMap[normalizeNorwegianLetters(raw)] ?? null;
 }
 
-function parseSpondDeadlineTask(
-  text: string,
-  parentTitle: string,
-): { title: string; date: string | null; dueTime: string | null } | null {
-  const n = normalizeNorwegianLetters(text);
-  if (!/\bspond\b/.test(n) || !/\b(svar|gi\s+beskjed|meld\s+fra)\b/.test(n)) return null;
-  const deadlineBlobMatch =
-    /\b(?:svar|gi\s+beskjed|meld\s+fra)\b[\s\S]{0,180}?\bspond\b[\s\S]{0,180}?\b(?:senest|frist)\b[\s\S]{0,180}/i.exec(
-      text,
-    ) ||
-    /\bspond\b[\s\S]{0,180}?\b(?:senest|frist)\b[\s\S]{0,180}/i.exec(text);
-  const blob = deadlineBlobMatch?.[0] ?? text;
+/** Fjerner administrative frist-/svarlinjer (uten aktivitetssignal) fra en blob. */
+function stripAdminDeadlineLines(blob: string): string {
+  return blob
+    .split(/\n+/)
+    .filter((line) => !lineLooksLikeAdministrativeDeadline(normalizeSpace(line)))
+    .join("\n");
+}
 
-  const dueM = /\bkl\.?\s*(\d{1,2})[.:](\d{2})\b/i.exec(blob);
-  const dueTime = dueM ? `${String(Number(dueM[1])).padStart(2, "0")}:${dueM[2]}` : null;
+/**
+ * Frist-/svar-task (must_do). Gjenkjenner Spond, men også «innen/senest», «frist for påmelding»
+ * og «gi beskjed innen» uten Spond. Fristtiden hentes fra selve frist-linja
+ * (`lineLooksLikeAdministrativeDeadline`) — ikke fra første programtid i teksten — og «kl. 20»
+ * tolkes som «20:00».
+ */
+export function parseDeadlineTask(text: string, parentTitle: string): RegressionTask | null {
+  const n = normalizeNorwegianLetters(text);
+  const hasVerb = /\b(svar|gi\s+beskjed|meld\s+fra)\b/.test(n);
+  const isDeadline =
+    (/\bspond\b/.test(n) && hasVerb) ||
+    (hasVerb && /\b(innen|senest)\b/.test(n)) ||
+    /\bfrist\s+for\s+p[aå]melding\b/.test(n) ||
+    /\bp[aå]meldingsfrist\b/.test(n);
+  if (!isDeadline) return null;
+
+  const lines = text.split(/\n+/).map((l) => normalizeSpace(l)).filter(Boolean);
+  const deadlineLine =
+    lines.find((l) => lineLooksLikeAdministrativeDeadline(l)) ??
+    lines.find((l) => /\b(?:frist|p[aå]melding)\b/i.test(l)) ??
+    text;
+
+  // «kl. 20» → «20:00», «kl. 20:00» → «20:00». Hentet fra frist-linja, ikke første programtid.
+  const dueM = /\bkl\.?\s*(\d{1,2})(?:[.:](\d{2}))?\b/i.exec(deadlineLine);
+  let dueTime: string | null = null;
+  if (dueM) {
+    const h = Number(dueM[1]);
+    if (Number.isFinite(h) && h >= 0 && h <= 23) {
+      dueTime = `${String(h).padStart(2, "0")}:${dueM[2] ?? "00"}`;
+    }
+  }
 
   const year = Number((/\b(20\d{2})\b/.exec(text) ?? [])[1] ?? 2026);
   const dateM = /\b(?:mandag|tirsdag|onsdag|torsdag|fredag|l[øo]rdag|s[øo]ndag)\s+(\d{1,2})\.\s*([a-zæøå]+)/i.exec(
-    blob,
+    deadlineLine,
   );
   let date: string | null = null;
   if (dateM) {
@@ -322,11 +353,40 @@ function parseSpondDeadlineTask(
     }
   }
 
-  return {
-    title: `Svar i Spond om deltakelse i ${parentTitle}`,
-    date,
-    dueTime,
-  };
+  const title = /\bspond\b/.test(n)
+    ? `Svar i Spond om deltakelse i ${parentTitle}`
+    : `Frist: svar om deltakelse i ${parentTitle}`;
+  return { title, date, dueTime, taskIntent: classifyTaskIntent(text) ?? "must_do" };
+}
+
+const VOLUNTEER_HELP_PATTERNS: RegExp[] = [
+  /\bkan\s+noen\b/,
+  /\bvi\s+trenger\s+noen\s+som\s+kan\b/,
+  /\bhvem\s+kan\s+(?:hjelpe|ta\s+med|bidra|stille|lage|bake)\b/,
+  /\bnoen\s+som\s+kan\s+ta\s+med\b/,
+];
+
+/**
+ * Frivillige oppgaver («Kan noen kutte frukt?», «Vi trenger noen som kan ta med frukt»,
+ * «Hvem kan hjelpe med kake?») → task med taskIntent can_help. Frist-/svarlinjer hoppes over
+ * (de er must_do, ikke can_help).
+ */
+export function parseVolunteerHelpTasks(text: string): RegressionTask[] {
+  const out: RegressionTask[] = [];
+  const seen = new Set<string>();
+  for (const raw of text.split(/(?<=[.!?])\s+|\n+/)) {
+    const sentence = normalizeSpace(raw);
+    if (!sentence) continue;
+    if (lineLooksLikeAdministrativeDeadline(sentence)) continue;
+    const sn = normalizeNorwegianLetters(sentence);
+    if (!VOLUNTEER_HELP_PATTERNS.some((re) => re.test(sn))) continue;
+    const title = sentence.replace(/\s*\?\s*$/, "").trim();
+    const key = normalizeNorwegianLetters(title);
+    if (!title || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ title, date: null, dueTime: null, taskIntent: classifyTaskIntent(sentence) ?? "can_help" });
+  }
+  return out;
 }
 
 export function runTankestromFixture(
@@ -362,6 +422,9 @@ export function runTankestromFixture(
         : cupDaySectionBlob
           ? weekendBlob
           : buildGeneralDaySourceBlob(text, day);
+    // Programtider hentes fra blob UTEN administrative frist-/svarlinjer, slik at f.eks.
+    // «Svar i Spond innen tirsdag kl. 20:00» ikke lekker inn som kamptid.
+    const programTimeBlob = stripAdminDeadlineLines(sourceBlob);
 
     const conditional = isConditionalTournamentTextForDay(sourceBlob, day);
     const twFromBlob = parseCupTimeWindow(sourceBlob);
@@ -377,7 +440,7 @@ export function runTankestromFixture(
       day === "fredag" ? global.fredag : day === "lørdag" ? global.lordag : global.sondag;
 
     if (cupDaySectionBlob && !conditional && !rawTimeWindow) {
-      const blobTimes = extractOrderedHhmmTimesFromText(sourceBlob);
+      const blobTimes = extractOrderedHhmmTimesFromText(programTimeBlob);
       const ownedBlobTimes = filterClockTimesOwnedByCupDay(blobTimes, text, day, sourceBlob);
       if (ownedBlobTimes.length > 0) {
         const merged = [...dayTimes, ...ownedBlobTimes];
@@ -395,7 +458,7 @@ export function runTankestromFixture(
       parsePerMatchOffset(text, day);
 
     if (highlightStyle === "general" && !rawTimeWindow && dayTimes.length === 0) {
-      const fromBlob = extractOrderedHhmmTimesFromText(sourceBlob);
+      const fromBlob = extractOrderedHhmmTimesFromText(programTimeBlob);
       dayTimes = attendanceExplicit
         ? fromBlob.filter((t) => t !== attendanceExplicit)
         : fromBlob;
@@ -517,8 +580,9 @@ export function runTankestromFixture(
   }
 
   const tasks: RegressionPortalBundle["tasks"] = [];
-  const spondTask = parseSpondDeadlineTask(text, parentTitle);
-  if (spondTask) tasks.push(spondTask);
+  const deadlineTask = parseDeadlineTask(text, parentTitle);
+  if (deadlineTask) tasks.push(deadlineTask);
+  tasks.push(...parseVolunteerHelpTasks(text));
 
   return { parentTitle, children, tasks };
 }
