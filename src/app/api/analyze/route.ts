@@ -6,6 +6,7 @@ import {
 } from "@/lib/ai/analysis-model-router";
 import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
+import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 import type {
   AnalysisSourceHint,
   AIAnalysisResult,
@@ -2083,6 +2084,8 @@ type PortalTaskItem = {
     personId: string;
     title: string;
     notes?: string;
+    /** Deterministisk intent: must_do (svar/frist/påmelding) | can_help (frivillig). */
+    taskIntent?: TaskIntent;
   };
 };
 
@@ -2636,6 +2639,7 @@ function buildSecondaryPortalTaskCandidates(
         title: titleFin.title,
         notes: `Kanskje også relevant (sekundær forslagskandidat)\n\nKilde: ${trimSentence(line, 280)}`,
         ...(resolved.dueTime ? { dueTime: resolved.dueTime } : {}),
+        ...(classifyTaskIntent(line) ? { taskIntent: classifyTaskIntent(line) } : {}),
       },
     });
   }
@@ -4547,6 +4551,7 @@ async function buildProposalItems(
         title: title || "Oppgave",
         notes: result.title ? `Fra: ${result.title}` : undefined,
         ...(extras?.dueTime ? { dueTime: extras.dueTime } : {}),
+        ...(classifyTaskIntent(title) ? { taskIntent: classifyTaskIntent(title) } : {}),
       },
     };
   };
@@ -8643,6 +8648,7 @@ function buildHomeworkTaskItemsFromOverlay(
         personId: "pending",
         title: title || "Oppgave",
         notes,
+        ...(classifyTaskIntent(title) ? { taskIntent: classifyTaskIntent(title) } : {}),
       },
     });
   };
