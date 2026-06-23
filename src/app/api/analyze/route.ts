@@ -802,6 +802,14 @@ function stripLeadingArrangementTitleNoise(title: string): string {
         /^(informasjon|info|beskjed|oppdatering|påminnelse|paminnelse|viktig|nytt)\s*[:\-–]\s*/i,
         "",
       )
+      // Meldingsoverskrifter uten kolon: «Oppdatert info om X», «Ny info om X»,
+      // «Endelig/Oppdatert/Nytt kampoppsett for X», «Info(rmasjon) om X», «Oppdatering om X».
+      .replace(
+        /^(oppdatert|oppdaterte|ny|nye|nytt|endelig|reviderte?|viktig)\s+(info(?:rmasjon)?|program|kampoppsett|oppsett|beskjed|melding)\s+(?:om|for|angående|ang\.?)\s+/i,
+        "",
+      )
+      .replace(/^(info(?:rmasjon)?|beskjed|melding|oppdatering)\s+(?:om|angående)\s+/i, "")
+      .replace(/^(oppdatert|oppdatering)\s+(?:om|angående)\s+/i, "")
       .trim(),
   );
 }
