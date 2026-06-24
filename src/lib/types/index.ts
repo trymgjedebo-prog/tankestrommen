@@ -84,6 +84,15 @@ export interface SchoolProfileLesson {
   customLabel: string | null;
   start: string;
   end: string;
+  /** Klasserom/lokale når synlig i kilden (f.eks. «203», «Gymsal»), ellers utelatt/null. */
+  room?: string | null;
+  /** Lærer når synlig i kilden (navn eller initialer), ellers utelatt/null. */
+  teacher?: string | null;
+  /**
+   * Oppløst spor/variant for valgfag/språkfag (f.eks. «Tysk», «Programmering»).
+   * Speiler Foreldre-Appens `lessonSubcategory`. Utelates når faget ikke har spor.
+   */
+  lessonSubcategory?: string | null;
   /**
    * Valgfritt: hvis samme slot inneholder to valgfag/spor, legg dem her slik at
    * Foreldre-App kan matche til riktig fag for eleven. Utelates når bare ett fag.
