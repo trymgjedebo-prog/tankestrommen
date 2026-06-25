@@ -5,8 +5,15 @@ export type PortalKnownPerson = {
   displayName: string;
 };
 
+/** Oppgave 6: minimal relevanskontekst fra klienten (utvides av 7/8 med fag/språkspor). */
+export type PortalRelevanceContext = {
+  /** Elevens klassekode, f.eks. «2STC». */
+  classCode?: string;
+};
+
 export type PortalImportContext = {
   knownPersons: PortalKnownPerson[];
+  relevanceContext?: PortalRelevanceContext;
 };
 
 export type PortalEventPersonMatchStatus =
@@ -52,6 +59,43 @@ export function parseKnownPersonsFromBody(raw: unknown): PortalKnownPerson[] {
     if (p) out.push(p);
   }
   return out;
+}
+
+/**
+ * Parser klientens valgfrie relevanskontekst. Aksepterer både objekt (JSON-body) og
+ * JSON-streng (multipart-felt). Returnerer undefined når ingen brukbar klasse finnes.
+ */
+export function parseRelevanceContextFromBody(
+  raw: unknown,
+): PortalRelevanceContext | undefined {
+  let val: unknown = raw;
+  if (typeof val === "string") {
+    const t = val.trim();
+    if (!t) return undefined;
+    try {
+      val = JSON.parse(t);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!val || typeof val !== "object" || Array.isArray(val)) return undefined;
+  const o = val as Record<string, unknown>;
+  const classCode = typeof o.classCode === "string" ? o.classCode.trim() : "";
+  if (!classCode) return undefined;
+  return { classCode };
+}
+
+/**
+ * Oppgave 6: når klienten sendte elevens klasse, gjør ukeplan-overlayens hovedkontekst
+ * klassepresis («Ukeplan for 2STC») i stedet for modellens brede targetGroup. Returnerer
+ * feltene som skal overstyres, eller null når ingen klasse er oppgitt.
+ */
+export function relevanceOverlayOverride(
+  relevanceContext: PortalRelevanceContext | undefined,
+): { classLabel: string; sourceTitle: string } | null {
+  const classCode = relevanceContext?.classCode?.trim();
+  if (!classCode) return null;
+  return { classLabel: classCode, sourceTitle: `Ukeplan for ${classCode}` };
 }
 
 export function resolvePortalEventPersonMatch(opts: {

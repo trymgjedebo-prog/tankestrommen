@@ -293,6 +293,63 @@ export function lineLooksLikeAdministrativeDeadline(line: string): boolean {
   return !activitySignal;
 }
 
+/**
+ * Gamle/utgåtte klokkeslett i endringsspråk («Fredagskampen er flyttet fra kl. 18:40 til …»,
+ * «kampen som tidligere var satt opp kl. 15:10 …», «endret fra kl. X»). Disse skal IKKE bli
+ * program-highlights eller telle som kamper — kun den nye tiden (etter «til») er gjeldende.
+ */
+export function extractMovedFromClockTimes(text: string): Set<string> {
+  const out = new Set<string>();
+  const add = (raw: string | undefined) => {
+    const m = raw ? /(\d{1,2})[.:](\d{2})/.exec(raw) : null;
+    if (m) out.add(`${String(Number(m[1])).padStart(2, "0")}:${m[2]}`);
+  };
+  const patterns = [
+    /\bflyttet\s+fra\s+(?:kl\.?\s*)?(\d{1,2}[.:]\d{2})/gi,
+    /\bendret\s+fra\s+(?:kl\.?\s*)?(\d{1,2}[.:]\d{2})/gi,
+    /\b(?:tidligere|opprinnelig)\s+(?:var\s+)?satt\s+opp\s+(?:kl\.?\s*)?(\d{1,2}[.:]\d{2})/gi,
+    /\bvar\s+satt\s+opp\s+(?:kl\.?\s*)?(\d{1,2}[.:]\d{2})/gi,
+    /\bflyttet\s+(\d{1,2}[.:]\d{2})\s+til\b/gi,
+  ];
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) add(m[1]);
+  }
+  return out;
+}
+
+/**
+ * Innholdslabel for en sluttspill-tid fra kildeleddet: kvartfinale (bekreftet) eller
+ * (mulig) semifinale/finale. Når kampen er betinget («eventuell», «dersom/hvis vi vinner»)
+ * prefikses semifinale/finale med «Mulig», slik at de ikke ser ut som ordinære kamper i kalender.
+ * Returnerer null når linjen ikke nevner sluttspill (da brukes vanlig kampindeks).
+ */
+function sluttspillLabelForLine(line: string | null | undefined): string | null {
+  if (!line) return null;
+  const n = normalizeNorwegianLetters(line);
+  const conditional = /\b(eventuell|eventuelt|dersom|hvis|mulig|ved\s+seier)\b/.test(n);
+  if (/\bkvartfinale\b/.test(n)) return "Kvartfinale";
+  if (/\bsemifinale\b/.test(n)) return conditional ? "Mulig semifinale" : "Semifinale";
+  if (/\bfinale\b/.test(n)) return conditional ? "Mulig finale" : "Finale";
+  return null;
+}
+
+/**
+ * Skann alle kildeledd som inneholder `time` og returner sluttspill-label fra det leddet som
+ * faktisk nevner sluttspill (slik at en syntetisert «HH:MM Kamp»-linje ikke vinner over
+ * setningen «… semifinale … kl. 13:20»). Returnerer null når ingen ledd nevner sluttspill.
+ */
+function sluttspillLabelForTimeInBlob(blob: string, time: string): string | null {
+  for (const raw of blob.split(/\n+/)) {
+    for (const frag of sourceFragmentsForHhmmLookup(raw)) {
+      if (!extractOrderedHhmmTimesFromText(frag).includes(time)) continue;
+      const sl = sluttspillLabelForLine(frag);
+      if (sl) return sl;
+    }
+  }
+  return null;
+}
+
 function cleanupCupHighlight(
   raw: string,
   titleBlocklist: Set<string>,
@@ -538,8 +595,13 @@ export function buildCupStructuredDayContent(input: {
     );
   }
 
+  const movedFromTimes = extractMovedFromClockTimes(fullBlobForWindow);
   const suppressHighlightTimes =
-    globalTw != null ? new Set([globalTw.earliestStart, globalTw.latestStart]) : null;
+    globalTw != null
+      ? new Set([globalTw.earliestStart, globalTw.latestStart, ...movedFromTimes])
+      : movedFromTimes.size > 0
+        ? movedFromTimes
+        : null;
 
   const addNote = (raw: string) => {
     const s = normalizeSpace(raw);
@@ -948,10 +1010,13 @@ export function enrichCupStructuredContentWithResolvedTiming(
     highlights = highlights.filter((h) => !highlightIsJunkAtWindowEdge(h, edge));
   }
 
+  const movedFromTimes = extractMovedFromClockTimes(blob);
   const suppressTimes =
     window && enrichment.timePrecision === "time_window"
-      ? new Set([window.earliestStart, window.latestStart])
-      : null;
+      ? new Set([window.earliestStart, window.latestStart, ...movedFromTimes])
+      : movedFromTimes.size > 0
+        ? movedFromTimes
+        : null;
 
   const deferConfirmedMatchHighlights =
     enrichment.tentative && enrichment.timePrecision === "date_only";
@@ -1005,7 +1070,9 @@ export function enrichCupStructuredContentWithResolvedTiming(
       ? [...fromRoute]
       : [...new Set([...suppressedFiltered, ...clocksFromHighlights])]
   )
-    .filter((t) => !explicitAttendanceTimes.includes(t))
+    // Gamle/flyttede tider (suppressTimes) skal aldri telle som kamp — også når lista kommer
+    // fra ruta (orderedMatchTimes), slik at f.eks. 15:40 blir «Andre kamp», ikke «Tredje kamp».
+    .filter((t) => !explicitAttendanceTimes.includes(t) && !suppressTimes?.has(t))
     .sort((a, b) => hhmmToMinutesLocal(a)! - hhmmToMinutesLocal(b)!);
 
   /** Kamprad-label: aldri global «Oppmøte» fra hele blobben for én kamptid (cup). */
@@ -1023,7 +1090,12 @@ export function enrichCupStructuredContentWithResolvedTiming(
       }
       return "Aktivitet";
     }
-    if (matchClocksOrdered.length !== 1) return defaultMatchLabelByIndex(i);
+    if (matchClocksOrdered.length !== 1) {
+      // Sluttspill-innholdslabel (kvart-/semi-/finale) fra kildeleddet for denne tiden — i stedet
+      // for generisk «Andre/Tredje kamp» når teksten eksplisitt sier semifinale/finale.
+      const sl = sluttspillLabelForTimeInBlob(blob, matchClocksOrdered[i]!);
+      return sl ?? defaultMatchLabelByIndex(i);
+    }
     const inferred = inferTimedActivityLabelFromText(blob);
     if (
       !inferred ||

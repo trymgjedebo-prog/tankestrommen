@@ -131,8 +131,9 @@ GRID-TIMEPLAN – LES LAYOUTEN FØR DU TOLKER TEKSTEN:
   - gradeBand: trinn/klasse fritekst (f.eks. «10. trinn», «10B», «VG2») eller null – serveren normaliserer til Foreldre-App-koder
   - weekdays: objekt med nøkler "0"–"4" (0=mandag … 4=fredag), alternativt man/tir/ons/tor/fre. Lørdag/søndag ikke i skoleprofil-MVP. Hver verdi er ENTEN:
     - { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" } når bare skolestart/-slutt er oppgitt, ELLER
-    - { "useSimpleDay": false, "lessons": [ { "subjectKey": "norsk", "customLabel": null eller tekst, "start": "HH:MM", "end": "HH:MM", "subjectCandidates": [ { "subject": "Matematikk", "subjectKey": "matematikk", "weight": 1 }, { "subject": "Norsk", "subjectKey": "norsk", "weight": 1 } ] }, ... ] }
+    - { "useSimpleDay": false, "lessons": [ { "subjectKey": "norsk", "customLabel": null eller tekst, "start": "HH:MM", "end": "HH:MM", "room": null eller tekst, "teacher": null eller tekst, "lessonSubcategory": null eller tekst, "subjectCandidates": [ { "subject": "Matematikk", "subjectKey": "matematikk", "weight": 1 }, { "subject": "Norsk", "subjectKey": "norsk", "weight": 1 } ] }, ... ] }
   subjectKey: kort slug på norsk fagnavn i små bokstaver og bindestrek (norsk, matematikk, engelsk, naturfag, samfunnsfag, kroppsoving, musikk, kunst_og_håndverk, osv.). Bruk customLabel når faget trenger presisering (f.eks. «Spansk valgfag»). subjectCandidates KUN når samme slot har flere alternative fag/spor – da en rad per alternativ, weight=1 for begge (eller høyere for førstnevnte).
+  room: klasserom/lokale hvis det står synlig i boksen/raden (f.eks. «203», «Gymsal»), ellers null. teacher: lærernavn eller initialer hvis synlig, ellers null. lessonSubcategory: for valgfag/språkfag, sett det oppløste sporet (f.eks. «Tysk», «Spansk», «Programmering») når det fremgår, ellers null.
   Tider: 24-timersformat HH:MM. Sorter lessons innen hver dag etter start tid, stigende.
 
 Hvis bildet ikke inneholder lesbar tekst, sett lav confidence og forklar kort i description.`;
@@ -798,7 +799,8 @@ type LessonNormalizationResult =
   | { ok: true; lesson: SchoolProfileLesson; changes: string[] }
   | { ok: false; reason: string };
 
-function normalizeSchoolProfileLesson(
+// Eksportert for enhetstester (rom/lærer/spor pass-through).
+export function normalizeSchoolProfileLesson(
   raw: unknown,
 ): LessonNormalizationResult {
   if (!raw || typeof raw !== "object") {
@@ -1115,6 +1117,13 @@ function normalizeSchoolProfileLesson(
     start,
     end,
   };
+  // Valgfrie strukturfelter: bevares 1:1 ut til Foreldre-App når modellen ser dem.
+  const room = asNonEmptyString(o.room);
+  if (room) lesson.room = room;
+  const teacher = asNonEmptyString(o.teacher);
+  if (teacher) lesson.teacher = teacher;
+  const lessonSubcategory = asNonEmptyString(o.lessonSubcategory);
+  if (lessonSubcategory) lesson.lessonSubcategory = lessonSubcategory;
   if (
     canonicalFromKey &&
     canonicalFromCellText &&
@@ -1968,11 +1977,11 @@ Return this JSON shape:
     "gradeBand": string | null (class/year free text, e.g. "10B", "10. trinn", "VG2"; server maps to 1-4, 5-7, 8-10, vg1, vg2, vg3),
     "weekdays": object whose keys are "0"–"4" (Monday=0 … Friday=4), or man/tir/ons/tor/fre. Each value is either:
       { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" }
-      or { "useSimpleDay": false, "lessons": [ { "subjectKey": string, "customLabel": string | null, "start": "HH:MM", "end": "HH:MM" } ] }
+      or { "useSimpleDay": false, "lessons": [ { "subjectKey": string, "customLabel": string | null, "start": "HH:MM", "end": "HH:MM", "room": string | null, "teacher": string | null, "lessonSubcategory": string | null } ] }
   }
 }
 
-Use English weekday keys only. subjectKey: lowercase slug from Norwegian subject name (norsk, matematikk, engelsk). customLabel when extra detail is needed. Times 24h HH:MM.`;
+Use English weekday keys only. subjectKey: lowercase slug from Norwegian subject name (norsk, matematikk, engelsk). customLabel when extra detail is needed. room/teacher: classroom and teacher when stated in the source, else null. lessonSubcategory: resolved track for electives/language subjects (e.g. "Tysk", "Programmering") when evident, else null. Times 24h HH:MM.`;
 
 function getOpenAIClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
