@@ -101,7 +101,12 @@ export async function toPortalBundle(
     });
 
     const { coerceAIAnalysisResultForPortal } = await import("@/lib/analysis-null-safety");
-    const result = coerceAIAnalysisResultForPortal(resultIn);
+    const { filterAnalysisContentByClass } = await import("@/lib/class-content-filter");
+    // Oppgave 7: filtrer ukeplan-innhold til elevens klasse (no-class + barnets klasse beholdes).
+    const result = filterAnalysisContentByClass(
+      coerceAIAnalysisResultForPortal(resultIn),
+      portalImport.relevanceContext?.classCode,
+    );
     const { proposal: schoolProfileProposal, decision: schoolProfileDecision } =
       deps.decideSchoolProfileProposal(result, sourceType, documentKind);
     const {
