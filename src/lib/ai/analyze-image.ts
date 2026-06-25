@@ -1323,7 +1323,8 @@ function extractGrunnskoleTrinnNumber(s: string): number | null {
   return null;
 }
 
-function mapOneGradeBandHint(text: string): SchoolProfileGradeBand | null {
+// Eksportert for enhetstester.
+export function mapOneGradeBandHint(text: string): SchoolProfileGradeBand | null {
   if (!text) return null;
   const lower = text.toLowerCase().trim();
   const collapsed = lower
@@ -1348,6 +1349,11 @@ function mapOneGradeBandHint(text: string): SchoolProfileGradeBand | null {
   if (/^vg[123]$/.test(collapsed)) {
     return collapsed as SchoolProfileGradeBand;
   }
+
+  // VGS-klassekode: ledende 1/2/3 = VG1/VG2/VG3 (f.eks. «2STC», «3STA», «1IMA»).
+  // Programkode-lista speiler CLASS_CODE_RE i school-class-schedule.ts.
+  const vgsClass = /\b([123])\s?(?:st|im|yf|pb|el|hs|sf|mk|id|na|ss|rm|dh|ba|tip|ho)[a-f]?\b/i.exec(lower);
+  if (vgsClass) return `vg${vgsClass[1]}` as SchoolProfileGradeBand;
 
   const range = /\b([1-9]|10)\s*[-–]\s*([1-9]|10)\b/.exec(lower);
   if (range) {
