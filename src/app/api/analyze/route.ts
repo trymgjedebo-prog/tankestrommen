@@ -22,6 +22,8 @@ import type {
 import type { TravelFlightInference } from "@/lib/travel-document-infer";
 import {
   parseKnownPersonsFromBody,
+  parseRelevanceContextFromBody,
+  relevanceOverlayOverride,
   resolvePortalEventPersonMatch,
   travelFlightMetadataFromInference,
   type PortalEventPersonMatchStatus,
@@ -357,6 +359,8 @@ interface ParsedBody {
   documentKind?: unknown;
   /** Valgfri: [{ personId, displayName | name }] for dokumentimport-matching. */
   knownPersons?: unknown;
+  /** Valgfri: { classCode } — elevens klassekontekst (Oppgave 6, utvides av 7/8). */
+  relevanceContext?: unknown;
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
@@ -8828,6 +8832,12 @@ async function wrapResponse(
         includeDebug,
         portalImport,
       );
+      // Oppgave 6: klassepresis ukeplan-hovedkontekst når klienten sendte elevens klasse.
+      const overlayClassOverride = relevanceOverlayOverride(portalImport.relevanceContext);
+      const overlayForClass = (bundle as Record<string, unknown>).schoolWeekOverlayProposal;
+      if (overlayClassOverride && overlayForClass && typeof overlayForClass === "object") {
+        Object.assign(overlayForClass as Record<string, unknown>, overlayClassOverride);
+      }
       console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
         ok: true,
         schemaVersion: bundle.schemaVersion,
@@ -9047,6 +9057,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
     const documentKind = parseDocumentKind(body.documentKind);
     const portalImport: PortalImportContext = {
       knownPersons: parseKnownPersonsFromBody(body.knownPersons),
+      relevanceContext: parseRelevanceContextFromBody(body.relevanceContext),
     };
 
     /**
