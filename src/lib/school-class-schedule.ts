@@ -36,6 +36,30 @@ export function countDistinctClassCodes(text: string): number {
   return new Set(matches.map((m) => m.replace(/\s+/g, ""))).size;
 }
 
+/** Normaliser en klassekode for sammenligning: små bokstaver, å/ø/æ-fold, uten whitespace. */
+function normalizeClassCode(code: string): string {
+  return normalizeNorwegianLetters(code).replace(/\s+/g, "");
+}
+
+/**
+ * Konservativ klasse-relevans for én tekstlinje gitt elevens klassekode (Oppgave 7).
+ * - Tom/ukjent elev-klasse → true (ingen kontekst, behold alt).
+ * - Ingen klassekode i linja → true (gjelder alle klasser).
+ * - Linja nevner elevens klasse → true.
+ * - Linja nevner KUN andre klasser → false (filtreres bort).
+ */
+export function lineIsRelevantForClass(
+  line: string,
+  childClassCode: string | undefined,
+): boolean {
+  const child = childClassCode ? normalizeClassCode(childClassCode) : "";
+  if (!child) return true;
+  const matches = normalizeNorwegianLetters(line).match(CLASS_CODE_RE);
+  if (!matches || matches.length === 0) return true;
+  const codes = new Set(matches.map((m) => m.replace(/\s+/g, "")));
+  return codes.has(child);
+}
+
 /**
  * True når teksten ser ut som skole-/klasseplan: flere klassekolonner (≥2 klassekoder) ELLER
  * tydelige skoleord — og INGEN tydelige sportssignaler.
