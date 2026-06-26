@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyTankestromDocumentKind,
+  hasStrongSchoolEvidence,
   looksLikeSchoolClassSchedule,
 } from "@/lib/school-class-schedule";
 import { runTankestromFixture } from "@/lib/tankestrom-regression-fixture-runner";
@@ -39,6 +40,22 @@ describe("looksLikeSchoolClassSchedule / classifyTankestromDocumentKind", () => 
   it("konservativ: skole-tekst med tydelig sportssignal → false (ikke skole)", () => {
     expect(looksLikeSchoolClassSchedule("2STA spiller fotballkamp mot 2STB på bane 1")).toBe(false);
   });
+
+  it("eksamensplan med «puljer» + 2STA–2STF + skoleord → true (sterk skole slår svak sport)", () => {
+    const text =
+      "Eksamensoppsett 2ST uke 24\n2STA, 2STB, 2STC, 2STD, 2STE, 2STF\nMandag: skriftlig eksamen, pulje 1 kl. 09:00 i auditoriet, pulje 2 på rom 214\nTirsdag: bokinnlevering 08:30";
+    expect(looksLikeSchoolClassSchedule(text)).toBe(true);
+    expect(hasStrongSchoolEvidence(text)).toBe(true);
+    expect(classifyTankestromDocumentKind(text)).toBe("school_class_schedule");
+  });
+
+  it("hasStrongSchoolEvidence krever BÅDE ≥2 klassekoder OG skoleord", () => {
+    expect(hasStrongSchoolEvidence("2STA og 2STB har eksamen i auditoriet")).toBe(true);
+    // klassekoder, men ingen skoleord (og «bane» gir ikke skolebevis):
+    expect(hasStrongSchoolEvidence("2STA og 2STB møtes på bane 1")).toBe(false);
+    // skoleord, men < 2 klassekoder:
+    expect(hasStrongSchoolEvidence("eksamen i auditoriet kl. 10:00")).toBe(false);
+  });
 });
 
 describe("runner: skole-/klasseplan får ikke kamp-labels", () => {
@@ -61,5 +78,15 @@ describe("runner: skole-/klasseplan får ikke kamp-labels", () => {
     });
     const hl = b.children.flatMap((c) => c.highlights).join(" | ");
     expect(hl).toMatch(/kamp/i);
+  });
+
+  it("eksamensplan med «puljer» (selv med category=cup) → ingen kamp-labels, reelle tider bevart", () => {
+    const b = runTankestromFixture("fixtures/tankestrom/school_activity_plan_exam.txt", {
+      category: "cup",
+    });
+    const hl = b.children.flatMap((c) => c.highlights).join(" | ");
+    expect(hl.toLowerCase()).not.toContain("kamp");
+    expect(hl).not.toMatch(/første kamp|andre kamp|tredje kamp/i);
+    expect(hl).toMatch(/\d{2}:\d{2}/); // nøytral stil: reelle tider hentes fortsatt ut
   });
 });
