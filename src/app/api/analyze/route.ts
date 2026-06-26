@@ -7,7 +7,7 @@ import {
 import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
-import { looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
+import { hasStrongSchoolEvidence, looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
 import type {
   AnalysisSourceHint,
   AIAnalysisResult,
@@ -5871,6 +5871,12 @@ function isLikelyActivityPlanOverlay(
   const weekNumber = parseWeekNumber(weekContext);
   if (weekNumber !== null) reasons.push("week_number_detected");
 
+  // Skolebevis: ≥2 klassekoder OG skoleord (eksamen/bokinnlevering/…). Lar en åpenbar skole-
+  // aktivitetsplan (2STA–2STF + eksamen) bli gjenkjent som overlay selv uten det litterale
+  // «aktivitetsplan»/«ukeplan»-tittelordet og uten documentKind-hint fra klienten.
+  const schoolEvidence = hasStrongSchoolEvidence(weekContext);
+  if (schoolEvidence) reasons.push("school_evidence_classcodes+word");
+
   const weekdayRows = result.scheduleByDay.filter((d) =>
     Boolean(schoolWeekdayIndexFromLabel(d.dayLabel)),
   ).length;
@@ -5888,7 +5894,8 @@ function isLikelyActivityPlanOverlay(
 
   const daySignal =
     weekdayRows >= 2 || result.scheduleByDay.length >= 3 || weekdayMentionsFromRaw >= 2;
-  const activitySignal = documentKind === "activity_plan" || hasActivityTitleHint;
+  const activitySignal =
+    documentKind === "activity_plan" || hasActivityTitleHint || schoolEvidence;
   const yes = activitySignal && daySignal && weekNumber !== null;
   return { yes, reasons };
 }
