@@ -18,9 +18,19 @@ function normalizeNorwegianLetters(input: string): string {
     .replace(/æ/g, "e");
 }
 
-/** Tydelige sportssignaler — slår av skole-klassifisering (konservativt). */
+/**
+ * Tydelige sportssignaler — slår av skole-klassifisering (konservativt). Delt i STERKE
+ * (entydige cup-/idrettsord) og SVAKE/overlastede ord (`pulje`/`bane`) som også brukes i
+ * skole-logistikk (eksamenspuljer, rom/«bane»). Sterke slår alltid av skole; svake kun når
+ * det IKKE finnes sterke skolebevis (se `hasStrongSchoolEvidence`).
+ */
+const STRONG_SPORT_SIGNAL_RE =
+  /\b(kamp|kampstart|kampoppsett|cup|turnering|stevne|sluttspill|seriekamp|avkast|fotball|handball|innebandy|volleyball|basket|ishockey|bandy|idrettslag)\b/;
+/** Overlastede ord — kan bety sport ELLER skole-logistikk. */
+const WEAK_SPORT_SIGNAL_RE = /\b(pulje|bane)\b/;
+/** Union (sterk ∪ svak) — beholdt for grov dokumenttype-klassifisering (`cup_or_sport`). */
 const SPORT_SIGNAL_RE =
-  /\b(kamp|kampstart|kampoppsett|cup|turnering|stevne|sluttspill|seriekamp|pulje|avkast|fotball|handball|innebandy|volleyball|basket|ishockey|bandy|idrettslag|bane)\b/;
+  /\b(kamp|kampstart|kampoppsett|cup|turnering|stevne|sluttspill|seriekamp|avkast|fotball|handball|innebandy|volleyball|basket|ishockey|bandy|idrettslag|pulje|bane)\b/;
 
 /** Tydelige skole-/klasseord (på normalisert tekst: å→a, ø→o, æ→e). */
 const SCHOOL_WORD_RE =
@@ -34,6 +44,15 @@ export function countDistinctClassCodes(text: string): number {
   const n = normalizeNorwegianLetters(text);
   const matches = n.match(CLASS_CODE_RE) ?? [];
   return new Set(matches.map((m) => m.replace(/\s+/g, ""))).size;
+}
+
+/**
+ * Sterke skolebevis: ≥2 distinkte klassekoder (2STA/2STB/…) OG minst ett tydelig skoleord
+ * (eksamen/bokinnlevering/auditorium/…). Brukt til å la skole overstyre de overlastede
+ * ordene `pulje`/`bane`, og til å gjenkjenne skole-aktivitetsplaner i overlay-deteksjonen.
+ */
+export function hasStrongSchoolEvidence(text: string): boolean {
+  return countDistinctClassCodes(text) >= 2 && SCHOOL_WORD_RE.test(normalizeNorwegianLetters(text));
 }
 
 /** Normaliser en klassekode for sammenligning: små bokstaver, å/ø/æ-fold, uten whitespace. */
@@ -63,10 +82,17 @@ export function lineIsRelevantForClass(
 /**
  * True når teksten ser ut som skole-/klasseplan: flere klassekolonner (≥2 klassekoder) ELLER
  * tydelige skoleord — og INGEN tydelige sportssignaler.
+ *
+ * Konservativ prioritet: STERKE sportssignaler (kamp/cup/fotball/turnering/…) slår alltid av
+ * skole. De OVERLASTEDE ordene `pulje`/`bane` (også vanlige i eksamens-/skole-logistikk) slår
+ * KUN av skole når det ikke finnes sterke skolebevis (≥2 klassekoder OG skoleord) — slik at en
+ * eksamensplan med «puljer» + 2STA–2STF + eksamen ikke feilklassifiseres som cup.
  */
 export function looksLikeSchoolClassSchedule(text: string): boolean {
   const n = normalizeNorwegianLetters(text);
-  if (SPORT_SIGNAL_RE.test(n)) return false;
+  if (STRONG_SPORT_SIGNAL_RE.test(n)) return false; // entydig sport → aldri skole
+  if (hasStrongSchoolEvidence(text)) return true; // 2STA–2STF + eksamen slår pulje/bane
+  if (WEAK_SPORT_SIGNAL_RE.test(n)) return false; // pulje/bane uten skolebevis → behandle som sport
   if (countDistinctClassCodes(text) >= 2) return true;
   return SCHOOL_WORD_RE.test(n);
 }
