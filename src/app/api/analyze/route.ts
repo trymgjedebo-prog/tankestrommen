@@ -2339,7 +2339,16 @@ function isSchoolPlanBundleContext(
 ): boolean {
   if (weekPlanLike) return true;
   const t = normalizeNorwegianLetters(result.title);
-  return /\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t);
+  if (/\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t)) return true;
+  // Sterk skolebevis (≥2 VGS-klassekoder + skoleord) fanger eksamens-/skoleuker uten tittel-ord
+  // og uten ukenummer — f.eks. «Eksamen og avslutninger» med 2STA/2STC + bokinnlevering/eksamen.
+  const evidenceBlob = [
+    result.title,
+    result.description,
+    result.extractedText?.raw ?? "",
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+  ].join(" ");
+  return hasStrongSchoolEvidence(evidenceBlob);
 }
 
 /** Normalisert nøkkel for dedupe av praktiske cup-linjer. */
@@ -4402,16 +4411,24 @@ async function buildProposalItems(
     if (result.location) item.event.location = result.location;
     const arrLink = buildArrangementImportLinkMetadata(result, date, arrangementEndDateIso ?? null);
     const targetGroupNorm = normalizeSpace(result.targetGroup || "") || null;
+    // Skole-dag-events (schoolContext satt) er ikke arrangementer/cup: ikke påfør arrangement-lenking
+    // eller competitionClass (skoleklasser er ikke konkurranseklasser). Cup/reise/fallback har
+    // alltid schoolContext = null → arrangement-metadataen er uendret for dem.
+    const isSchool = Boolean(schoolContext);
     item.event.metadata = {
-      arrangementStableKey: arrLink.arrangementStableKey,
-      arrangementCoreTitle: arrLink.arrangementCoreTitle,
-      arrangementBlockGroupId: arrLink.arrangementBlockGroupId,
-      arrangementFollowupImportLikely: arrLink.arrangementFollowupImportLikely,
-      updateIntent: arrLink.updateIntent,
-      ...(arrLink.arrangementImportHint
-        ? { arrangementImportHint: arrLink.arrangementImportHint }
+      ...(!isSchool
+        ? {
+            arrangementStableKey: arrLink.arrangementStableKey,
+            arrangementCoreTitle: arrLink.arrangementCoreTitle,
+            arrangementBlockGroupId: arrLink.arrangementBlockGroupId,
+            arrangementFollowupImportLikely: arrLink.arrangementFollowupImportLikely,
+            updateIntent: arrLink.updateIntent,
+            ...(arrLink.arrangementImportHint
+              ? { arrangementImportHint: arrLink.arrangementImportHint }
+              : {}),
+            arrangementLinkDebug: arrLink.arrangementLinkDebug,
+          }
         : {}),
-      arrangementLinkDebug: arrLink.arrangementLinkDebug,
       ...(schoolContext ? { schoolContext } : {}),
       ...(schoolDayOverride ? { schoolDayOverride } : {}),
       ...(cupProposalDebug ? { cupProposalDebug } : {}),
@@ -4516,7 +4533,7 @@ async function buildProposalItems(
             },
           }
         : {}),
-      ...(!tf && targetGroupNorm
+      ...(!tf && targetGroupNorm && !isSchool
         ? {
             competitionClass: targetGroupNorm,
             targetGroup: targetGroupNorm,
