@@ -146,6 +146,8 @@ export async function toPortalBundle(
             schoolWeekOverlayProposal,
             resolveDate,
             overlayHomeworkDebug,
+            // Oppgave 9 (steg 1): før barnets validerte timeplan inn, klar for fag↔time-matching.
+            portalImport.relevanceContext?.schoolProfile ?? null,
           )
         : [];
     const rawProposalItems = schoolProfileProposal
