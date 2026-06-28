@@ -2333,6 +2333,21 @@ function isEventLikeText(raw: string | null): boolean {
   return EVENT_KEYWORDS.test(normalizeNorwegianLetters(raw));
 }
 
+/**
+ * Sterk skolebevis (≥2 VGS-klassekoder + skoleord) bygget fra hele analyse-resultatet
+ * (tittel+beskrivelse+ekstrahert tekst+dager) — fanger eksamens-/skoleuker uten tittel-ord
+ * og uten ukenummer. Delt av isSchoolPlanBundleContext og portalSourceKind.
+ */
+function resultHasStrongSchoolEvidence(result: AIAnalysisResult): boolean {
+  const blob = [
+    result.title,
+    result.description,
+    result.extractedText?.raw ?? "",
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+  ].join(" ");
+  return hasStrongSchoolEvidence(blob);
+}
+
 function isSchoolPlanBundleContext(
   result: AIAnalysisResult,
   weekPlanLike: boolean,
@@ -2340,15 +2355,7 @@ function isSchoolPlanBundleContext(
   if (weekPlanLike) return true;
   const t = normalizeNorwegianLetters(result.title);
   if (/\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t)) return true;
-  // Sterk skolebevis (≥2 VGS-klassekoder + skoleord) fanger eksamens-/skoleuker uten tittel-ord
-  // og uten ukenummer — f.eks. «Eksamen og avslutninger» med 2STA/2STC + bokinnlevering/eksamen.
-  const evidenceBlob = [
-    result.title,
-    result.description,
-    result.extractedText?.raw ?? "",
-    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
-  ].join(" ");
-  return hasStrongSchoolEvidence(evidenceBlob);
+  return resultHasStrongSchoolEvidence(result);
 }
 
 /** Normalisert nøkkel for dedupe av praktiske cup-linjer. */
@@ -3865,11 +3872,14 @@ function portalSourceKind(
   sourceType: string,
   weekPlanLike: boolean,
   title: string,
+  strongSchoolEvidence = false,
 ): string {
   const n = normalizeNorwegianLetters(title);
   if (/\b(a-plan|aplan)\b/.test(n)) return "a_plan";
   if (/\b(ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) return "school_week";
   if (weekPlanLike) return "school_week";
+  // Skoleuke uten tittel-ord/ukenummer, men med sterk skolebevis (≥2 klassekoder + skoleord).
+  if (strongSchoolEvidence) return "school_week";
   if (sourceType === "docx") return "school_docx";
   if (sourceType === "pdf") return "school_pdf";
   return `school_${sourceType || "unknown"}`;
@@ -3934,7 +3944,7 @@ function buildEventSchoolContext(
     lessonEnd: time ? end : null,
     itemType,
     confidence: result.confidence,
-    sourceKind: portalSourceKind(sourceType, weekPlanLike, result.title),
+    sourceKind: portalSourceKind(sourceType, weekPlanLike, result.title, resultHasStrongSchoolEvidence(result)),
   };
 }
 

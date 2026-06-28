@@ -78,6 +78,9 @@ describe("Del A: eksamens-/skoleuke uten tittel-ord rutes til skole-stien", () =
     for (const ev of events) {
       const md = ev.event?.metadata ?? {};
       expect(md.schoolContext).toBeTruthy(); // rutet til skole-stien
+      // sourceKind-polish: schoolContext.sourceKind = "school_week" via sterk skolebevis
+      // (uten tittel-ord/ukenummer), ikke "school_{sourceType}".
+      expect((md.schoolContext as { sourceKind?: string } | undefined)?.sourceKind).toBe("school_week");
       expect(md.arrangementBlockGroupId).toBeUndefined(); // ingen arrangement-lenking for skole
       expect(md.competitionClass).toBeUndefined(); // skoleklasser ikke som konkurranseklasse
     }
