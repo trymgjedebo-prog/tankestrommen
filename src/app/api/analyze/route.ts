@@ -2333,13 +2333,29 @@ function isEventLikeText(raw: string | null): boolean {
   return EVENT_KEYWORDS.test(normalizeNorwegianLetters(raw));
 }
 
+/**
+ * Sterk skolebevis (≥2 VGS-klassekoder + skoleord) bygget fra hele analyse-resultatet
+ * (tittel+beskrivelse+ekstrahert tekst+dager) — fanger eksamens-/skoleuker uten tittel-ord
+ * og uten ukenummer. Delt av isSchoolPlanBundleContext og portalSourceKind.
+ */
+function resultHasStrongSchoolEvidence(result: AIAnalysisResult): boolean {
+  const blob = [
+    result.title,
+    result.description,
+    result.extractedText?.raw ?? "",
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+  ].join(" ");
+  return hasStrongSchoolEvidence(blob);
+}
+
 function isSchoolPlanBundleContext(
   result: AIAnalysisResult,
   weekPlanLike: boolean,
 ): boolean {
   if (weekPlanLike) return true;
   const t = normalizeNorwegianLetters(result.title);
-  return /\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t);
+  if (/\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t)) return true;
+  return resultHasStrongSchoolEvidence(result);
 }
 
 /** Normalisert nøkkel for dedupe av praktiske cup-linjer. */
@@ -3856,11 +3872,14 @@ function portalSourceKind(
   sourceType: string,
   weekPlanLike: boolean,
   title: string,
+  strongSchoolEvidence = false,
 ): string {
   const n = normalizeNorwegianLetters(title);
   if (/\b(a-plan|aplan)\b/.test(n)) return "a_plan";
   if (/\b(ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) return "school_week";
   if (weekPlanLike) return "school_week";
+  // Skoleuke uten tittel-ord/ukenummer, men med sterk skolebevis (≥2 klassekoder + skoleord).
+  if (strongSchoolEvidence) return "school_week";
   if (sourceType === "docx") return "school_docx";
   if (sourceType === "pdf") return "school_pdf";
   return `school_${sourceType || "unknown"}`;
@@ -3925,7 +3944,7 @@ function buildEventSchoolContext(
     lessonEnd: time ? end : null,
     itemType,
     confidence: result.confidence,
-    sourceKind: portalSourceKind(sourceType, weekPlanLike, result.title),
+    sourceKind: portalSourceKind(sourceType, weekPlanLike, result.title, resultHasStrongSchoolEvidence(result)),
   };
 }
 
@@ -4402,16 +4421,24 @@ async function buildProposalItems(
     if (result.location) item.event.location = result.location;
     const arrLink = buildArrangementImportLinkMetadata(result, date, arrangementEndDateIso ?? null);
     const targetGroupNorm = normalizeSpace(result.targetGroup || "") || null;
+    // Skole-dag-events (schoolContext satt) er ikke arrangementer/cup: ikke påfør arrangement-lenking
+    // eller competitionClass (skoleklasser er ikke konkurranseklasser). Cup/reise/fallback har
+    // alltid schoolContext = null → arrangement-metadataen er uendret for dem.
+    const isSchool = Boolean(schoolContext);
     item.event.metadata = {
-      arrangementStableKey: arrLink.arrangementStableKey,
-      arrangementCoreTitle: arrLink.arrangementCoreTitle,
-      arrangementBlockGroupId: arrLink.arrangementBlockGroupId,
-      arrangementFollowupImportLikely: arrLink.arrangementFollowupImportLikely,
-      updateIntent: arrLink.updateIntent,
-      ...(arrLink.arrangementImportHint
-        ? { arrangementImportHint: arrLink.arrangementImportHint }
+      ...(!isSchool
+        ? {
+            arrangementStableKey: arrLink.arrangementStableKey,
+            arrangementCoreTitle: arrLink.arrangementCoreTitle,
+            arrangementBlockGroupId: arrLink.arrangementBlockGroupId,
+            arrangementFollowupImportLikely: arrLink.arrangementFollowupImportLikely,
+            updateIntent: arrLink.updateIntent,
+            ...(arrLink.arrangementImportHint
+              ? { arrangementImportHint: arrLink.arrangementImportHint }
+              : {}),
+            arrangementLinkDebug: arrLink.arrangementLinkDebug,
+          }
         : {}),
-      arrangementLinkDebug: arrLink.arrangementLinkDebug,
       ...(schoolContext ? { schoolContext } : {}),
       ...(schoolDayOverride ? { schoolDayOverride } : {}),
       ...(cupProposalDebug ? { cupProposalDebug } : {}),
@@ -4516,7 +4543,7 @@ async function buildProposalItems(
             },
           }
         : {}),
-      ...(!tf && targetGroupNorm
+      ...(!tf && targetGroupNorm && !isSchool
         ? {
             competitionClass: targetGroupNorm,
             targetGroup: targetGroupNorm,
