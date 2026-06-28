@@ -8,6 +8,7 @@ import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 import { hasStrongSchoolEvidence, looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
+import { pickYearForWeekdayDate } from "@/lib/portal-week-year";
 import type {
   AnalysisSourceHint,
   AIAnalysisResult,
@@ -553,6 +554,25 @@ function parseIsoWeekday(raw: string | null): number | null {
   const normalized = normalizeNorwegianLetters(raw);
   for (const [label, weekday] of Object.entries(NB_WEEKDAYS)) {
     if (normalized.includes(label)) return weekday;
+  }
+  return null;
+}
+
+/** Dag+måned UTEN år fra «15. juni» / «15.6» → {month, day}. Null hvis råteksten har eksplisitt år. */
+function parseDayMonthNoYear(raw: string | null): { month: number; day: number } | null {
+  if (!raw) return null;
+  if (/\b20\d{2}\b/.test(raw)) return null; // eksplisitt år → ikke vår sak (håndteres av tryParseNorwegianDate)
+  const nb = /(\d{1,2})\.\s*([a-zæøå.]+)\b/i.exec(raw);
+  if (nb) {
+    const day = Number(nb[1]);
+    const month = NB_MONTHS[normalizeMonthName(nb[2]!)];
+    if (month && day >= 1 && day <= 31) return { month, day };
+  }
+  const slash = /^(\d{1,2})[./](\d{1,2})$/.exec(raw.trim());
+  if (slash) {
+    const day = Number(slash[1]);
+    const month = Number(slash[2]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return { month, day };
   }
   return null;
 }
@@ -3959,12 +3979,23 @@ function createPortalWeekDateResolver(result: AIAnalysisResult): (
     ...result.schedule.map((s) => `${s.label ?? ""} ${s.date ?? ""}`),
   ].join(" ");
   const weekNumber = parseWeekNumber(weekContext);
-  const resolvedYear = inferRealisticYear(collectYearCandidates(result), weekNumber);
+  const yearCandidates = collectYearCandidates(result);
+  const resolvedYear = inferRealisticYear(yearCandidates, weekNumber);
+  const currentYear = new Date().getFullYear();
   const weekPlanLike =
     /\b(a-plan|aplan|ukeplan|aktivitetsplan)\b/i.test(result.title) &&
     weekNumber !== null;
 
   return (rawDate: string | null, rawLabel: string | null): string | null => {
+    // Hovedfiks: ukedag + dag/måned UTEN fullt år → velg året der dag/måned faktisk faller på den
+    // oppgitte ukedagen («mandag 15. juni» → 2026, ikke 2025). Fanger både skoleår-spenn
+    // («2025/2026») og manglende år. Eksplisitt-daterte datoer treffer ikke (dm = null).
+    const statedWeekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
+    const dm = parseDayMonthNoYear(rawDate);
+    if (statedWeekday && dm) {
+      const y = pickYearForWeekdayDate(dm.month, dm.day, statedWeekday, yearCandidates, currentYear);
+      if (y) return `${y}-${String(dm.month).padStart(2, "0")}-${String(dm.day).padStart(2, "0")}`;
+    }
     const direct = parseDateWithFallbackYear(rawDate, resolvedYear);
     if (direct) {
       const explicitYearMatch = rawDate ? /\b(20\d{2})\b/.exec(rawDate) : null;
