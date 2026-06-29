@@ -8,6 +8,7 @@ import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 import { hasStrongSchoolEvidence, looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
+  import { validateClientSchoolWeeklyProfile } from "@/lib/ai/analyze-image";
 import { pickYearForWeekdayDate } from "@/lib/portal-week-year";
 import type {
   AnalysisSourceHint,
@@ -385,11 +386,21 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
     }
   }
 
+  // Oppgave 9 (steg 1): relevanceContext (classCode + valgfri schoolProfile) sendes som JSON-streng.
+  // parseRelevanceContextFromBody (POST-handler) håndterer både streng og objekt, så vi fører
+  // strengen rått videre — speiler knownPersons-mønsteret.
+  const relevanceContextField = form.get("relevanceContext");
+  const relevanceContext: unknown =
+    typeof relevanceContextField === "string" && relevanceContextField.trim()
+      ? relevanceContextField
+      : undefined;
+
   if (textField && typeof textField === "string") {
     return {
       text: textField,
       ...(documentKind ? { documentKind } : {}),
       ...(knownPersons !== undefined ? { knownPersons } : {}),
+      ...(relevanceContext !== undefined ? { relevanceContext } : {}),
     };
   }
 
@@ -397,6 +408,7 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
     return {
       ...(documentKind ? { documentKind } : {}),
       ...(knownPersons !== undefined ? { knownPersons } : {}),
+      ...(relevanceContext !== undefined ? { relevanceContext } : {}),
     };
   }
 
@@ -410,6 +422,7 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
       fileName: file.name,
       ...(documentKind ? { documentKind } : {}),
       ...(knownPersons !== undefined ? { knownPersons } : {}),
+      ...(relevanceContext !== undefined ? { relevanceContext } : {}),
     };
   }
   if (
@@ -421,6 +434,7 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
       fileName: file.name,
       ...(documentKind ? { documentKind } : {}),
       ...(knownPersons !== undefined ? { knownPersons } : {}),
+      ...(relevanceContext !== undefined ? { relevanceContext } : {}),
     };
   }
   if (mime.startsWith("image/")) {
@@ -429,6 +443,7 @@ async function parseMultipartBody(request: NextRequest): Promise<ParsedBody> {
       fileName: file.name,
       ...(documentKind ? { documentKind } : {}),
       ...(knownPersons !== undefined ? { knownPersons } : {}),
+      ...(relevanceContext !== undefined ? { relevanceContext } : {}),
     };
   }
 
@@ -8650,6 +8665,9 @@ function buildHomeworkTaskItemsFromOverlay(
   overlay: SchoolWeekOverlayProposal,
   resolveDate: (rawDate: string | null, rawLabel: string | null) => string | null,
   debug?: OverlayHomeworkTasksDebug,
+  // Oppgave 9 (steg 1): barnets validerte timeplan føres inn her, klar for fag↔time-matching.
+  // Brukes IKKE i dette steget — kun tilgjengeliggjort (se portal-bundle.ts-kallet).
+  _storedSchoolProfile?: SchoolWeeklyProfile | null,
 ): PortalTaskItem[] {
   const sourceId = randomUUID();
   const items: PortalTaskItem[] = [];
@@ -9122,7 +9140,10 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
     const documentKind = parseDocumentKind(body.documentKind);
     const portalImport: PortalImportContext = {
       knownPersons: parseKnownPersonsFromBody(body.knownPersons),
-      relevanceContext: parseRelevanceContextFromBody(body.relevanceContext),
+      relevanceContext: parseRelevanceContextFromBody(
+        body.relevanceContext,
+        validateClientSchoolWeeklyProfile,
+      ),
     };
 
     /**
