@@ -1530,10 +1530,37 @@ function formatDateNbNo(date: Date): string {
   }).format(date);
 }
 
+/**
+ * Dynamisk dato-direktiv som prependes analyse-promptene. LLM-en får ellers ALDRI vite dagens
+ * dato, så «bruk inneværende år» kan ikke fungere uten dette — uten det gjetter modellen året
+ * fra treningsdata og kan datere år-løse kilder til feil år (f.eks. 2025 i stedet for 2026).
+ */
+export function currentDateDirective(now: Date): string {
+  const iso = now.toISOString().slice(0, 10);
+  return `I dag er ${iso}. Bruk inneværende år (${now.getUTCFullYear()}) når årstall mangler i kilden.`;
+}
+
+type WeekYear = { week: number; year: number; yearFromSource: boolean };
+
+/**
+ * Fiks B (år-korreksjon): bytter KUN år-tokenet i en LLM-generert datostreng — rører ikke
+ * dag/måned. «søndag 15. juni 2025» → «søndag 15. juni 2026». Brukes når kilden har ukenummer
+ * men mangler eksplisitt år, slik at serverens deterministiske weekYear-år overstyrer LLM-ens
+ * gjettede år.
+ *
+ * MERK — stale ukedag: ukedag-ORDET i strengen kan bli feil etter år-byttet (f.eks. «søndag»
+ * foran en dato som i det nye året er en mandag). Det er bevisst og ufarlig: nedstrøms
+ * (`tryParseNorwegianDate` i route.ts) ekstraheres KUN dag+måned+år — ukedag-ordet ignoreres —
+ * og Foreldre-Appen utleder ukedagen fra ISO-datoen. Les ALDRI ukedagen fra denne strengen.
+ */
+export function correctGuessedYear(dateStr: string, year: number): string {
+  return dateStr.replace(/\b20\d{2}\b/, String(year));
+}
+
 function inferIsoWeekAndYearFromContext(
   context: string,
   fallbackYear: number
-): { week: number; year: number } | null {
+): WeekYear | null {
   const weekMatch = /\b(?:uke|week)\s*(\d{1,2})\b/i.exec(context);
   if (!weekMatch) return null;
 
@@ -1542,12 +1569,12 @@ function inferIsoWeekAndYearFromContext(
 
   const yearMatch = /\b(20\d{2})\b/.exec(context);
   const year = yearMatch ? Number.parseInt(yearMatch[1], 10) : fallbackYear;
-  return { week, year };
+  return { week, year, yearFromSource: Boolean(yearMatch) };
 }
 
 function inferDateFromWeekdayLabel(
   dayLabel: string | null,
-  weekYear: { week: number; year: number } | null
+  weekYear: WeekYear | null
 ): string | null {
   if (!weekYear) return null;
   const isoWeekday = detectIsoWeekday(dayLabel);
@@ -1558,11 +1585,17 @@ function inferDateFromWeekdayLabel(
 
 function inferParentDayDates(
   days: ParentDayItem[],
-  weekYear: { week: number; year: number } | null
+  weekYear: WeekYear | null
 ): ParentDayItem[] {
   if (days.length === 0 || !weekYear) return days;
   return days.map((day) => {
-    if (day.date) return day;
+    if (day.date) {
+      // Fiks B: korriger LLM-gjettet år når kilden har ukenummer men mangler eksplisitt år.
+      if (!weekYear.yearFromSource && /\b20\d{2}\b/.test(day.date)) {
+        return { ...day, date: correctGuessedYear(day.date, weekYear.year) };
+      }
+      return day;
+    }
     const inferred = inferDateFromWeekdayLabel(day.dayLabel, weekYear);
     if (!inferred) return day;
     return { ...day, date: inferred };
@@ -1571,11 +1604,17 @@ function inferParentDayDates(
 
 function inferDayEntryDates(
   entries: DayScheduleEntry[],
-  weekYear: { week: number; year: number } | null
+  weekYear: WeekYear | null
 ): DayScheduleEntry[] {
   if (entries.length === 0 || !weekYear) return entries;
   return entries.map((entry) => {
-    if (entry.date) return entry;
+    if (entry.date) {
+      // Fiks B: korriger LLM-gjettet år når kilden har ukenummer men mangler eksplisitt år.
+      if (!weekYear.yearFromSource && /\b20\d{2}\b/.test(entry.date)) {
+        return { ...entry, date: correctGuessedYear(entry.date, weekYear.year) };
+      }
+      return entry;
+    }
     const inferred = inferDateFromWeekdayLabel(entry.dayLabel, weekYear);
     if (!inferred) return entry;
     return { ...entry, date: inferred };
@@ -1584,11 +1623,17 @@ function inferDayEntryDates(
 
 function inferTimeSlotDates(
   slots: TimeSlot[],
-  weekYear: { week: number; year: number } | null
+  weekYear: WeekYear | null
 ): TimeSlot[] {
   if (slots.length === 0 || !weekYear) return slots;
   return slots.map((slot) => {
-    if (slot.date) return slot;
+    if (slot.date) {
+      // Fiks B: korriger LLM-gjettet år når kilden har ukenummer men mangler eksplisitt år.
+      if (!weekYear.yearFromSource && /\b20\d{2}\b/.test(slot.date)) {
+        return { ...slot, date: correctGuessedYear(slot.date, weekYear.year) };
+      }
+      return slot;
+    }
     const inferred = inferDateFromWeekdayLabel(slot.label, weekYear);
     if (!inferred) return slot;
     return { ...slot, date: inferred };
@@ -1753,7 +1798,7 @@ function normalizeScheduleByDay(raw: unknown): DayScheduleEntry[] {
     );
 }
 
-function normalizeAIAnalysisResult(
+export function normalizeAIAnalysisResult(
   data: unknown,
   sourceText?: string
 ): AIAnalysisResult {
@@ -2127,7 +2172,7 @@ async function analyzeImageWithModel(
   const completion = await openai.chat.completions.create({
     model,
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: `${currentDateDirective(new Date())}\n\n${SYSTEM_PROMPT}` },
       {
         role: "user",
         content: [
@@ -2166,7 +2211,7 @@ async function analyzeTextWithModel(
   const completion = await openai.chat.completions.create({
     model,
     messages: [
-      { role: "system", content: TEXT_SYSTEM_PROMPT },
+      { role: "system", content: `${currentDateDirective(new Date())}\n\n${TEXT_SYSTEM_PROMPT}` },
       {
         role: "user",
         content: `Analyser følgende tekst og returner JSON som beskrevet:\n\n${text}`,
