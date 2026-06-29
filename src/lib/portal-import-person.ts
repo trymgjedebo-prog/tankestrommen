@@ -17,15 +17,29 @@ export type PortalRelevanceContext = {
   schoolProfile?: SchoolWeeklyProfile | null;
 };
 
+/**
+ * Vei 1 (lag 2): ett barn i en children-liste. Må ha personId + classCode (for klasse-match);
+ * schoolProfile er valgfri. Strukturelt lik matcherens MatchChild (parseren garanterer classCode).
+ */
+export type PortalRelevanceChild = {
+  personId: string;
+  classCode: string;
+  schoolProfile?: SchoolWeeklyProfile | null;
+};
+
 export type PortalImportContext = {
   knownPersons: PortalKnownPerson[];
   relevanceContext?: PortalRelevanceContext;
+  /** Vei 1 (lag 2): liste av barn som serveren matcher dokumentet mot for å velge ett. */
+  children?: PortalRelevanceChild[];
 };
 
 export type PortalEventPersonMatchStatus =
   | "not_specified"
   | "unmatched_document_name"
-  | "matched";
+  | "matched"
+  /** Vei 1 (lag 2): children-liste sendt, men serveren kunne ikke velge ett barn → bruker velger. */
+  | "child_unresolved";
 
 function nameMatchKey(s: string): string {
   return s
@@ -101,6 +115,49 @@ export function parseRelevanceContextFromBody(
     ...(classCode ? { classCode } : {}),
     ...(schoolProfile ? { schoolProfile } : {}),
   };
+}
+
+/**
+ * Vei 1 (lag 2): parser den NYE children-liste-formen `{ children: [{ personId, classCode,
+ * schoolProfile }] }`. Returnerer undefined når `children` IKKE er en ikke-tom array med gyldige
+ * barn → kalleren faller da byte-identisk tilbake til den gamle ett-barns-formen via
+ * `parseRelevanceContextFromBody`. `validateProfile` injiseres som for ett-barns-formen.
+ */
+export function parseRelevanceChildrenFromBody(
+  raw: unknown,
+  validateProfile?: (raw: unknown) => SchoolWeeklyProfile | null,
+): PortalRelevanceChild[] | undefined {
+  let val: unknown = raw;
+  if (typeof val === "string") {
+    const t = val.trim();
+    if (!t) return undefined;
+    try {
+      val = JSON.parse(t);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!val || typeof val !== "object" || Array.isArray(val)) return undefined;
+  const arr = (val as Record<string, unknown>).children;
+  if (!Array.isArray(arr)) return undefined;
+  const out: PortalRelevanceChild[] = [];
+  for (const row of arr) {
+    if (!row || typeof row !== "object") continue;
+    const o = row as Record<string, unknown>;
+    const personId = typeof o.personId === "string" ? o.personId.trim() : "";
+    const classCode = typeof o.classCode === "string" ? o.classCode.trim() : "";
+    if (!personId || !classCode) continue; // må kunne identifiseres + matches på klasse
+    const schoolProfile =
+      validateProfile && o.schoolProfile !== undefined && o.schoolProfile !== null
+        ? validateProfile(o.schoolProfile)
+        : null;
+    out.push({
+      personId,
+      classCode,
+      ...(schoolProfile ? { schoolProfile } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /**

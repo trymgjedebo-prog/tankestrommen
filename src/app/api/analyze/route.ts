@@ -24,6 +24,7 @@ import type {
 import type { TravelFlightInference } from "@/lib/travel-document-infer";
 import {
   parseKnownPersonsFromBody,
+  parseRelevanceChildrenFromBody,
   parseRelevanceContextFromBody,
   relevanceOverlayOverride,
   resolvePortalEventPersonMatch,
@@ -31,6 +32,7 @@ import {
   type PortalEventPersonMatchStatus,
   type PortalImportContext,
 } from "@/lib/portal-import-person";
+import { applyChildSelectionToItems, selectChildForDocument } from "@/lib/child-selection";
 import {
   applyTankestromAnalyzeHeaders,
   getTankestromApiVersion,
@@ -8908,19 +8910,30 @@ async function wrapResponse(
     const fileName = resolvePortalFileNameFromExtra(extra, portalMeta);
     try {
       console.info("[Tankestrom analyze stage]", { stage: "portal_bundle_start", sourceType });
+      // Vei 1 (lag 2): server velger barnet når en children-liste ble sendt, og reduserer til ETT
+      // relevanceContext → fundamentet (filtrering/overlay) kjører uendret. No-op uten children
+      // (gammel ett-barns-form OG cup → selectChildForDocument returnerer relevanceContext uendret).
+      const { relevanceContext: selectedRelevanceContext, match: childMatch } =
+        selectChildForDocument(result, portalImport);
+      const effectivePortalImport: PortalImportContext = {
+        ...portalImport,
+        relevanceContext: selectedRelevanceContext,
+      };
       const bundle = await toPortalBundle(
         includeDebug ? result : stripInternalAnalysisDebug(result),
         sourceType,
         documentKind,
         includeDebug,
-        portalImport,
+        effectivePortalImport,
       );
       // Oppgave 6: klassepresis ukeplan-hovedkontekst når klienten sendte elevens klasse.
-      const overlayClassOverride = relevanceOverlayOverride(portalImport.relevanceContext);
+      const overlayClassOverride = relevanceOverlayOverride(effectivePortalImport.relevanceContext);
       const overlayForClass = (bundle as Record<string, unknown>).schoolWeekOverlayProposal;
       if (overlayClassOverride && overlayForClass && typeof overlayForClass === "object") {
         Object.assign(overlayForClass as Record<string, unknown>, overlayClassOverride);
       }
+      // Vei 1 (lag 2): tilordne valgt barns personId (matched) eller markér "velg selv" (uavklart).
+      applyChildSelectionToItems(Array.isArray(bundle.items) ? bundle.items : [], childMatch);
       console.log("[api/analyze] portal-mode → returning PortalImportProposalBundle", {
         ok: true,
         schemaVersion: bundle.schemaVersion,
@@ -9138,12 +9151,17 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
     const { image, text, pdf, docx, fileName } = body;
     lastFileName = typeof fileName === "string" ? fileName : null;
     const documentKind = parseDocumentKind(body.documentKind);
+    // Vei 1 (lag 2): ny children-liste-form. Mangler `children` → byte-identisk gammel ett-barns-sti.
+    const relevanceChildren = parseRelevanceChildrenFromBody(
+      body.relevanceContext,
+      validateClientSchoolWeeklyProfile,
+    );
     const portalImport: PortalImportContext = {
       knownPersons: parseKnownPersonsFromBody(body.knownPersons),
-      relevanceContext: parseRelevanceContextFromBody(
-        body.relevanceContext,
-        validateClientSchoolWeeklyProfile,
-      ),
+      relevanceContext: relevanceChildren
+        ? undefined
+        : parseRelevanceContextFromBody(body.relevanceContext, validateClientSchoolWeeklyProfile),
+      ...(relevanceChildren ? { children: relevanceChildren } : {}),
     };
 
     /**
