@@ -1,4 +1,5 @@
 import type { TravelFlightInference } from "@/lib/travel-document-infer";
+import type { SchoolWeeklyProfile } from "@/lib/types";
 
 export type PortalKnownPerson = {
   personId: string;
@@ -9,6 +10,11 @@ export type PortalKnownPerson = {
 export type PortalRelevanceContext = {
   /** Elevens klassekode, f.eks. «2STC». */
   classCode?: string;
+  /**
+   * Oppgave 9 (steg 1): barnets lagrede timeplan, validert fra klient-input
+   * (ChildSchoolProfile). Tilgjengeliggjøres for senere fag↔time-matching.
+   */
+  schoolProfile?: SchoolWeeklyProfile | null;
 };
 
 export type PortalImportContext = {
@@ -63,10 +69,15 @@ export function parseKnownPersonsFromBody(raw: unknown): PortalKnownPerson[] {
 
 /**
  * Parser klientens valgfrie relevanskontekst. Aksepterer både objekt (JSON-body) og
- * JSON-streng (multipart-felt). Returnerer undefined når ingen brukbar klasse finnes.
+ * JSON-streng (multipart-felt). Returnerer undefined når verken klasse eller timeplan finnes.
+ *
+ * `validateProfile` injiseres av kalleren (route.ts) for å validere en evt. `schoolProfile`
+ * (oppgave 9, steg 1) — slik at denne lib-en slipper å avhenge av den tunge LLM-modulen.
+ * Råinput valideres ALLTID via denne før den beholdes; ugyldig profil droppes (null).
  */
 export function parseRelevanceContextFromBody(
   raw: unknown,
+  validateProfile?: (raw: unknown) => SchoolWeeklyProfile | null,
 ): PortalRelevanceContext | undefined {
   let val: unknown = raw;
   if (typeof val === "string") {
@@ -81,8 +92,15 @@ export function parseRelevanceContextFromBody(
   if (!val || typeof val !== "object" || Array.isArray(val)) return undefined;
   const o = val as Record<string, unknown>;
   const classCode = typeof o.classCode === "string" ? o.classCode.trim() : "";
-  if (!classCode) return undefined;
-  return { classCode };
+  const schoolProfile =
+    validateProfile && o.schoolProfile !== undefined && o.schoolProfile !== null
+      ? validateProfile(o.schoolProfile)
+      : null;
+  if (!classCode && !schoolProfile) return undefined;
+  return {
+    ...(classCode ? { classCode } : {}),
+    ...(schoolProfile ? { schoolProfile } : {}),
+  };
 }
 
 /**

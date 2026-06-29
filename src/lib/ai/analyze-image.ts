@@ -1484,6 +1484,17 @@ function normalizeSchoolWeeklyProfileRaw(
   return { profile: { gradeBand, weekdays }, debug };
 }
 
+/**
+ * Tynn, eksportert wrapper for å validere/normalisere en UTRYGG klient-sendt timeplan
+ * (ChildSchoolProfile fra Foreldre-Appen) til den interne SchoolWeeklyProfile-typen.
+ * Returnerer null når input ikke gir en brukbar profil. Brukes av relevanceContext-mottaket
+ * (oppgave 9, steg 1) for å validere klient-input før den føres videre — råinput skal aldri
+ * brukes uvalidert.
+ */
+export function validateClientSchoolWeeklyProfile(raw: unknown): SchoolWeeklyProfile | null {
+  return normalizeSchoolWeeklyProfileRaw(raw).profile;
+}
+
 function detectIsoWeekday(dayLabel: string | null): number | null {
   if (!dayLabel) return null;
   const s = dayLabel.toLowerCase();
