@@ -8,7 +8,8 @@ import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 import { hasStrongSchoolEvidence, looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
-import { validateClientSchoolWeeklyProfile } from "@/lib/ai/analyze-image";
+  import { validateClientSchoolWeeklyProfile } from "@/lib/ai/analyze-image";
+import { pickYearForWeekdayDate } from "@/lib/portal-week-year";
 import type {
   AnalysisSourceHint,
   AIAnalysisResult,
@@ -568,6 +569,25 @@ function parseIsoWeekday(raw: string | null): number | null {
   const normalized = normalizeNorwegianLetters(raw);
   for (const [label, weekday] of Object.entries(NB_WEEKDAYS)) {
     if (normalized.includes(label)) return weekday;
+  }
+  return null;
+}
+
+/** Dag+måned UTEN år fra «15. juni» / «15.6» → {month, day}. Null hvis råteksten har eksplisitt år. */
+function parseDayMonthNoYear(raw: string | null): { month: number; day: number } | null {
+  if (!raw) return null;
+  if (/\b20\d{2}\b/.test(raw)) return null; // eksplisitt år → ikke vår sak (håndteres av tryParseNorwegianDate)
+  const nb = /(\d{1,2})\.\s*([a-zæøå.]+)\b/i.exec(raw);
+  if (nb) {
+    const day = Number(nb[1]);
+    const month = NB_MONTHS[normalizeMonthName(nb[2]!)];
+    if (month && day >= 1 && day <= 31) return { month, day };
+  }
+  const slash = /^(\d{1,2})[./](\d{1,2})$/.exec(raw.trim());
+  if (slash) {
+    const day = Number(slash[1]);
+    const month = Number(slash[2]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return { month, day };
   }
   return null;
 }
@@ -2348,13 +2368,29 @@ function isEventLikeText(raw: string | null): boolean {
   return EVENT_KEYWORDS.test(normalizeNorwegianLetters(raw));
 }
 
+/**
+ * Sterk skolebevis (≥2 VGS-klassekoder + skoleord) bygget fra hele analyse-resultatet
+ * (tittel+beskrivelse+ekstrahert tekst+dager) — fanger eksamens-/skoleuker uten tittel-ord
+ * og uten ukenummer. Delt av isSchoolPlanBundleContext og portalSourceKind.
+ */
+function resultHasStrongSchoolEvidence(result: AIAnalysisResult): boolean {
+  const blob = [
+    result.title,
+    result.description,
+    result.extractedText?.raw ?? "",
+    ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
+  ].join(" ");
+  return hasStrongSchoolEvidence(blob);
+}
+
 function isSchoolPlanBundleContext(
   result: AIAnalysisResult,
   weekPlanLike: boolean,
 ): boolean {
   if (weekPlanLike) return true;
   const t = normalizeNorwegianLetters(result.title);
-  return /\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t);
+  if (/\b(a-plan|aplan|ukeplan|aktivitetsplan|skoleplan)\b/.test(t)) return true;
+  return resultHasStrongSchoolEvidence(result);
 }
 
 /** Normalisert nøkkel for dedupe av praktiske cup-linjer. */
@@ -3871,11 +3907,14 @@ function portalSourceKind(
   sourceType: string,
   weekPlanLike: boolean,
   title: string,
+  strongSchoolEvidence = false,
 ): string {
   const n = normalizeNorwegianLetters(title);
   if (/\b(a-plan|aplan)\b/.test(n)) return "a_plan";
   if (/\b(ukeplan|aktivitetsplan|skoleplan)\b/.test(n)) return "school_week";
   if (weekPlanLike) return "school_week";
+  // Skoleuke uten tittel-ord/ukenummer, men med sterk skolebevis (≥2 klassekoder + skoleord).
+  if (strongSchoolEvidence) return "school_week";
   if (sourceType === "docx") return "school_docx";
   if (sourceType === "pdf") return "school_pdf";
   return `school_${sourceType || "unknown"}`;
@@ -3940,7 +3979,7 @@ function buildEventSchoolContext(
     lessonEnd: time ? end : null,
     itemType,
     confidence: result.confidence,
-    sourceKind: portalSourceKind(sourceType, weekPlanLike, result.title),
+    sourceKind: portalSourceKind(sourceType, weekPlanLike, result.title, resultHasStrongSchoolEvidence(result)),
   };
 }
 
@@ -3955,12 +3994,23 @@ function createPortalWeekDateResolver(result: AIAnalysisResult): (
     ...result.schedule.map((s) => `${s.label ?? ""} ${s.date ?? ""}`),
   ].join(" ");
   const weekNumber = parseWeekNumber(weekContext);
-  const resolvedYear = inferRealisticYear(collectYearCandidates(result), weekNumber);
+  const yearCandidates = collectYearCandidates(result);
+  const resolvedYear = inferRealisticYear(yearCandidates, weekNumber);
+  const currentYear = new Date().getFullYear();
   const weekPlanLike =
     /\b(a-plan|aplan|ukeplan|aktivitetsplan)\b/i.test(result.title) &&
     weekNumber !== null;
 
   return (rawDate: string | null, rawLabel: string | null): string | null => {
+    // Hovedfiks: ukedag + dag/måned UTEN fullt år → velg året der dag/måned faktisk faller på den
+    // oppgitte ukedagen («mandag 15. juni» → 2026, ikke 2025). Fanger både skoleår-spenn
+    // («2025/2026») og manglende år. Eksplisitt-daterte datoer treffer ikke (dm = null).
+    const statedWeekday = parseIsoWeekday(`${rawLabel ?? ""} ${rawDate ?? ""}`);
+    const dm = parseDayMonthNoYear(rawDate);
+    if (statedWeekday && dm) {
+      const y = pickYearForWeekdayDate(dm.month, dm.day, statedWeekday, yearCandidates, currentYear);
+      if (y) return `${y}-${String(dm.month).padStart(2, "0")}-${String(dm.day).padStart(2, "0")}`;
+    }
     const direct = parseDateWithFallbackYear(rawDate, resolvedYear);
     if (direct) {
       const explicitYearMatch = rawDate ? /\b(20\d{2})\b/.exec(rawDate) : null;
@@ -4417,16 +4467,24 @@ async function buildProposalItems(
     if (result.location) item.event.location = result.location;
     const arrLink = buildArrangementImportLinkMetadata(result, date, arrangementEndDateIso ?? null);
     const targetGroupNorm = normalizeSpace(result.targetGroup || "") || null;
+    // Skole-dag-events (schoolContext satt) er ikke arrangementer/cup: ikke påfør arrangement-lenking
+    // eller competitionClass (skoleklasser er ikke konkurranseklasser). Cup/reise/fallback har
+    // alltid schoolContext = null → arrangement-metadataen er uendret for dem.
+    const isSchool = Boolean(schoolContext);
     item.event.metadata = {
-      arrangementStableKey: arrLink.arrangementStableKey,
-      arrangementCoreTitle: arrLink.arrangementCoreTitle,
-      arrangementBlockGroupId: arrLink.arrangementBlockGroupId,
-      arrangementFollowupImportLikely: arrLink.arrangementFollowupImportLikely,
-      updateIntent: arrLink.updateIntent,
-      ...(arrLink.arrangementImportHint
-        ? { arrangementImportHint: arrLink.arrangementImportHint }
+      ...(!isSchool
+        ? {
+            arrangementStableKey: arrLink.arrangementStableKey,
+            arrangementCoreTitle: arrLink.arrangementCoreTitle,
+            arrangementBlockGroupId: arrLink.arrangementBlockGroupId,
+            arrangementFollowupImportLikely: arrLink.arrangementFollowupImportLikely,
+            updateIntent: arrLink.updateIntent,
+            ...(arrLink.arrangementImportHint
+              ? { arrangementImportHint: arrLink.arrangementImportHint }
+              : {}),
+            arrangementLinkDebug: arrLink.arrangementLinkDebug,
+          }
         : {}),
-      arrangementLinkDebug: arrLink.arrangementLinkDebug,
       ...(schoolContext ? { schoolContext } : {}),
       ...(schoolDayOverride ? { schoolDayOverride } : {}),
       ...(cupProposalDebug ? { cupProposalDebug } : {}),
@@ -4531,7 +4589,7 @@ async function buildProposalItems(
             },
           }
         : {}),
-      ...(!tf && targetGroupNorm
+      ...(!tf && targetGroupNorm && !isSchool
         ? {
             competitionClass: targetGroupNorm,
             targetGroup: targetGroupNorm,
