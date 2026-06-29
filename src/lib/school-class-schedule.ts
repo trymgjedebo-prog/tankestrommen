@@ -39,11 +39,20 @@ const SCHOOL_WORD_RE =
 /** Norske VGS-klassekoder, f.eks. 2STA, 2STB, 1IMA, 3PBA. */
 const CLASS_CODE_RE = /\b\d{1,2}\s?(?:st|im|yf|pb|el|hs|sf|mk|id|na|ss|rm|dh|ba|tip|ho)[a-f]\b/gi;
 
-/** Distinkte klassekoder (2STA, 2STB, …) i teksten. */
-export function countDistinctClassCodes(text: string): number {
+/**
+ * Distinkte, NORMALISERTE klassekoder i teksten (f.eks. ["2stc", "1ima"]). Delt byggekloss:
+ * brukes av skole-vs-cup-deteksjon (via `countDistinctClassCodes`) OG av barn-matchingen.
+ * Hver kode normaliseres med SAMME `normalizeClassCode` som barnets classCode → konsistent match.
+ */
+export function extractClassCodes(text: string): string[] {
   const n = normalizeNorwegianLetters(text);
   const matches = n.match(CLASS_CODE_RE) ?? [];
-  return new Set(matches.map((m) => m.replace(/\s+/g, ""))).size;
+  return Array.from(new Set(matches.map((m) => normalizeClassCode(m))));
+}
+
+/** Distinkte klassekoder (2STA, 2STB, …) i teksten. */
+export function countDistinctClassCodes(text: string): number {
+  return extractClassCodes(text).length;
 }
 
 /**
@@ -56,7 +65,7 @@ export function hasStrongSchoolEvidence(text: string): boolean {
 }
 
 /** Normaliser en klassekode for sammenligning: små bokstaver, å/ø/æ-fold, uten whitespace. */
-function normalizeClassCode(code: string): string {
+export function normalizeClassCode(code: string): string {
   return normalizeNorwegianLetters(code).replace(/\s+/g, "");
 }
 
