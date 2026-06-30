@@ -13,9 +13,14 @@ import type {
 } from "@/lib/portal-import-person";
 import type { AIAnalysisResult } from "@/lib/types";
 
-/** Bygg matchings-tekst fra analyse-resultatet (der klassekoder står: raw-tekst + strukturerte felt). */
+/**
+ * Bygg matchings-tekst fra analyse-resultatet (der klassekoder står). `targetGroup` settes
+ * FØRST og er PRIMÆRSIGNALET: LLM-en har alt renset ut klassekoden («10B» / «klasse 10B») uten
+ * rom-/benk-støy, så ungdomsskole-koder fanges trygt her uten å lene seg på regex-eksklusjonslisten.
+ */
 export function buildChildMatchDocumentText(result: AIAnalysisResult): string {
   const parts: string[] = [
+    result.targetGroup ?? "",
     result.title ?? "",
     result.description ?? "",
     result.extractedText?.raw ?? "",

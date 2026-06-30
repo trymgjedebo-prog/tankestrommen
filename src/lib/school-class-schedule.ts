@@ -36,18 +36,46 @@ const SPORT_SIGNAL_RE =
 const SCHOOL_WORD_RE =
   /\b(skole|skoleplan|skoledag|ukeplan|aktivitetsplan|klasse|klasseopplegg|klasserom|trinn|auditorium|bokinnlevering|radgiver|radgivning|eksamen|undervisning|elevsamtale|fagdag|laerer|vurderingssituasjon)\b/;
 
-/** Norske VGS-klassekoder, f.eks. 2STA, 2STB, 1IMA, 3PBA. */
-const CLASS_CODE_RE = /\b\d{1,2}\s?(?:st|im|yf|pb|el|hs|sf|mk|id|na|ss|rm|dh|ba|tip|ho)[a-f]\b/gi;
+/** Norske VGS-klassekoder, f.eks. 2STA, 2STB, 1IMA, 3PBA (streng — UENDRET). */
+const VGS_CLASS_CODE_RE = /\b\d{1,2}\s?(?:st|im|yf|pb|el|hs|sf|mk|id|na|ss|rm|dh|ba|tip|ho)[a-f]\b/gi;
 
 /**
- * Distinkte, NORMALISERTE klassekoder i teksten (f.eks. ["2stc", "1ima"]). Delt byggekloss:
+ * Ungdomsskole/barneskole-kandidat: trinn 1-10 + enkelt klassebokstav a-g (8a, 9b, 10c).
+ * Løsere enn VGS → MÅ gates (se EXCLUDED_PREFIX). I barn-matchingen er `result.targetGroup`
+ * (LLM-renset klasse) PRIMÆRSIGNALET; denne regexen er en KONSERVATIV backup for koder i kroppen
+ * og for dokumenter uten targetGroup. Restlekkasje på ord utenfor listen («lag 9b») er lav-skade:
+ * en spuriøs kode matcher kun et barn om den faktisk er barnets klasse, og cup beskyttes av
+ * STRONG_SPORT_SIGNAL_RE-først i looksLikeSchoolClassSchedule.
+ */
+const UNGDOMSSKOLE_CLASS_CODE_RE = /\b(?:10|[1-9])\s?[a-g]\b/g;
+
+/** Rom/referanse-ord rett FORAN en NN[A-G]-kode → false positive («rom 10b», «oppgave 3a»). */
+const UNGDOMSSKOLE_EXCLUDED_PREFIX_RE =
+  /\b(?:rom|klasserom|grupperom|moterom|sal|gymsal|oppgave|oppg|gruppe|side|post|sone|etasje|plass|nr|punkt|pkt|sak)\s+$/;
+
+/**
+ * Alle klassekoder i teksten (VGS streng ∪ ungdomsskole gated), NORMALISERT + distinkt.
+ * Delt byggekloss: skole-vs-cup-deteksjon (`countDistinctClassCodes`), barn-matching, OG
+ * innholdsfiltrering (`lineIsRelevantForClass`) — så ungdomsskole gjenkjennes konsistent overalt.
+ */
+function matchAllClassCodes(text: string): string[] {
+  const n = normalizeNorwegianLetters(text);
+  const out = new Set<string>();
+  for (const m of n.match(VGS_CLASS_CODE_RE) ?? []) out.add(normalizeClassCode(m));
+  for (const m of n.matchAll(UNGDOMSSKOLE_CLASS_CODE_RE)) {
+    if (UNGDOMSSKOLE_EXCLUDED_PREFIX_RE.test(n.slice(0, m.index))) continue; // «rom 10b» → dropp
+    out.add(normalizeClassCode(m[0]));
+  }
+  return Array.from(out);
+}
+
+/**
+ * Distinkte, NORMALISERTE klassekoder i teksten (f.eks. ["2stc", "10b"]). Delt byggekloss:
  * brukes av skole-vs-cup-deteksjon (via `countDistinctClassCodes`) OG av barn-matchingen.
  * Hver kode normaliseres med SAMME `normalizeClassCode` som barnets classCode → konsistent match.
  */
 export function extractClassCodes(text: string): string[] {
-  const n = normalizeNorwegianLetters(text);
-  const matches = n.match(CLASS_CODE_RE) ?? [];
-  return Array.from(new Set(matches.map((m) => normalizeClassCode(m))));
+  return matchAllClassCodes(text);
 }
 
 /** Distinkte klassekoder (2STA, 2STB, …) i teksten. */
@@ -82,9 +110,8 @@ export function lineIsRelevantForClass(
 ): boolean {
   const child = childClassCode ? normalizeClassCode(childClassCode) : "";
   if (!child) return true;
-  const matches = normalizeNorwegianLetters(line).match(CLASS_CODE_RE);
-  if (!matches || matches.length === 0) return true;
-  const codes = new Set(matches.map((m) => m.replace(/\s+/g, "")));
+  const codes = new Set(matchAllClassCodes(line));
+  if (codes.size === 0) return true;
   return codes.has(child);
 }
 
