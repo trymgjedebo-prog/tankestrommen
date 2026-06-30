@@ -69,9 +69,10 @@ export function selectChildForDocument(
 }
 
 /**
- * Post-pass på bundle-items etter at barnet er valgt. Setter KUN personId på items som ikke alt
- * har en ekte person (rører ikke fly-navne-match). `matched` → valgt personId + status "matched";
- * `ambiguous`/`no_signal` → status "child_unresolved" (personId forblir null → bruker velger).
+ * Post-pass på bundle-items etter at barnet er valgt. Setter personId + personMatchStatus på
+ * items som ikke alt har en ekte person (rører ikke fly-navne-match). Gjelder BÅDE event- og
+ * task-items (paritet): `matched` → valgt personId + status "matched"; `ambiguous`/`no_signal`
+ * → status "child_unresolved" (personId forblir uendret → bruker velger).
  * No-op når `match` er null (gammel form / cup).
  */
 export function applyChildSelectionToItems(
@@ -89,9 +90,12 @@ export function applyChildSelectionToItems(
         item.event.personMatchStatus = "matched";
       } else if (item.kind === "task" && item.task && isUnset(item.task.personId)) {
         item.task.personId = match.personId;
+        item.task.personMatchStatus = "matched";
       }
     } else if (item.kind === "event" && item.event && isUnset(item.event.personId)) {
       item.event.personMatchStatus = "child_unresolved";
+    } else if (item.kind === "task" && item.task && isUnset(item.task.personId)) {
+      item.task.personMatchStatus = "child_unresolved";
     }
   }
 }

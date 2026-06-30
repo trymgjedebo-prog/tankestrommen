@@ -2132,6 +2132,13 @@ type PortalTaskItem = {
     /** Valgfri klokkeslett-frist (24h HH:MM) når utledet fra kilden. */
     dueTime?: string;
     personId: string;
+    /**
+     * Vei 1: serverens barn-valg-status (paritet med event). `matched` → valgt barn;
+     * `child_unresolved` → bruker velger; `not_specified` → ingen children sendt (default).
+     * Alltid satt på serveren. (Frontend bør parse som valgfri m/ fallback "not_specified"
+     * pga. ikke-samtidig deploy — se frontend-plan.)
+     */
+    personMatchStatus: PortalEventPersonMatchStatus;
     title: string;
     notes?: string;
     /** Deterministisk intent: must_do (svar/frist/påmelding) | can_help (frivillig). */
@@ -2702,6 +2709,7 @@ function buildSecondaryPortalTaskCandidates(
       task: {
         date: resolved.taskDate,
         personId: "pending",
+        personMatchStatus: "not_specified",
         title: titleFin.title,
         notes: `Kanskje også relevant (sekundær forslagskandidat)\n\nKilde: ${trimSentence(line, 280)}`,
         ...(resolved.dueTime ? { dueTime: resolved.dueTime } : {}),
@@ -4639,6 +4647,7 @@ async function buildProposalItems(
       task: {
         date,
         personId: "pending",
+        personMatchStatus: "not_specified",
         title: title || "Oppgave",
         notes: result.title ? `Fra: ${result.title}` : undefined,
         ...(extras?.dueTime ? { dueTime: extras.dueTime } : {}),
@@ -8747,6 +8756,7 @@ function buildHomeworkTaskItemsFromOverlay(
       task: {
         date: isoDate,
         personId: "pending",
+        personMatchStatus: "not_specified",
         title: title || "Oppgave",
         notes,
         ...(classifyTaskIntent(title) ? { taskIntent: classifyTaskIntent(title) } : {}),

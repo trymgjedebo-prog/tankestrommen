@@ -117,39 +117,43 @@ describe("selectChildForDocument", () => {
 type TestItem = {
   kind: string;
   event?: { personId: unknown; personMatchStatus?: unknown };
-  task?: { personId: unknown };
+  task?: { personId: unknown; personMatchStatus?: unknown };
 };
 
 function sampleItems(): TestItem[] {
   return [
     { kind: "event", event: { personId: "pending", personMatchStatus: "not_specified" } },
-    { kind: "task", task: { personId: "pending" } },
+    { kind: "task", task: { personId: "pending", personMatchStatus: "not_specified" } },
     { kind: "event", event: { personId: "real-flight-id", personMatchStatus: "matched" } }, // ekte → urørt
   ];
 }
 
 describe("applyChildSelectionToItems", () => {
-  it("matched → setter valgt personId + status, rører ikke ekte personId (fly-match)", () => {
+  it("matched → setter valgt personId + status på BÅDE event og task, rører ikke ekte personId (fly-match)", () => {
     const its = sampleItems();
     applyChildSelectionToItems(its, { personId: "p-stellan", status: "matched" });
     expect(its[0]!.event!.personId).toBe("p-stellan");
     expect(its[0]!.event!.personMatchStatus).toBe("matched");
     expect(its[1]!.task!.personId).toBe("p-stellan");
+    expect(its[1]!.task!.personMatchStatus).toBe("matched"); // task får nå status (paritet)
     expect(its[2]!.event!.personId).toBe("real-flight-id"); // urørt
   });
 
-  it("no_signal/ambiguous → event-status child_unresolved, personId uendret", () => {
+  it("no_signal/ambiguous → status child_unresolved på BÅDE event og task, personId uendret", () => {
     const its = sampleItems();
     applyChildSelectionToItems(its, { personId: null, status: "no_signal" });
     expect(its[0]!.event!.personMatchStatus).toBe("child_unresolved");
     expect(its[0]!.event!.personId).toBe("pending");
-    expect(its[1]!.task!.personId).toBe("pending"); // task uten status urørt
+    expect(its[1]!.task!.personMatchStatus).toBe("child_unresolved"); // task får nå status
+    expect(its[1]!.task!.personId).toBe("pending"); // personId uendret
   });
 
-  it("match null (gammel form / cup) → no-op", () => {
+  it("match null (gammel form / cup) → no-op (task-status forblir not_specified)", () => {
     const its = sampleItems();
     applyChildSelectionToItems(its, null);
     expect(its[0]!.event!.personMatchStatus).toBe("not_specified");
     expect(its[0]!.event!.personId).toBe("pending");
+    expect(its[1]!.task!.personMatchStatus).toBe("not_specified"); // uendret
+    expect(its[1]!.task!.personId).toBe("pending");
   });
 });
