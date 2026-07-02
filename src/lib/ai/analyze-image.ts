@@ -96,6 +96,7 @@ Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøyaktig disse nøkle
   - IKKE finn på detaljer per dag du ikke ser i kilden. Ved tvil: tom scheduleByDay, beskriv heller i description og bruk schedule hvis det passer.
   - Én rad per dag eller per oppføring i kilden som hører til én dag.
   - Hvis en dag ikke har stor hendelse, men har meningsfullt skoleinnhold ("I timen", lekse, oppgaver, lesing/skriving, innlevering, forberedelse til prøve/vurdering, NB/påminnelser): fyll details med kort handlingsrettet oppsummering.
+  - Når SAMME oppgave/frist er oppgitt med ULIKE klokkeslett for ULIKE klasser (f.eks. «Bokinnlevering: 2STA 13.10–13.40, 2STC 10.30–11.00, 2STE 09.15–09.45»): ta med den dagen i scheduleByDay og skriv HVER klasses frist som EGEN linje i details, atskilt med linjeskift (\\n i JSON-strengen), med klassekode + klokkeslett ORDRETT — f.eks. details = "Bokinnlevering 2STA 13.10–13.40\\nBokinnlevering 2STC 10.30–11.00\\nBokinnlevering 2STE 09.15–09.45". IKKE slå sammen til én setning, og IKKE legg per-klasse-fristene i description — kun i details (én klasse per linje). Dette gjelder KUN når klokkeslettene er forskjellige per klasse; en vanlig felles frist uten per-klasse-oppdeling beskrives som før.
   - Ikke la en ukedag stå tom dersom kilden har meningsfull skoleinformasjon for den dagen.
 - confidence: tall 0–1 for hvor sikker du er på tolkningen (number)
 - extractedText: objekt med:
@@ -2055,13 +2056,14 @@ Rules:
 17. Include homework/assignments/reading/writing/tasks in "notes" unless they clearly fit better in "deadlines".
 18. Include reminders/NB/practical notices in "notes".
 19. If there is no extraordinary event, still populate that day with concise schoolwork/task summaries.
-20. Summarize into clean actionable language; do not copy long raw paragraphs.
+20. Summarize into clean actionable language; do not copy long raw paragraphs. Exception: when the SAME task has different times per class, keep each class as its own bullet — see rule 27.
 21. If the source is a recurring weekly timetable (same subjects/periods every week: "timeplan", "ukeskjema", grid with clock times + subjects Mon–Fri), set "schoolWeeklyProfile" to an object and set "days" to []. Do not copy each lesson into "days".
 22. For A-plans, one-off weekly activity plans, invitations, or week-specific narratives, set "schoolWeeklyProfile" to null and use "days" as usual.
 23. Sports tournaments / Spond messages: put Spond reply deadlines in "deadlines". Put parent volunteer help (fruit, meeting point, equipment), payment/contribution with a due date, and "notify about medicine" as short separate bullets in "rememberItems", "deadlines", or "highlights" (one bullet per action)—not only inside long "notes" paragraphs.
 24. If a day or match depends on progressing (e.g. "if we advance", "time TBD", "published later"), state that clearly in "notes" or "highlights" for that day—do not imply the time is final.
 25. For the same cup weekend: put information that applies to every day (packing, weather, general venue rules) once in "generalImportantInfo" or repeat the exact same short bullet only if needed; put day-specific kickoff/meeting times and opponents in that day's "highlights" or "time".
 26. ONLY when the source EXPLICITLY maps a class to a room and/or teacher (e.g. "2STA: rom 332-40 med Andreas Vågen"), also fill "classLocations" with ONE row per class. Resolve group rows ("Pulje 1: 2STA, 2STC og 2STE — Auditoriet") into one row per class sharing that room. Only include a row when a room or a teacher is present. Write classCode exactly as written in the source. Otherwise: [].
+27. When the SAME task or deadline is stated with DIFFERENT times for different classes (e.g. «Bokinnlevering: 2STA 13.10–13.40, 2STC 10.30–11.00, 2STE 09.15–09.45»), keep EACH class as its own separate bullet in "deadlines" — one class per bullet — preserving that class's code, date and time exactly as written (e.g. "Bokinnlevering 2STA 13.10–13.40" and "Bokinnlevering 2STC 10.30–11.00" as two bullets). Do NOT merge them into one summary sentence. This applies ONLY when the times differ per class; an ordinary shared deadline with no per-class split stays a single bullet as before.
 
 Return this JSON shape:
 
