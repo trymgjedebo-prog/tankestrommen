@@ -190,12 +190,26 @@ export interface SchoolWeekOverlayProposal {
   dailyActions: Partial<Record<SchoolProfileWeekdayIndex, SchoolWeekOverlayDailyAction>>;
 }
 
+/**
+ * Per-klasse-lokasjon når kilden eksplisitt kobler klasse → rom/lærer (f.eks.
+ * «2STA: rom 332-40 med Andreas Vågen»). classCode skrives SOM I KILDEN (visning);
+ * frontend normaliserer selv for sammenligning/utheving. room/teacher utelates når
+ * fraværende (optional-uten-null på wire). Flat `location` beholdes som fallback.
+ */
+export interface ClassLocation {
+  classCode: string;
+  room?: string;
+  teacher?: string;
+}
+
 export interface AIAnalysisResult {
   title: string;
   schedule: TimeSlot[];
   /** Fylles ut når kilden tydelig er ukeplan / flere dager med egen info per dag. */
   scheduleByDay: DayScheduleEntry[];
   location: string | null;
+  /** Per-klasse-lokasjon (kun ved eksplisitt klasse→rom/lærer-kobling i kilden). */
+  classLocations?: ClassLocation[];
   description: string;
   category: EventCategory;
   targetGroup: string | null;

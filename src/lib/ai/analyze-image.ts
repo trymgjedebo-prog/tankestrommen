@@ -5,9 +5,11 @@ import {
   BT_TRUNC_RAW_COMPLETION,
   truncateForBraintrust,
 } from "@/lib/braintrust-analyze-telemetry";
+import { extractClassCodes, normalizeClassCode } from "@/lib/school-class-schedule";
 import type {
   AIAnalysisResult,
   AnalysisModelTrace,
+  ClassLocation,
   DayScheduleEntry,
   EventCategory,
   ExtractedText,
@@ -76,6 +78,7 @@ Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøyaktig disse nøkle
   - Hvis bare dato er kjent (ikke tid): sett time til null.
   - Hvis bare tid er kjent (ikke dato): sett date til null.
 - location: sted hvis funnet, ellers null (string | null)
+- classLocations: KUN når kilden EKSPLISITT kobler klasse til rom og/eller lærer (f.eks. «2STA: rom 332-40 med Andreas Vågen»): liste av { "classCode": string, "room": string | null, "teacher": string | null } — ÉN rad per klasse. Grupper («Pulje 1: 2STA, 2STC og 2STE — Auditoriet») løses opp til én rad per klasse med samme rom. Ta bare med rader der rom eller lærer finnes. Skriv classCode slik den står i kilden. Ellers: tom liste []. location fylles som før.
 - description: kort oppsummering på norsk (string)
 - category: én av: arrangement, frist, beskjed, trening, møte, annet
 - targetGroup: hvem det gjelder (f.eks. klasse, lag, foreldre), ellers null (string | null)
@@ -1798,6 +1801,44 @@ function normalizeScheduleByDay(raw: unknown): DayScheduleEntry[] {
     );
 }
 
+/**
+ * Normaliserer LLM-emittert `classLocations` (per-klasse-lokasjon) — whitelist-mønsteret som
+ * `schoolWeeklyProfile`: uten denne droppes feltet stille. Regler (låst kontrakt + beslutninger):
+ * - classCode påkrevd (trim, ikke-tom) og må se ut som ÉN ekte klassekode
+ *   (`extractClassCodes(...).length === 1` — VGS + gated ungdomsskole). Casing bevares
+ *   SOM-SKREVET på wire (validering skjer på normalisert kopi).
+ * - room/teacher: trim; tomme/null utelates. Rad uten BÅDE rom og lærer droppes.
+ * - Dedup på `normalizeClassCode` — første rad vinner.
+ * - Tom/ugyldig input → undefined (feltet utelates; dagens oppførsel uendret).
+ */
+export function normalizeClassLocationsRaw(raw: unknown): ClassLocation[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out: ClassLocation[] = [];
+  const seen = new Set<string>();
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const o = row as Record<string, unknown>;
+    const classCode = typeof o.classCode === "string" ? o.classCode.trim() : "";
+    if (!classCode) continue;
+    if (extractClassCodes(classCode).length !== 1) continue; // må være nøyaktig ÉN ekte kode
+    const dedupeKey = normalizeClassCode(classCode);
+    if (seen.has(dedupeKey)) continue; // første rad vinner
+    // Konsistent romformat: strip ledende «rom »/«klasserom »-prefiks (bilde-stien emitterer
+    // ofte «rom 332-40», tekst-stien «332-40» — wire skal ha bar kode). KUN room; lærernavn urørt.
+    const roomRaw = typeof o.room === "string" ? o.room.trim() : "";
+    const room = roomRaw.replace(/^(?:klasserom|rom)\b\s*/i, "").trim();
+    const teacher = typeof o.teacher === "string" ? o.teacher.trim() : "";
+    if (!room && !teacher) continue; // minst ett av rom/lærer kreves
+    seen.add(dedupeKey);
+    out.push({
+      classCode,
+      ...(room ? { room } : {}),
+      ...(teacher ? { teacher } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 export function normalizeAIAnalysisResult(
   data: unknown,
   sourceText?: string
@@ -1931,6 +1972,10 @@ export function normalizeAIAnalysisResult(
       o.location === null || o.location === undefined
         ? null
         : String(o.location),
+    ...(() => {
+      const classLocations = normalizeClassLocationsRaw(o.classLocations);
+      return classLocations ? { classLocations } : {};
+    })(),
     description:
       typeof o.description === "string"
         ? o.description
@@ -2016,6 +2061,7 @@ Rules:
 23. Sports tournaments / Spond messages: put Spond reply deadlines in "deadlines". Put parent volunteer help (fruit, meeting point, equipment), payment/contribution with a due date, and "notify about medicine" as short separate bullets in "rememberItems", "deadlines", or "highlights" (one bullet per action)—not only inside long "notes" paragraphs.
 24. If a day or match depends on progressing (e.g. "if we advance", "time TBD", "published later"), state that clearly in "notes" or "highlights" for that day—do not imply the time is final.
 25. For the same cup weekend: put information that applies to every day (packing, weather, general venue rules) once in "generalImportantInfo" or repeat the exact same short bullet only if needed; put day-specific kickoff/meeting times and opponents in that day's "highlights" or "time".
+26. ONLY when the source EXPLICITLY maps a class to a room and/or teacher (e.g. "2STA: rom 332-40 med Andreas Vågen"), also fill "classLocations" with ONE row per class. Resolve group rows ("Pulje 1: 2STA, 2STC og 2STE — Auditoriet") into one row per class sharing that room. Only include a row when a room or a teacher is present. Write classCode exactly as written in the source. Otherwise: [].
 
 Return this JSON shape:
 
@@ -2035,6 +2081,7 @@ Return this JSON shape:
   ],
   "generalImportantInfo": string[],
   "contacts": string[],
+  "classLocations": [ { "classCode": string, "room": string | null, "teacher": string | null } ],
   "schoolWeeklyProfile": null | {
     "gradeBand": string | null (class/year free text, e.g. "10B", "10. trinn", "VG2"; server maps to 1-4, 5-7, 8-10, vg1, vg2, vg3),
     "weekdays": object whose keys are "0"–"4" (Monday=0 … Friday=4), or man/tir/ons/tor/fre. Each value is either:

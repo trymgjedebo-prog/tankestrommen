@@ -13,6 +13,7 @@ import { pickYearForWeekdayDate } from "@/lib/portal-week-year";
 import type {
   AnalysisSourceHint,
   AIAnalysisResult,
+  ClassLocation,
   DayScheduleEntry,
   DocumentVisualExtractionDebug,
   SchoolWeekOverlayDailyAction,
@@ -1852,6 +1853,11 @@ type PortalEventItem = {
       };
       /** Vanlig skolekontekst for berikelse av eksisterende skoleblokk. */
       schoolContext?: EventSchoolContext;
+      /**
+       * Per-klasse-lokasjon fra kilden (klasse → rom/lærer), migreringsfri passthrough.
+       * isPrimary/utheving beregnes i Foreldre-Appen — IKKE på wire. Flat `location` er fallback.
+       */
+      classLocations?: ClassLocation[];
       /**
        * Avviksdag som potensielt trumfer normal skoleplan.
        * Foreldre-App leser dette fra `event.metadata.schoolDayOverride`.
@@ -4482,6 +4488,9 @@ async function buildProposalItems(
     // alltid schoolContext = null → arrangement-metadataen er uendret for dem.
     const isSchool = Boolean(schoolContext);
     item.event.metadata = {
+      // Per-klasse-lokasjon: data-drevet (kun når modellen emitterte den) — cup/vanlige
+      // dokumenter har ingen klasse→rom-rader og får aldri feltet.
+      ...(result.classLocations?.length ? { classLocations: result.classLocations } : {}),
       ...(!isSchool
         ? {
             arrangementStableKey: arrLink.arrangementStableKey,
