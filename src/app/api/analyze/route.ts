@@ -34,6 +34,7 @@ import {
   type PortalImportContext,
 } from "@/lib/portal-import-person";
 import { applyChildSelectionToItems, selectChildForDocument } from "@/lib/child-selection";
+import { resolveChildClassEventTimeField } from "@/lib/event-time-from-child-class";
 import {
   applyTankestromAnalyzeHeaders,
   getTankestromApiVersion,
@@ -4365,8 +4366,26 @@ async function buildProposalItems(
       start = explicitStartEnd.start;
       end = explicitStartEnd.end;
     } else {
+      // Bro til #1+#3 (oppgave 9): ved per-klasse-differensierte tider og kjent barn
+      // overstyres tids-INPUTEN med barnets egen tid fra dag-linjene — selve maskineriet
+      // (kilder/varighet/vindu) kjører uendret. null → nøyaktig dagens oppførsel.
+      const childClassTimeField = resolveChildClassEventTimeField(
+        portalImport.relevanceContext?.classCode ?? null,
+        [
+          ...(notes ? notes.split(/\r?\n/) : []),
+          ...(dayContext
+            ? [
+                ...dayContext.highlights,
+                ...dayContext.notes,
+                ...dayContext.rememberItems,
+                ...dayContext.deadlines,
+              ]
+            : []),
+        ],
+        result.extractedText?.raw ?? null,
+      );
       nonFlightResolved = resolveNonFlightEventTimes({
-        timeField: time,
+        timeField: childClassTimeField ?? time,
         contextBlob: timeResolutionBlob,
         scheduleDayLabel: titleSuffix,
       });
