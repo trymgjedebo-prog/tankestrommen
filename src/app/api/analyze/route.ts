@@ -9,7 +9,7 @@ import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-t
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 import { hasStrongSchoolEvidence, looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
   import { validateClientSchoolWeeklyProfile } from "@/lib/ai/analyze-image";
-import { pickYearForWeekdayDate } from "@/lib/portal-week-year";
+import { isoWeekAndYearOfIsoDate, pickYearForWeekdayDate } from "@/lib/portal-week-year";
 import type {
   AnalysisSourceHint,
   AIAnalysisResult,
@@ -5963,14 +5963,57 @@ function decideSchoolProfileProposal(
   };
 }
 
+/** Delt plan-tittel-regex: gate-signalet OG dato-redundansen må bruke SAMME definisjon. */
+const ACTIVITY_PLAN_TITLE_RE = /\b(a-plan|aplan|aktivitetsplan|arbeidsplan|ukeplan)\b/;
+
+/**
+ * Dato-basert weekNumber-redundans: utled ISO-uke fra scheduleByDay-datoene.
+ * Krav: ≥2 DISTINKTE parsebare datoer og ALLE i samme (ISO-år, ISO-uke). Éndags-
+ * arrangementer (rådgiver-caset), flerukers-planer og uparsebare datoer → null.
+ */
+function deriveWeekNumberFromDayDates(result: AIAnalysisResult): number | null {
+  const byIsoDate = new Map<string, { isoYear: number; isoWeek: number }>();
+  for (const day of result.scheduleByDay) {
+    const iso = tryParseNorwegianDate(day.date);
+    if (!iso) continue;
+    const wk = isoWeekAndYearOfIsoDate(iso);
+    if (wk) byIsoDate.set(iso, wk);
+  }
+  if (byIsoDate.size < 2) return null;
+  const all = Array.from(byIsoDate.values());
+  if (new Set(all.map((w) => `${w.isoYear}-W${w.isoWeek}`)).size !== 1) return null;
+  return all[0]!.isoWeek;
+}
+
+/**
+ * Effektiv uke for overlay-GATEN og PROPOSALEN (deles så de aldri divergerer):
+ * ordet «Uke NN» vinner alltid når det er transkribert; dato-utledning er KUN fallback,
+ * og KUN ved eksplisitt plan-intensjon (documentKind activity_plan eller plan-tittelord).
+ * Skoleevidens alene aktiverer IKKE utledning — ellers ville eksamensuker (flerdagers,
+ * samme uke, uten plan-tittel) flyttet fra event-vei til overlay og mistet kalender-
+ * eventene sine (school-event-routing-prod-vernet).
+ */
+function resolveEffectiveWeekNumber(
+  result: AIAnalysisResult,
+  documentKind: AnalysisDocumentKind | undefined,
+  weekContext: string,
+): number | null {
+  const fromText = parseWeekNumber(weekContext);
+  if (fromText !== null) return fromText;
+  const planIntent =
+    documentKind === "activity_plan" ||
+    ACTIVITY_PLAN_TITLE_RE.test(normalizeNorwegianLetters(result.title || ""));
+  if (!planIntent) return null;
+  return deriveWeekNumberFromDayDates(result);
+}
+
 function isLikelyActivityPlanOverlay(
   result: AIAnalysisResult,
   documentKind: AnalysisDocumentKind | undefined,
 ): { yes: boolean; reasons: string[] } {
   const reasons: string[] = [];
   const titleNorm = normalizeNorwegianLetters(result.title || "");
-  const hasActivityTitleHint =
-    /\b(a-plan|aplan|aktivitetsplan|arbeidsplan|ukeplan)\b/.test(titleNorm);
+  const hasActivityTitleHint = ACTIVITY_PLAN_TITLE_RE.test(titleNorm);
   if (documentKind === "activity_plan") reasons.push("document_kind:activity_plan");
   if (hasActivityTitleHint) reasons.push("title_activity_plan_keyword");
 
@@ -5980,8 +6023,14 @@ function isLikelyActivityPlanOverlay(
     result.extractedText?.raw ?? "",
     ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
   ].join(" ");
-  const weekNumber = parseWeekNumber(weekContext);
-  if (weekNumber !== null) reasons.push("week_number_detected");
+  const weekNumber = resolveEffectiveWeekNumber(result, documentKind, weekContext);
+  if (weekNumber !== null) {
+    reasons.push(
+      parseWeekNumber(weekContext) !== null
+        ? "week_number_detected"
+        : "week_number_derived_from_dates",
+    );
+  }
 
   // Skolebevis: ≥2 klassekoder OG skoleord (eksamen/bokinnlevering/…). Lar en åpenbar skole-
   // aktivitetsplan (2STA–2STF + eksamen) bli gjenkjent som overlay selv uten det litterale
@@ -8317,7 +8366,7 @@ function buildSchoolWeekOverlayProposal(
     result.extractedText?.raw ?? "",
     ...result.scheduleByDay.map((d) => `${d.dayLabel ?? ""} ${d.date ?? ""}`),
   ].join(" ");
-  const weekNumber = parseWeekNumber(weekContext);
+  const weekNumber = resolveEffectiveWeekNumber(result, documentKind, weekContext);
   const { lines: weeklySummary, trace: weeklyTrace } = pickWeeklySummaryLines(result, policy);
   noiseDebug.weeklySummaryTrace = weeklyTrace;
 

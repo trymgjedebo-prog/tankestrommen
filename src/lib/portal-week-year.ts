@@ -17,6 +17,29 @@ export function isoWeekdayOfYmd(year: number, month: number, day: number): numbe
   return js === 0 ? 7 : js;
 }
 
+/**
+ * ISO-8601-uke (og ISO-år) for en ISO-dato «YYYY-MM-DD». Ren matte for dato-basert
+ * weekNumber-redundans i overlay-rutingen: dokumenter med ekte flerdagers datoer i samme
+ * uke skal ikke avhenge av at ORDET «Uke NN» ble transkribert. Merk: ISO-året kan avvike
+ * fra kalenderåret rundt årsskiftet (2025-12-29 → uke 1/2026). null ved ugyldig dato.
+ */
+export function isoWeekAndYearOfIsoDate(
+  isoDate: string,
+): { isoYear: number; isoWeek: number } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+  if (!m) return null;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (isoWeekdayOfYmd(year, month, day) === null) return null;
+  const d = new Date(Date.UTC(year, month - 1, day));
+  // ISO-uke: flytt til torsdagen i samme uke — dens kalenderår er ISO-året.
+  const isoWeekday = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
+  d.setUTCDate(d.getUTCDate() + 4 - isoWeekday);
+  const isoYear = d.getUTCFullYear();
+  const jan1 = new Date(Date.UTC(isoYear, 0, 1));
+  const isoWeek = Math.ceil(((d.getTime() - jan1.getTime()) / 86_400_000 + 1) / 7);
+  return { isoYear, isoWeek };
+}
+
 /** Rangering: foretrekk inneværende/fremtidige år (avstand fremover), fortid sist. */
 function weekdayYearRank(y: number, currentYear: number): number {
   return y >= currentYear ? y - currentYear : 1000 + (currentYear - y);
