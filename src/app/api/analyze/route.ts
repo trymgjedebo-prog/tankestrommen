@@ -8928,6 +8928,19 @@ function decideSchoolWeekOverlayProposal(
   decision: Record<string, unknown>;
   noiseDebug?: OverlayNoiseFilterDebug;
 } {
+  // Vei 1-veto: brukeren erklærte «Arrangement/opplegg» (event_doc). Erklæringen overstyrer
+  // skolebevis-heuristikken (som ikke kan skille arrangement fra ukeplan — begge er fag-løse),
+  // og kortslutter overlay-gaten før den evalueres → dokumentet går event-veien med bevarte
+  // tider. Kun eksplisitt event_doc vetoer; alle andre verdier faller uendret gjennom.
+  if (documentKind === "event_doc") {
+    return {
+      decision: {
+        path: "event_items_fallback",
+        reason: "overlay_vetoed_by_document_kind",
+        signals: [],
+      },
+    };
+  }
   const looks = isLikelyActivityPlanOverlay(result, documentKind);
   if (!looks.yes) {
     return {
