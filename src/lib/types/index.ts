@@ -202,6 +202,56 @@ export interface ClassLocation {
   teacher?: string;
 }
 
+/**
+ * Strukturert klasse-/puljeplan-oppføring (rå analysenivå). Additivt, inert felt: settes kun
+ * når modellen eksplisitt emitterer det (ingen prompt-regel gjør det ennå). Bevarer koblingen
+ * mellom aktivitet, klasse(r)/pulje, tid, rom og lærer som `ClassLocation` (uten tid) og fritekst
+ * i `scheduleByDay` ikke kan uttrykke. Forbrukes senere av `buildSchoolBlockProposal`.
+ */
+export interface ClassScheduleEntry {
+  /**
+   * Eksplisitt dato for aktiviteten når kilden oppgir den.
+   * ISO YYYY-MM-DD etter normalisering, ellers null.
+   */
+  date: string | null;
+
+  /**
+   * Ukedags-/dagsetikett fra kilden, for eksempel «Mandag».
+   * Trimmet, men ellers bevart.
+   */
+  dayLabel: string | null;
+
+  /**
+   * Aktiviteten denne klasse-/puljeoppføringen gjelder.
+   * Eksempel: «Bokinnlevering», «Matteeksamen».
+   */
+  activityTitle: string | null;
+
+  /**
+   * Én eller flere eksplisitte klassekoder.
+   * Flere koder betyr at klassene deler samme pulje/tid/rom/lærer.
+   */
+  classCodes: string[];
+
+  /** Pulje- eller gruppenavn fra kilden, ellers null. */
+  groupLabel: string | null;
+
+  /** Normalisert HH:MM, ellers null. */
+  start: string | null;
+
+  /** Normalisert HH:MM, ellers null. */
+  end: string | null;
+
+  room: string | null;
+  teacher: string | null;
+
+  /** Ordrett eller nær-ordrett kildelinje som binder feltene sammen. */
+  sourceText: string | null;
+
+  /** Normalisert til intervallet 0–1. */
+  confidence: number;
+}
+
 export interface AIAnalysisResult {
   title: string;
   schedule: TimeSlot[];
@@ -210,6 +260,11 @@ export interface AIAnalysisResult {
   location: string | null;
   /** Per-klasse-lokasjon (kun ved eksplisitt klasse→rom/lærer-kobling i kilden). */
   classLocations?: ClassLocation[];
+  /**
+   * Strukturert klasse-/puljeplan (aktivitet→klasse(r)→tid→rom→lærer). Additivt, inert:
+   * settes kun når modellen emitterer det (ingen prompt gjør det ennå). Utelates når tom.
+   */
+  classScheduleEntries?: ClassScheduleEntry[];
   description: string;
   category: EventCategory;
   targetGroup: string | null;
