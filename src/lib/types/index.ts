@@ -300,3 +300,185 @@ export type AnalysisInput =
   | { type: "pdf"; file: File }
   | { type: "docx"; file: File }
   | { type: "text"; text: string };
+
+/**
+ * Kanonisk wire-type for person-/barnematch-status på portal-forslag.
+ * Definert her (types) som eneste kilde; `portal-import-person` re-eksporterer den.
+ */
+export type PortalEventPersonMatchStatus =
+  | "not_specified"
+  | "unmatched_document_name"
+  | "matched"
+  /** Vei 1 (lag 2): children-liste sendt, men serveren kunne ikke velge ett barn → bruker velger. */
+  | "child_unresolved";
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * schoolBlockProposal — offisiell wire-kontrakt (schemaVersion "1.0.0").
+ *
+ * Ny, ADDITIV portal-bundle-nøkkel for `documentKind: "school"` (produseres senere).
+ * Samler event-veiens strukturerte skoledata (fag, oppløst tid, klasse, rom, lærer,
+ * pulje, berik/erstatt) i én representasjon Synka integrerer i barnets skoleblokk.
+ * Denne commiten definerer KUN typene — ingen produsent, ruting eller innkobling.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+export type SchoolBlockProposalKind = "school_block";
+
+/** Strukturell kvalitet (IKKE import-automatikk; brukeren godkjenner alltid previewen). */
+export type SchoolBlockStructureStatus = "complete" | "review_required";
+
+export type SchoolBlockAudienceScope = "common" | "per_audience";
+
+/** Element-nivå-handling. `replace_day` er dag-nivå (se SchoolBlockDayOperation). */
+export type SchoolBlockElementAction = "enrich" | "replace_range";
+
+/** Avledet dags-oppsummering (presedens: full_replace > partial_replace > hours_adjusted > enrich_only). */
+export type SchoolBlockDayResolution =
+  | "enrich_only"
+  | "partial_replace"
+  | "full_replace"
+  | "hours_adjusted";
+
+/** Kun HELDAGS-aktivitetstyper; delayed_start/early_end er dayOperation, ikke activityKind. */
+export type SchoolBlockActivityKind =
+  | "exam_day"
+  | "trip_day"
+  | "activity_day"
+  | "free_day"
+  | "other";
+
+export type SchoolBlockContentType =
+  | "lesson"
+  | "homework"
+  | "assessment"
+  | "reminder"
+  | "resource"
+  | "message"
+  | "alternative_program";
+
+export type SchoolBlockReviewCode =
+  | "missing_time"
+  | "ambiguous_subject"
+  | "child_class_unresolved"
+  | "unrecognized_activity"
+  | "conflicting_actions"
+  | "low_confidence";
+
+export interface SchoolBlockReviewFlag {
+  code: SchoolBlockReviewCode;
+  message: string;
+  /** Peker presist. `dayId` (IKKE dayIndex), `itemId`, `audienceEntryId` — alle valgfrie. */
+  scope: { dayId?: string; itemId?: string; audienceEntryId?: string };
+}
+
+/** Arver overlay-bøttene; `descriptionLines` for alternativt opplegg (program/praktisk info). */
+export interface SchoolBlockSections extends SchoolWeekOverlaySections {
+  descriptionLines?: string[];
+}
+
+/** Én klasse-/pulje-oppføring med SIN egen tid/rom/lærer (bevarer koblingen strukturelt). */
+export interface SchoolBlockAudienceEntry {
+  audienceEntryId: string;
+  classCodes: string[];
+  pulje: string | null;
+  start: string | null;
+  end: string | null;
+  room: string | null;
+  teacher: string | null;
+  /** true=barnets klasse; false=eksplisitt andre klasser (classCode kjent); null=ukjent/tvetydig. */
+  isChildAudience: boolean | null;
+}
+
+export interface SchoolBlockContentItem {
+  itemId: string;
+  title: string;
+  contentType: SchoolBlockContentType;
+  action: SchoolBlockElementAction;
+
+  subject: string | null;
+  subjectKey: string | null;
+  customLabel: string | null;
+  subjectCandidates?: SchoolProfileLessonCandidate[];
+
+  audienceScope: SchoolBlockAudienceScope;
+  /** Felles tid/rom/lærer — kan være null (untimed fellesinfo). Kun ved "common". */
+  commonSchedule:
+    | { start: string | null; end: string | null; room: string | null; teacher: string | null }
+    | null;
+  /** Per-klasse/pulje-oppføringer. Kun ved "per_audience" (≥1). */
+  audienceEntries: SchoolBlockAudienceEntry[];
+  /** Oppløst for BARNET — kun når nøyaktig én entry matcher sikkert; ellers null. */
+  resolvedChildAudience:
+    | {
+        audienceEntryId: string | null;
+        start: string | null;
+        end: string | null;
+        room: string | null;
+        teacher: string | null;
+      }
+    | null;
+
+  sections: SchoolBlockSections;
+  /** Satt når contentType="alternative_program"; ellers null. */
+  activityKind: SchoolBlockActivityKind | null;
+
+  evidence: string | null;
+  sourceText: string | null;
+  confidence: number;
+  reviewFlags: SchoolBlockReviewFlag[];
+}
+
+/** Diskriminert dags-operasjon: skiller hel erstatning fra start-/slutt-justering. */
+export type SchoolBlockDayOperation =
+  | { op: "none" }
+  | {
+      op: "replace_day";
+      activityKind: SchoolBlockActivityKind;
+      effectiveStart: string | null;
+      effectiveEnd: string | null;
+      reason: string | null;
+      confidence: number;
+    }
+  | { op: "adjust_start"; effectiveStart: string; reason: string | null; confidence: number }
+  | { op: "adjust_end"; effectiveEnd: string; reason: string | null; confidence: number };
+
+export interface SchoolBlockDay {
+  dayId: string;
+  date: string | null;
+  weekdayIndex: SchoolProfileWeekdayIndex | null;
+  dayLabel: string | null;
+
+  /** Dynamisk overskrift; kun ved full_replace, ellers null. */
+  blockTitle: string | null;
+  dayOperation: SchoolBlockDayOperation;
+  dayResolution: SchoolBlockDayResolution;
+
+  contentItems: SchoolBlockContentItem[];
+
+  confidence: number;
+  evidence: string | null;
+  reviewFlags: SchoolBlockReviewFlag[];
+}
+
+export interface SchoolBlockProposal {
+  proposalId: string;
+  kind: SchoolBlockProposalKind;
+  schemaVersion: "1.0.0";
+  sourceTitle: string;
+  originalSourceType: string;
+  confidence: number;
+
+  personId: string | null;
+  /** Eneste kilde til match-status — gjenbruker eksisterende union. */
+  personMatchStatus: PortalEventPersonMatchStatus;
+  classCode: string | null;
+
+  /** Valgfri → én-dags-støtte (ingen ukenummer-krav). */
+  weekNumber?: number | null;
+  days: SchoolBlockDay[];
+
+  /** Eneste readiness-felt (strukturell kvalitet). */
+  structureStatus: SchoolBlockStructureStatus;
+  reviewFlags: SchoolBlockReviewFlag[];
+
+  languageTrack?: { resolvedTrack: string | null; confidence: number; reason: string };
+}
