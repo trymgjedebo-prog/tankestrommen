@@ -1,5 +1,5 @@
 import type { TravelFlightInference } from "@/lib/travel-document-infer";
-import type { SchoolWeeklyProfile } from "@/lib/types";
+import type { PortalEventPersonMatchStatus, SchoolWeeklyProfile } from "@/lib/types";
 
 export type PortalKnownPerson = {
   personId: string;
@@ -34,12 +34,8 @@ export type PortalImportContext = {
   children?: PortalRelevanceChild[];
 };
 
-export type PortalEventPersonMatchStatus =
-  | "not_specified"
-  | "unmatched_document_name"
-  | "matched"
-  /** Vei 1 (lag 2): children-liste sendt, men serveren kunne ikke velge ett barn → bruker velger. */
-  | "child_unresolved";
+// Kanonisk definisjon flyttet til @/lib/types; re-eksporteres her for eksisterende importstier.
+export type { PortalEventPersonMatchStatus };
 
 function nameMatchKey(s: string): string {
   return s
