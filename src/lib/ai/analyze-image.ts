@@ -7,6 +7,7 @@ import {
 } from "@/lib/braintrust-analyze-telemetry";
 import { extractClassCodes, normalizeClassCode } from "@/lib/school-class-schedule";
 import { normalizeClassScheduleEntriesRaw } from "@/lib/class-schedule-normalize";
+import { CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION } from "@/lib/ai/class-schedule-entries-prompt";
 import type {
   AIAnalysisResult,
   AnalysisModelTrace,
@@ -54,7 +55,7 @@ interface ParentDayItem {
   notes: string[];
 }
 
-const SYSTEM_PROMPT = `Du analyserer bilder av beskjeder, invitasjoner, skjermbilder og dokumenter for norske foreldre.
+export const SYSTEM_PROMPT = `Du analyserer bilder av beskjeder, invitasjoner, skjermbilder og dokumenter for norske foreldre.
 Les all synlig tekst. Avgjør om innholdet beskriver et arrangement, en frist, en beskjed, trening, et møte, eller annet.
 
 VIKTIG dato-regel for ukeplaner:
@@ -140,6 +141,8 @@ GRID-TIMEPLAN – LES LAYOUTEN FØR DU TOLKER TEKSTEN:
   subjectKey: kort slug på norsk fagnavn i små bokstaver og bindestrek (norsk, matematikk, engelsk, naturfag, samfunnsfag, kroppsoving, musikk, kunst_og_håndverk, osv.). Bruk customLabel når faget trenger presisering (f.eks. «Spansk valgfag»). subjectCandidates KUN når samme slot har flere alternative fag/spor – da en rad per alternativ, weight=1 for begge (eller høyere for førstnevnte).
   room: klasserom/lokale hvis det står synlig i boksen/raden (f.eks. «203», «Gymsal»), ellers null. teacher: lærernavn eller initialer hvis synlig, ellers null. lessonSubcategory: for valgfag/språkfag, sett det oppløste sporet (f.eks. «Tysk», «Spansk», «Programmering») når det fremgår, ellers null.
   Tider: 24-timersformat HH:MM. Sorter lessons innen hver dag etter start tid, stigende.
+
+${CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION}
 
 Hvis bildet ikke inneholder lesbar tekst, sett lav confidence og forklar kort i description.`;
 
@@ -2021,7 +2024,7 @@ export function normalizeAIAnalysisResult(
   };
 }
 
-const TEXT_SYSTEM_PROMPT = `You are extracting useful daily information for a parent from a school plan, weekly plan, invitation, or similar document.
+export const TEXT_SYSTEM_PROMPT = `You are extracting useful daily information for a parent from a school plan, weekly plan, invitation, or similar document.
 
 Your goal is NOT to simply repeat the document.
 Your goal is to identify what is actually important to remember.
@@ -2098,7 +2101,9 @@ Return this JSON shape:
   }
 }
 
-Use English weekday keys only. subjectKey: lowercase slug from Norwegian subject name (norsk, matematikk, engelsk). customLabel when extra detail is needed. room/teacher: classroom and teacher when stated in the source, else null. lessonSubcategory: resolved track for electives/language subjects (e.g. "Tysk", "Programmering") when evident, else null. Times 24h HH:MM.`;
+Use English weekday keys only. subjectKey: lowercase slug from Norwegian subject name (norsk, matematikk, engelsk). customLabel when extra detail is needed. room/teacher: classroom and teacher when stated in the source, else null. lessonSubcategory: resolved track for electives/language subjects (e.g. "Tysk", "Programmering") when evident, else null. Times 24h HH:MM.
+
+${CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION}`;
 
 function getOpenAIClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
