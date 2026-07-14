@@ -6,6 +6,7 @@ import {
   truncateForBraintrust,
 } from "@/lib/braintrust-analyze-telemetry";
 import { extractClassCodes, normalizeClassCode } from "@/lib/school-class-schedule";
+import { normalizeClassScheduleEntriesRaw } from "@/lib/class-schedule-normalize";
 import type {
   AIAnalysisResult,
   AnalysisModelTrace,
@@ -1976,6 +1977,11 @@ export function normalizeAIAnalysisResult(
     ...(() => {
       const classLocations = normalizeClassLocationsRaw(o.classLocations);
       return classLocations ? { classLocations } : {};
+    })(),
+    ...(() => {
+      // Additivt/inert: modellen emitterer aldri dette ennå (ingen prompt) → alltid utelatt.
+      const classScheduleEntries = normalizeClassScheduleEntriesRaw(o.classScheduleEntries);
+      return classScheduleEntries ? { classScheduleEntries } : {};
     })(),
     description:
       typeof o.description === "string"
