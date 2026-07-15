@@ -7,6 +7,7 @@ import {
 } from "@/lib/braintrust-analyze-telemetry";
 import { extractClassCodes, normalizeClassCode } from "@/lib/school-class-schedule";
 import { normalizeSchoolTime, schoolMinutesToTime } from "@/lib/school-time";
+import { detectIsoWeekdayFromLabel, normalizeSchoolWeekdayIndex } from "@/lib/school-weekday";
 import { normalizeClassScheduleEntriesRaw } from "@/lib/class-schedule-normalize";
 import { CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION } from "@/lib/ai/class-schedule-entries-prompt";
 import type {
@@ -310,73 +311,6 @@ function slugifySubjectKey(raw: string): string | null {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug || null;
-}
-
-/** Mandag = "0" … fredag = "4" (Foreldre-App). Lør/søn → null. */
-function canonicalSchoolProfileWeekdayIndex(
-  raw: string,
-): SchoolProfileWeekdayIndex | null {
-  const k = raw.toLowerCase().trim().replace(/\.$/, "");
-  const collapsed = k.replace(/\s+/g, "");
-
-  if (/^[0-4]$/.test(collapsed)) {
-    return collapsed as SchoolProfileWeekdayIndex;
-  }
-
-  const nbAbbr: Record<string, SchoolProfileWeekdayIndex> = {
-    man: "0",
-    tir: "1",
-    ons: "2",
-    tor: "3",
-    fre: "4",
-  };
-  if (nbAbbr[collapsed]) return nbAbbr[collapsed];
-
-  const nb = normalizeNorwegianLetters(collapsed);
-  if (nb === "lordag" || nb === "sondag" || nb === "laurdag") return null;
-
-  const nbFull: Record<string, SchoolProfileWeekdayIndex> = {
-    mandag: "0",
-    tirsdag: "1",
-    onsdag: "2",
-    torsdag: "3",
-    fredag: "4",
-  };
-  if (nbFull[nb]) return nbFull[nb];
-
-  if (
-    collapsed === "saturday" ||
-    collapsed === "sunday" ||
-    collapsed === "sat" ||
-    collapsed === "sun"
-  ) {
-    return null;
-  }
-
-  const enFull: Record<string, SchoolProfileWeekdayIndex> = {
-    monday: "0",
-    tuesday: "1",
-    wednesday: "2",
-    thursday: "3",
-    friday: "4",
-  };
-  if (enFull[collapsed]) return enFull[collapsed];
-
-  const enShort: Record<string, SchoolProfileWeekdayIndex> = {
-    mon: "0",
-    ma: "0",
-    tue: "1",
-    ti: "1",
-    wed: "2",
-    on: "2",
-    thu: "3",
-    to: "3",
-    fri: "4",
-    fr: "4",
-  };
-  if (enShort[collapsed]) return enShort[collapsed];
-
-  return null;
 }
 
 /** Pauser/slots som IKKE skal være lessons i en skoleprofil. */
@@ -1448,13 +1382,13 @@ function normalizeSchoolWeeklyProfileRaw(
       const rawKey = typeof r.weekday === "string" ? r.weekday : "(no key)";
       const wk =
         typeof r.weekday === "string"
-          ? canonicalSchoolProfileWeekdayIndex(r.weekday)
+          ? normalizeSchoolWeekdayIndex(r.weekday)
           : null;
       pushDay(rawKey, r, wk);
     }
   } else if (o.weekdays && typeof o.weekdays === "object") {
     for (const [key, val] of Object.entries(o.weekdays as Record<string, unknown>)) {
-      const wk = canonicalSchoolProfileWeekdayIndex(key);
+      const wk = normalizeSchoolWeekdayIndex(key);
       pushDay(key, val, wk);
     }
   }
@@ -1476,22 +1410,6 @@ function normalizeSchoolWeeklyProfileRaw(
  */
 export function validateClientSchoolWeeklyProfile(raw: unknown): SchoolWeeklyProfile | null {
   return normalizeSchoolWeeklyProfileRaw(raw).profile;
-}
-
-function detectIsoWeekday(dayLabel: string | null): number | null {
-  if (!dayLabel) return null;
-  const s = dayLabel.toLowerCase();
-  const has = (re: RegExp) => re.test(s);
-
-  if (has(/\b(man(day)?|ma\.?|mandag)\b/i)) return 1;
-  if (has(/\b(tue(s(day)?)?|ti\.?|tirsdag)\b/i)) return 2;
-  if (has(/\b(wed(nesday)?|on\.?|onsdag)\b/i)) return 3;
-  if (has(/\b(thu(rs(day)?)?|to\.?|torsdag)\b/i)) return 4;
-  if (has(/\b(fri(day)?|fr\.?|fredag)\b/i)) return 5;
-  if (has(/\b(sat(urday)?|l[øo]r\.?|l[øo]rdag)\b/i)) return 6;
-  if (has(/\b(sun(day)?|s[øo]n\.?|s[øo]ndag)\b/i)) return 7;
-
-  return null;
 }
 
 function getIsoWeekDateUtc(year: number, week: number, isoWeekday: number): Date {
@@ -1560,7 +1478,7 @@ function inferDateFromWeekdayLabel(
   weekYear: WeekYear | null
 ): string | null {
   if (!weekYear) return null;
-  const isoWeekday = detectIsoWeekday(dayLabel);
+  const isoWeekday = detectIsoWeekdayFromLabel(dayLabel);
   if (!isoWeekday) return null;
   const d = getIsoWeekDateUtc(weekYear.year, weekYear.week, isoWeekday);
   return formatDateNbNo(d);
