@@ -5,6 +5,7 @@ import {
   type AnalysisDocumentKind,
 } from "@/lib/ai/analysis-model-router";
 import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
+import { djb2Hex } from "@/lib/stable-id";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 import { hasStrongSchoolEvidence, looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
@@ -1111,14 +1112,6 @@ function buildEventProposalTitle(
     return `${planHeadTitle(result)} – ${programHint}`;
   }
   return fallback;
-}
-
-function djb2Hex(input: string): string {
-  let h = 5381;
-  for (let i = 0; i < input.length; i++) {
-    h = (h * 33) ^ input.charCodeAt(i)!;
-  }
-  return (h >>> 0).toString(16).padStart(8, "0");
 }
 
 function slugifyArrangementStableSegment(raw: string): string {
