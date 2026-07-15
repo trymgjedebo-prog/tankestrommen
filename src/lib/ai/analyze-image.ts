@@ -1982,7 +1982,8 @@ export function normalizeAIAnalysisResult(
       return classLocations ? { classLocations } : {};
     })(),
     ...(() => {
-      // Additivt/inert: modellen emitterer aldri dette ennå (ingen prompt) → alltid utelatt.
+      // Additivt/valgfritt: begge prompt-flytene ber nå om dette (delt prompt-seksjon).
+      // Normaliseres og utelates når kilden ikke gir en gyldig klasse-/puljebinding.
       const classScheduleEntries = normalizeClassScheduleEntriesRaw(o.classScheduleEntries);
       return classScheduleEntries ? { classScheduleEntries } : {};
     })(),
@@ -2222,14 +2223,128 @@ function usageFromCompletion(completion: {
   return { prompt_tokens, completion_tokens, total_tokens };
 }
 
+/**
+ * Summer to usage-objekter (f.eks. basekall + truncation-retry) defensivt, med samme
+ * manglende-verdi-håndtering som `usageFromCompletion`: to `null` → `null`; ett `null`
+ * → det andre uendret; ellers felt-for-felt-sum der et felt forblir `undefined` bare når
+ * BEGGE mangler. Endrer ikke den offentlige usage-shapen.
+ */
+function sumRoutedUsage(
+  a: RoutedOpenAIUsage | null,
+  b: RoutedOpenAIUsage | null,
+): RoutedOpenAIUsage | null {
+  if (!a) return b;
+  if (!b) return a;
+  const addField = (
+    x: number | undefined,
+    y: number | undefined,
+  ): number | undefined => (x == null && y == null ? undefined : (x ?? 0) + (y ?? 0));
+  return {
+    prompt_tokens: addField(a.prompt_tokens, b.prompt_tokens),
+    completion_tokens: addField(a.completion_tokens, b.completion_tokens),
+    total_tokens: addField(a.total_tokens, b.total_tokens),
+  };
+}
+
+// Utdata-token-tak for JSON-analysen. Basetakene holdes bevisst stramme; kun når API-et
+// eksplisitt rapporterer avkorting (finish_reason === "length") gjøres ETT målrettet nytt
+// forsøk med forhøyet tak — ikke et blindt, permanent løft. Det additive
+// `classScheduleEntries`-feltet kan gjøre rike klasse-/timeplaner større enn de
+// opprinnelige takene, og er den best støttede hypotesen for den observerte regresjonen.
+const IMAGE_ANALYSIS_MAX_OUTPUT_TOKENS = 2800;
+const TEXT_ANALYSIS_MAX_OUTPUT_TOKENS = 4000;
+const TRUNCATION_RETRY_OUTPUT_TOKEN_MULTIPLIER = 2;
+
+/**
+ * Kjør ett JSON-analysekall i `json_object`-modus.
+ *
+ * `finish_reason === "length"` er en eksplisitt, identifiserbar årsak til UFULLSTENDIG
+ * JSON: svaret ble avkortet ved token-taket før objektet rakk å lukkes. Under json_object
+ * gjør OpenAI det dessuten vanskelig for modellen å legge på Markdown-gjerder eller prosa
+ * rundt JSON. Avkorting er den best støttede hypotesen for den observerte regresjonen (vi
+ * har ikke observert den faktiske produksjonsresponsen eller dens finish_reason).
+ *
+ * Kun når API-et faktisk rapporterer `"length"` gjøres ETT nytt forsøk med forhøyet tak
+ * (samme modell/prompt). Er svaret fortsatt avkortet, kastes en tydelig, diagnostiserbar
+ * feil. Ugyldig JSON med ANDRE finish reasons (f.eks. `"stop"`) retryes IKKE — den går
+ * gjennom den eksisterende parsefeilen i `parseAIResponse`. `finish_reason` logges alltid
+ * til telemetri slik at kategorien kan bekreftes i produksjon.
+ */
+async function runAnalysisJsonCompletion(opts: {
+  model: string;
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+  baseMaxOutputTokens: number;
+  temperature: number;
+  modality: string;
+}): Promise<RoutedModelCallResult> {
+  const { model, messages, baseMaxOutputTokens, temperature, modality } = opts;
+  const openai = getOpenAIClient();
+
+  const call = (maxOutput: number) =>
+    openai.chat.completions.create({
+      model,
+      messages,
+      response_format: { type: "json_object" },
+      ...chatCompletionOutputTokenParam(model, maxOutput),
+      temperature,
+    });
+
+  const initialCompletion = await call(baseMaxOutputTokens);
+  const initialFinishReason = initialCompletion.choices[0]?.finish_reason ?? null;
+
+  let finalFinishReason = initialFinishReason;
+  let raw = initialCompletion.choices[0]?.message?.content;
+  // Tokenbruk akkumuleres over BEGGE kall — det avkortede første kallet koster også
+  // tokens, og skal ikke forsvinne fra usage/modelTrace.
+  let usage = usageFromCompletion(initialCompletion);
+  let retriedForTruncation = false;
+  let retryCount: 0 | 1 = 0;
+
+  if (initialFinishReason === "length") {
+    retriedForTruncation = true;
+    retryCount = 1;
+    const retryCompletion = await call(
+      baseMaxOutputTokens * TRUNCATION_RETRY_OUTPUT_TOKEN_MULTIPLIER,
+    );
+    finalFinishReason = retryCompletion.choices[0]?.finish_reason ?? null;
+    raw = retryCompletion.choices[0]?.message?.content;
+    usage = sumRoutedUsage(usage, usageFromCompletion(retryCompletion));
+  }
+
+  const span = currentSpan();
+  if (span && raw) {
+    span.log({
+      metadata: {
+        completionModel: model,
+        modality,
+        // Kun siste (begrensede) rårespons logges — ikke hele første rårespons.
+        rawCompletionChars: raw.length,
+        rawCompletionTrunc: truncateForBraintrust(raw, BT_TRUNC_RAW_COMPLETION),
+        initialFinishReason,
+        finalFinishReason,
+        retriedForTruncation,
+        retryCount,
+      },
+    });
+  }
+
+  if (finalFinishReason === "length") {
+    // Bevisst uten ordet «token» i meldingen: mapAnalyzeTextError nøkkel-matcher på
+    // «token» og ville ellers endret HTTP-status. Vi bevarer dagens mapping (→ 502).
+    throw new Error(
+      `Modellsvaret ble avkortet før gyldig JSON (finish_reason=length, modality=${modality}); nytt forsøk med høyere utdatagrense var ikke nok.`,
+    );
+  }
+
+  return { result: parseAIResponse(raw), usage };
+}
+
 async function analyzeImageWithModel(
   imageBase64: string,
   model: string,
 ): Promise<RoutedModelCallResult> {
-  const openai = getOpenAIClient();
   const imageUrl = toDataUrl(imageBase64);
-
-  const completion = await openai.chat.completions.create({
+  return runAnalysisJsonCompletion({
     model,
     messages: [
       { role: "system", content: `${currentDateDirective(new Date())}\n\n${SYSTEM_PROMPT}` },
@@ -2241,34 +2356,17 @@ async function analyzeImageWithModel(
         ],
       },
     ],
-    response_format: { type: "json_object" },
-    ...chatCompletionOutputTokenParam(model, 2800),
+    baseMaxOutputTokens: IMAGE_ANALYSIS_MAX_OUTPUT_TOKENS,
     temperature: 0.2,
+    modality: "image",
   });
-
-  const raw = completion.choices[0]?.message?.content;
-  const span = currentSpan();
-  if (span && raw) {
-    span.log({
-      metadata: {
-        completionModel: model,
-        modality: "image",
-        rawCompletionChars: raw.length,
-        rawCompletionTrunc: truncateForBraintrust(raw, BT_TRUNC_RAW_COMPLETION),
-      },
-    });
-  }
-
-  return { result: parseAIResponse(raw), usage: usageFromCompletion(completion) };
 }
 
 async function analyzeTextWithModel(
   text: string,
   model: string,
 ): Promise<RoutedModelCallResult> {
-  const openai = getOpenAIClient();
-
-  const completion = await openai.chat.completions.create({
+  return runAnalysisJsonCompletion({
     model,
     messages: [
       { role: "system", content: `${currentDateDirective(new Date())}\n\n${TEXT_SYSTEM_PROMPT}` },
@@ -2277,25 +2375,10 @@ async function analyzeTextWithModel(
         content: `Analyser følgende tekst og returner JSON som beskrevet:\n\n${text}`,
       },
     ],
-    response_format: { type: "json_object" },
-    ...chatCompletionOutputTokenParam(model, 4000),
+    baseMaxOutputTokens: TEXT_ANALYSIS_MAX_OUTPUT_TOKENS,
     temperature: 0.2,
+    modality: "text",
   });
-
-  const raw = completion.choices[0]?.message?.content;
-  const span = currentSpan();
-  if (span && raw) {
-    span.log({
-      metadata: {
-        completionModel: model,
-        modality: "text",
-        rawCompletionChars: raw.length,
-        rawCompletionTrunc: truncateForBraintrust(raw, BT_TRUNC_RAW_COMPLETION),
-      },
-    });
-  }
-
-  return { result: parseAIResponse(raw), usage: usageFromCompletion(completion) };
 }
 
 const DOCUMENT_IMAGE_TRANSCRIBE_PROMPT = `Du ser et utsnitt fra et dokument (Word eller PDF) som norske foreldre skal forstå.
