@@ -109,6 +109,7 @@ export function makeSchoolBlockWeekResult(): AIAnalysisResult {
       }),
     ],
     classScheduleEntries: [
+      // Mandag: én bokinnlevering for 2STC (samme dato finnes også i scheduleByDay → sammenslås).
       makeClassEntry({
         date: "2026-06-15",
         dayLabel: "mandag",
@@ -119,6 +120,32 @@ export function makeSchoolBlockWeekResult(): AIAnalysisResult {
         sourceText: "2STC: 10.30-11.00",
         confidence: 0.98,
       }),
+      // Torsdag: delt puljerad (tre klasser, én audience entry).
+      makeClassEntry({
+        date: "2026-06-18",
+        dayLabel: "torsdag",
+        classCodes: ["2STA", "2STC", "2STE"],
+        groupLabel: "Pulje 1",
+        start: "10:00",
+        end: "11:00",
+        room: "Auditoriet",
+        sourceText: "Pulje 1: 2STA, 2STC, 2STE 10.00-11.00 Auditoriet",
+        confidence: 0.94,
+      }),
+      // Torsdag: semantisk DUPLIKAT av puljeraden — omstokket klassekode-rekkefølge + ekstra
+      // whitespace i grupp/rom/sourceText → skal normaliseres og dedupliseres til samme item.
+      makeClassEntry({
+        date: "2026-06-18",
+        dayLabel: "torsdag",
+        classCodes: ["2STE", "2STA", "2stc"],
+        groupLabel: "  Pulje   1 ",
+        start: "10:00",
+        end: "11:00",
+        room: " Auditoriet ",
+        sourceText: "Pulje 1: 2STA, 2STC, 2STE 10.00-11.00 Auditoriet",
+        confidence: 0.5,
+      }),
+      // Torsdag: klasse-spesifikk rad for 2STC (rom 332-50, Lærer C).
       makeClassEntry({
         date: "2026-06-18",
         dayLabel: "torsdag",
