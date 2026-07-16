@@ -18,6 +18,7 @@ import {
   buildAnalysisCorpus,
   buildAnalysisEvidenceReport,
 } from "@/lib/analysis-evidence";
+import { buildSchoolBlockProposal } from "@/lib/school-block-proposal";
 import type { AIAnalysisResult, SchoolWeekOverlayProposal } from "@/lib/types";
 import { currentSpan, startSpan } from "braintrust";
 
@@ -102,11 +103,25 @@ export async function toPortalBundle(
 
     const { coerceAIAnalysisResultForPortal } = await import("@/lib/analysis-null-safety");
     const { filterAnalysisContentByClass } = await import("@/lib/class-content-filter");
+    // Portal-normalisert, men IKKE klassefiltrert. `schoolBlockProposal` bygges fra dette, fordi
+    // builderen selv oppløser barnet og bevarer sikre ikke-matchende audience entries (f.eks. hele
+    // pulje-raden 2STA/2STC/2STE). Alle eksisterende konsumenter bruker fortsatt `result` under.
+    const normalizedUnfilteredResult = coerceAIAnalysisResultForPortal(resultIn);
     // Oppgave 7: filtrer ukeplan-innhold til elevens klasse (no-class + barnets klasse beholdes).
     const result = filterAnalysisContentByClass(
-      coerceAIAnalysisResultForPortal(resultIn),
+      normalizedUnfilteredResult,
       portalImport.relevanceContext?.classCode,
     );
+    // Additivt: kun for `documentKind: "school"`. `proposalId` er en per-kjøring instans-ID
+    // (randomUUID), i tråd med alle andre proposaltyper. Ingen try/catch — builderfeil skal boble
+    // til den eksisterende failure boundary rundt toPortalBundle.
+    const schoolBlockProposal =
+      documentKind === "school"
+        ? buildSchoolBlockProposal(normalizedUnfilteredResult, portalImport, {
+            proposalId: randomUUID(),
+            originalSourceType: sourceType,
+          })
+        : undefined;
     const { proposal: schoolProfileProposal, decision: schoolProfileDecision } =
       deps.decideSchoolProfileProposal(result, sourceType, documentKind);
     const {
@@ -345,6 +360,7 @@ export async function toPortalBundle(
       ...(secondaryTaskCandidates.length > 0 ? { secondaryTaskCandidates } : {}),
       ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
       ...(schoolWeekOverlayProposal ? { schoolWeekOverlayProposal } : {}),
+      ...(schoolBlockProposal ? { schoolBlockProposal } : {}),
       evidenceReport: buildAnalysisEvidenceReport(buildAnalysisCorpus(result), result),
       ...(Object.keys(debugPayload).length > 0 ? { debug: debugPayload } : {}),
     };
