@@ -81,12 +81,13 @@ function lekseplanResult(): AIAnalysisResult {
 type Bundle = {
   items: Array<{ kind: string; event?: { metadata?: { schoolContext?: unknown } } }>;
   schoolWeekOverlayProposal?: unknown;
+  schoolBlockProposal?: unknown;
   debug?: { schoolWeekOverlayRouting?: { reason?: string } };
 };
 
 async function bundleOf(
   result: AIAnalysisResult,
-  documentKind?: "event_doc" | "activity_plan" | "text" | "auto",
+  documentKind?: "event_doc" | "activity_plan" | "text" | "auto" | "school",
   includeDebug = false,
 ): Promise<Bundle> {
   return (await toPortalBundle(result, "text", documentKind, includeDebug, {
@@ -114,11 +115,31 @@ describe("documentKind-veto mot overlay-ruting", () => {
     expect(bundle.schoolWeekOverlayProposal).toBeTruthy();
   });
 
-  it("DEGRADERING: uke-25-form med text/auto → overlay uendret (kun event_doc vetoer)", async () => {
-    for (const kind of ["text", "auto"] as const) {
+  it("DEGRADERING: uke-25-form med text/auto/school → overlay uendret (kun event_doc vetoer)", async () => {
+    // `school` er ny og foreløpig ruting-inert: den følger den generiske, innholdsbaserte
+    // rutingen (som text/auto) og vetoer ikke. Fixturen får overlay fra innholdet («Uke 25»
+    // + skolebevis + 5 dager), så dette isolerer at ny type ikke endrer eksisterende ruting.
+    for (const kind of ["text", "auto", "school"] as const) {
       const bundle = await bundleOf(uke25Result(), kind);
       expect(bundle.schoolWeekOverlayProposal, `kind=${kind}`).toBeTruthy();
     }
+  });
+
+  it("school: toPortalBundle aksepterer typen og emitterer nå schoolBlockProposal additivt", async () => {
+    const bundle = await bundleOf(uke25Result(), "school");
+    expect("schoolBlockProposal" in bundle).toBe(true);
+    // Additivt: den generiske overlay-oppførselen for `school` er uendret (fixturen får overlay
+    // fra innholdet), og proposaltypene er ikke gjensidig utelukkende.
+    expect(bundle.schoolWeekOverlayProposal).toBeTruthy();
+  });
+
+  it("ikke-school beholder eksisterende oppførsel uten schoolBlockProposal-nøkkel", async () => {
+    for (const kind of ["event_doc", "activity_plan", "text", "auto"] as const) {
+      const bundle = await bundleOf(uke25Result(), kind);
+      expect("schoolBlockProposal" in bundle, `kind=${kind}`).toBe(false);
+    }
+    const noKind = await bundleOf(uke25Result());
+    expect("schoolBlockProposal" in noKind).toBe(false);
   });
 
   it("daySignal-GULVET: éndags-dokument MED activity_plan → fortsatt INGEN overlay", async () => {

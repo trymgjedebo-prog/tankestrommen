@@ -6,6 +6,8 @@ import {
   truncateForBraintrust,
 } from "@/lib/braintrust-analyze-telemetry";
 import { extractClassCodes, normalizeClassCode } from "@/lib/school-class-schedule";
+import { normalizeSchoolTime, schoolMinutesToTime } from "@/lib/school-time";
+import { detectIsoWeekdayFromLabel, normalizeSchoolWeekdayIndex } from "@/lib/school-weekday";
 import { normalizeClassScheduleEntriesRaw } from "@/lib/class-schedule-normalize";
 import { CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION } from "@/lib/ai/class-schedule-entries-prompt";
 import type {
@@ -311,92 +313,6 @@ function slugifySubjectKey(raw: string): string | null {
   return slug || null;
 }
 
-function normalizeHHMM(raw: string | null): string | null {
-  if (!raw) return null;
-  const t = raw.trim().replace(/\./g, ":");
-  const m = /^(\d{1,2}):(\d{2})\s*$/.exec(t);
-  if (m) {
-    const h = Number(m[1]);
-    const min = Number(m[2]);
-    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
-    return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
-  }
-  const bare = /^(\d{1,2})\s*$/.exec(t);
-  if (bare) {
-    const h = Number(bare[1]);
-    if (h < 0 || h > 23) return null;
-    return `${String(h).padStart(2, "0")}:00`;
-  }
-  return null;
-}
-
-/** Mandag = "0" … fredag = "4" (Foreldre-App). Lør/søn → null. */
-function canonicalSchoolProfileWeekdayIndex(
-  raw: string,
-): SchoolProfileWeekdayIndex | null {
-  const k = raw.toLowerCase().trim().replace(/\.$/, "");
-  const collapsed = k.replace(/\s+/g, "");
-
-  if (/^[0-4]$/.test(collapsed)) {
-    return collapsed as SchoolProfileWeekdayIndex;
-  }
-
-  const nbAbbr: Record<string, SchoolProfileWeekdayIndex> = {
-    man: "0",
-    tir: "1",
-    ons: "2",
-    tor: "3",
-    fre: "4",
-  };
-  if (nbAbbr[collapsed]) return nbAbbr[collapsed];
-
-  const nb = normalizeNorwegianLetters(collapsed);
-  if (nb === "lordag" || nb === "sondag" || nb === "laurdag") return null;
-
-  const nbFull: Record<string, SchoolProfileWeekdayIndex> = {
-    mandag: "0",
-    tirsdag: "1",
-    onsdag: "2",
-    torsdag: "3",
-    fredag: "4",
-  };
-  if (nbFull[nb]) return nbFull[nb];
-
-  if (
-    collapsed === "saturday" ||
-    collapsed === "sunday" ||
-    collapsed === "sat" ||
-    collapsed === "sun"
-  ) {
-    return null;
-  }
-
-  const enFull: Record<string, SchoolProfileWeekdayIndex> = {
-    monday: "0",
-    tuesday: "1",
-    wednesday: "2",
-    thursday: "3",
-    friday: "4",
-  };
-  if (enFull[collapsed]) return enFull[collapsed];
-
-  const enShort: Record<string, SchoolProfileWeekdayIndex> = {
-    mon: "0",
-    ma: "0",
-    tue: "1",
-    ti: "1",
-    wed: "2",
-    on: "2",
-    thu: "3",
-    to: "3",
-    fri: "4",
-    fr: "4",
-  };
-  if (enShort[collapsed]) return enShort[collapsed];
-
-  return null;
-}
-
 /** Pauser/slots som IKKE skal være lessons i en skoleprofil. */
 const BREAK_SUBJECT_KEYS = new Set<string>([
   "lillefri",
@@ -461,13 +377,6 @@ function hhmmToMinutes(t: string): number | null {
   const m = /^(\d{2}):(\d{2})$/.exec(t);
   if (!m) return null;
   return Number(m[1]) * 60 + Number(m[2]);
-}
-
-function minutesToHHMM(n: number): string | null {
-  if (!Number.isFinite(n) || n < 0 || n >= 24 * 60) return null;
-  const h = Math.floor(n / 60);
-  const min = n % 60;
-  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
 }
 
 /** Trekk «Begynner 10.05», «Starter 10:05», «varer til 09.45», «Slutter 09:45», «30 min» ut av tekst. */
@@ -1017,8 +926,8 @@ export function normalizeSchoolProfileLesson(
   }
   const rawStart = asNonEmptyString(o.start);
   const rawEnd = asNonEmptyString(o.end);
-  let start = normalizeHHMM(rawStart);
-  let end = normalizeHHMM(rawEnd);
+  let start = normalizeSchoolTime(rawStart);
+  let end = normalizeSchoolTime(rawEnd);
   if (rawStart && !start) changes.push(`invalid_raw_start:${rawStart}`);
   if (rawEnd && !end) changes.push(`invalid_raw_end:${rawEnd}`);
 
@@ -1034,7 +943,7 @@ export function normalizeSchoolProfileLesson(
   if (!end && start && hints.durationMinutes) {
     const startMin = hhmmToMinutes(start);
     if (startMin !== null) {
-      const newEnd = minutesToHHMM(startMin + hints.durationMinutes);
+      const newEnd = schoolMinutesToTime(startMin + hints.durationMinutes);
       if (newEnd) {
         changes.push(`end_from_duration:${hints.durationMinutes}min→${newEnd}`);
         end = newEnd;
@@ -1044,7 +953,7 @@ export function normalizeSchoolProfileLesson(
   if (!start && end && hints.durationMinutes) {
     const endMin = hhmmToMinutes(end);
     if (endMin !== null) {
-      const newStart = minutesToHHMM(endMin - hints.durationMinutes);
+      const newStart = schoolMinutesToTime(endMin - hints.durationMinutes);
       if (newStart) {
         changes.push(
           `start_from_duration:${hints.durationMinutes}min→${newStart}`,
@@ -1231,8 +1140,8 @@ function normalizeSchoolProfileWeekday(raw: unknown): {
   const o = raw as Record<string, unknown>;
 
   if (o.useSimpleDay === true) {
-    const schoolStart = normalizeHHMM(asNonEmptyString(o.schoolStart));
-    const schoolEnd = normalizeHHMM(asNonEmptyString(o.schoolEnd));
+    const schoolStart = normalizeSchoolTime(asNonEmptyString(o.schoolStart));
+    const schoolEnd = normalizeSchoolTime(asNonEmptyString(o.schoolEnd));
     if (!schoolStart || !schoolEnd) {
       return {
         weekday: null,
@@ -1473,13 +1382,13 @@ function normalizeSchoolWeeklyProfileRaw(
       const rawKey = typeof r.weekday === "string" ? r.weekday : "(no key)";
       const wk =
         typeof r.weekday === "string"
-          ? canonicalSchoolProfileWeekdayIndex(r.weekday)
+          ? normalizeSchoolWeekdayIndex(r.weekday)
           : null;
       pushDay(rawKey, r, wk);
     }
   } else if (o.weekdays && typeof o.weekdays === "object") {
     for (const [key, val] of Object.entries(o.weekdays as Record<string, unknown>)) {
-      const wk = canonicalSchoolProfileWeekdayIndex(key);
+      const wk = normalizeSchoolWeekdayIndex(key);
       pushDay(key, val, wk);
     }
   }
@@ -1501,22 +1410,6 @@ function normalizeSchoolWeeklyProfileRaw(
  */
 export function validateClientSchoolWeeklyProfile(raw: unknown): SchoolWeeklyProfile | null {
   return normalizeSchoolWeeklyProfileRaw(raw).profile;
-}
-
-function detectIsoWeekday(dayLabel: string | null): number | null {
-  if (!dayLabel) return null;
-  const s = dayLabel.toLowerCase();
-  const has = (re: RegExp) => re.test(s);
-
-  if (has(/\b(man(day)?|ma\.?|mandag)\b/i)) return 1;
-  if (has(/\b(tue(s(day)?)?|ti\.?|tirsdag)\b/i)) return 2;
-  if (has(/\b(wed(nesday)?|on\.?|onsdag)\b/i)) return 3;
-  if (has(/\b(thu(rs(day)?)?|to\.?|torsdag)\b/i)) return 4;
-  if (has(/\b(fri(day)?|fr\.?|fredag)\b/i)) return 5;
-  if (has(/\b(sat(urday)?|l[øo]r\.?|l[øo]rdag)\b/i)) return 6;
-  if (has(/\b(sun(day)?|s[øo]n\.?|s[øo]ndag)\b/i)) return 7;
-
-  return null;
 }
 
 function getIsoWeekDateUtc(year: number, week: number, isoWeekday: number): Date {
@@ -1585,7 +1478,7 @@ function inferDateFromWeekdayLabel(
   weekYear: WeekYear | null
 ): string | null {
   if (!weekYear) return null;
-  const isoWeekday = detectIsoWeekday(dayLabel);
+  const isoWeekday = detectIsoWeekdayFromLabel(dayLabel);
   if (!isoWeekday) return null;
   const d = getIsoWeekDateUtc(weekYear.year, weekYear.week, isoWeekday);
   return formatDateNbNo(d);
