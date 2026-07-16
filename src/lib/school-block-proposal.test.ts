@@ -802,6 +802,150 @@ describe("buildSchoolBlockProposal — eksempeluka (common)", () => {
   });
 });
 
+/**
+ * Negative låser: kilden mangler eksplisitte heldags-/start-/slutt-signaler, så builderen skal
+ * ALDRI utlede en dagsoperasjon fra prosa, klokkeslett eller ord som «oppmøte»/«siste skoledag».
+ * Disse testene hindrer at fremtidig arbeid regresserer til gjetting (prosa-regex,
+ * setningssplitting, oppmøte→forsinket skolestart).
+ */
+describe("buildSchoolBlockProposal — konservative dagsoperasjonsterskler", () => {
+  /** Review-koder som KUN kan komme av en valgt dagsoperasjon. */
+  const DAY_OP_CODES = ["missing_time", "unrecognized_activity", "conflicting_actions", "low_confidence"] as const;
+
+  function oneDay(details: string, time: string | null = null) {
+    const row: DayScheduleEntry = { ...dayRow("2026-06-17", "Onsdag", details), time };
+    const p = build(makeMinimalAnalysisResult({ scheduleByDay: [row] }), EMPTY_CTX);
+    return { p, day: p.days[0]!, items: p.days[0]!.contentItems };
+  }
+
+  /** Ingen dagsoperasjon, ingen operasjons-review, teksten bevart som ett common-item. */
+  function expectNoDayOperation(r: ReturnType<typeof oneDay>, expectedText: string) {
+    expect(r.day.dayOperation).toEqual({ op: "none" }); // beviser også: ingen activityKind/effective*
+    expect(r.day.dayResolution).toBe("enrich_only");
+    expect(r.day.blockTitle).toBeNull();
+    expect(r.day.reviewFlags).toEqual([]);
+    expect(r.p.reviewFlags).toEqual([]);
+    expect(r.items).toHaveLength(1);
+    const i = r.items[0]!;
+    expect(i.contentType).toBe("message");
+    expect(i.action).toBe("enrich");
+    expect(i.audienceScope).toBe("common");
+    expect(i.commonSchedule).toBeNull();
+    expect(i.activityKind).toBeNull();
+    expect(i.sourceText).toBe(expectedText); // ikke splittet
+    expect(i.sections.descriptionLines).toEqual([expectedText]);
+    expect(i.reviewFlags).toEqual([]);
+  }
+
+  it("«oppmøte kl. 10.30» alene gir IKKE adjust_start", () => {
+    const text = "Elevens oppmøte kl. 10.30. Bokinnlevering for alle som har hatt eksamen.";
+    expectNoDayOperation(oneDay(text), text);
+  });
+
+  it("aktivitetsstart («Bokinnlevering starter kl. 10.30.») gir IKKE adjust_start", () => {
+    const text = "Bokinnlevering starter kl. 10.30.";
+    expectNoDayOperation(oneDay(text), text);
+  });
+
+  it("programslutt («Felles avslutning varer fra kl. 10.00 til kl. 12.00.») gir IKKE adjust_end", () => {
+    const text = "Felles avslutning varer fra kl. 10.00 til kl. 12.00.";
+    const r = oneDay(text);
+    expectNoDayOperation(r, text);
+    expect(r.day.dayResolution).not.toBe("hours_adjusted");
+  });
+
+  it("«Siste skoledag.» alene gir IKKE replace_day", () => {
+    const text = "Siste skoledag.";
+    const r = oneDay(text);
+    expectNoDayOperation(r, text);
+    expect(r.day.dayResolution).not.toBe("full_replace");
+    expect("activityKind" in r.day.dayOperation).toBe(false);
+  });
+
+  it("«Opplegg 09.00-12.00.» alene gir IKKE replace_day/adjust/partial_replace", () => {
+    const text = "Opplegg 09.00-12.00.";
+    const r = oneDay(text);
+    expectNoDayOperation(r, text);
+    expect(["full_replace", "partial_replace", "hours_adjusted"]).not.toContain(r.day.dayResolution);
+  });
+
+  it("faktisk fredagstekst forblir ETT common-item uten replace_day/alternative_program", () => {
+    const text = "Siste skoledag. Opplegg 09.00-12.00.";
+    const r = oneDay(text);
+    expectNoDayOperation(r, text);
+    expect(r.items[0]!.contentType).not.toBe("alternative_program");
+  });
+
+  it("scheduleByDay.time ignoreres: verken adjust, commonSchedule eller sourceText", () => {
+    for (const time of ["10:30", "09.00-12.00"]) {
+      const text = "Oppmøte senere denne dagen.";
+      const r = oneDay(text, time);
+      expectNoDayOperation(r, text);
+      expect(r.items[0]!.sourceText).not.toContain(time); // time lekker ikke inn i teksten
+      expect(r.items[0]!.commonSchedule).toBeNull();
+    }
+  });
+
+  it("betinget tirsdagstekst: ett common-item, complete uten person-/klassekontekst", () => {
+    const text = "Klasseavslutning for 2STC (tid avtales med lærer).";
+    const row: DayScheduleEntry = dayRow(null, "tirsdag", text);
+    const p = build(makeMinimalAnalysisResult({ scheduleByDay: [row] }), EMPTY_CTX);
+    const day = p.days[0]!;
+    expect(day.dayOperation).toEqual({ op: "none" });
+    expect(day.dayResolution).toBe("enrich_only");
+    expect(day.contentItems).toHaveLength(1);
+    expect(day.contentItems[0]!.sourceText).toBe(text);
+    expect(p.reviewFlags).toEqual([]); // ingen missing_time/low_confidence/child_class_unresolved
+    expect(p.personId).toBeNull();
+    expect(p.classCode).toBeNull();
+    expect(p.structureStatus).toBe("complete");
+  });
+
+  it("flersetningsprogram gir ETT item — ingen segmenter, ingen konstruert pause 10.45–11.00", () => {
+    const text = "Opplegg i klasserommet 09.00-10.00. Felles avslutning 10.00-10.45. Avslutning 11.00-12.00.";
+    const r = oneDay(text);
+    expectNoDayOperation(r, text); // nøyaktig ett item, hele teksten, én descriptionLine
+    expect(r.items[0]!.contentType).not.toBe("alternative_program");
+    expect(r.items[0]!.action).toBe("enrich"); // aldri replace_range
+  });
+
+  it("hele fixture-uka: ingen dagsoperasjoner (sikker klassekontekst isolerer dem)", () => {
+    // Sikker child class → ingen child_class_unresolved fra per_audience-items, så vi kan
+    // kreve HELT tomme reviewFlags og dermed isolere dagsoperasjons-koder.
+    const ctx: PortalImportContext = { knownPersons: [], children: makeChildren() };
+    const p = build(makeSchoolBlockWeekResult(), ctx);
+    expect(p.personMatchStatus).toBe("matched");
+    for (const d of p.days) {
+      expect(d.dayOperation).toEqual({ op: "none" });
+      expect(d.dayResolution).toBe("enrich_only");
+      expect(d.blockTitle).toBeNull();
+    }
+    expect(p.reviewFlags).toEqual([]);
+    expect(p.structureStatus).toBe("complete");
+    for (const code of DAY_OP_CODES) {
+      expect(p.reviewFlags.map((f) => f.code)).not.toContain(code);
+    }
+  });
+
+  it("determinisme + ingen mutasjon for tekst med klokkeslett og operasjonsord", () => {
+    const text = "Siste skoledag. Elevens oppmøte kl. 10.30. Skoledagen slutter kl. 12.00.";
+    const result = makeMinimalAnalysisResult({
+      scheduleByDay: [{ ...dayRow("2026-06-19", "Fredag", text), time: "09.00-12.00" }],
+    });
+    const ctx: PortalImportContext = { knownPersons: [], children: makeChildren() };
+    const resultSnapshot = JSON.stringify(result);
+    const ctxSnapshot = JSON.stringify(ctx);
+
+    const a = build(result, ctx);
+    const b = build(result, ctx);
+    expect(b).toEqual(a); // identisk output
+    expect(a.days[0]!.dayOperation).toEqual({ op: "none" });
+    expect(a.days[0]!.dayResolution).toBe("enrich_only");
+    expect(JSON.stringify(result)).toBe(resultSnapshot); // result ikke mutert
+    expect(JSON.stringify(ctx)).toBe(ctxSnapshot); // context ikke mutert
+  });
+});
+
 describe("buildSchoolBlockProposal — renhet og dagsskall", () => {
   it("muterer ikke result", () => {
     const result = makeSchoolBlockWeekResult();
