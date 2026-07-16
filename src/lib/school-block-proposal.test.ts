@@ -571,6 +571,237 @@ describe("buildSchoolBlockProposal — determinisme med items", () => {
   });
 });
 
+describe("buildSchoolBlockProposal — common items fra scheduleByDay", () => {
+  const MON = "2026-06-15";
+  function commonRow(partial: Partial<DayScheduleEntry>): DayScheduleEntry {
+    return { ...dayRow(MON, "Mandag", null), ...partial };
+  }
+  function itemsOf(row: DayScheduleEntry, ctx: PortalImportContext = EMPTY_CTX) {
+    const p = build(makeMinimalAnalysisResult({ scheduleByDay: [row] }), ctx);
+    return { p, items: p.days[0]!.contentItems };
+  }
+
+  it("details gir ett common message/enrich-item med låste feltverdier", () => {
+    const { items } = itemsOf(commonRow({ details: "Klasseavslutning for 2STC (tid avtales med lærer)." }));
+    expect(items).toHaveLength(1);
+    const i = items[0]!;
+    expect(i.contentType).toBe("message");
+    expect(i.action).toBe("enrich");
+    expect(i.audienceScope).toBe("common");
+    expect(i.commonSchedule).toBeNull();
+    expect(i.audienceEntries).toEqual([]);
+    expect(i.resolvedChildAudience).toBeNull();
+    expect(i.activityKind).toBeNull();
+    expect(i.subject).toBeNull();
+    expect(i.subjectKey).toBeNull();
+    expect(i.customLabel).toBeNull();
+    expect(i.evidence).toBeNull();
+    expect(i.reviewFlags).toEqual([]);
+    expect("subjectCandidates" in i).toBe(false);
+    expect(i.title).toBe("Skoleinformasjon");
+  });
+
+  it("flersetnings-details splittes ikke; linjeskift/whitespace normaliseres til én sourceText", () => {
+    const { items } = itemsOf(commonRow({ details: "  Siste   skoledag.\nOpplegg 09.00-12.00. " }));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.sourceText).toBe("Siste skoledag. Opplegg 09.00-12.00.");
+    expect(items[0]!.sections).toEqual({ descriptionLines: ["Siste skoledag. Opplegg 09.00-12.00."] });
+  });
+
+  it("sourceText og descriptionLines er identiske", () => {
+    const { items } = itemsOf(commonRow({ details: "A. B; C, D" }));
+    expect(items[0]!.sections.descriptionLines).toEqual([items[0]!.sourceText]);
+  });
+
+  it("hvert arrayelement er én kildeenhet og splittes ikke", () => {
+    const { items } = itemsOf(commonRow({
+      highlights: ["H1. H2; H3", "H4"],
+      rememberItems: ["R1"],
+      deadlines: ["D1"],
+      notes: ["N1"],
+    }));
+    expect(items.map((i) => i.sourceText).sort()).toEqual(["D1", "H1. H2; H3", "H4", "N1", "R1"]);
+  });
+
+  it("faste titler følger feltmappingen", () => {
+    const byText = new Map(
+      itemsOf(commonRow({
+        details: "d", highlights: ["h"], rememberItems: ["r"], deadlines: ["f"], notes: ["n"],
+      })).items.map((i) => [i.sourceText, i.title]),
+    );
+    expect(byText.get("d")).toBe("Skoleinformasjon");
+    expect(byText.get("h")).toBe("Viktig informasjon");
+    expect(byText.get("r")).toBe("Husk");
+    expect(byText.get("f")).toBe("Frist");
+    expect(byText.get("n")).toBe("Merknad");
+  });
+
+  it("time ignoreres fullstendig", () => {
+    const { items } = itemsOf(commonRow({ time: "10:30", details: "Elevens oppmøte kl. 10.30." }));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.commonSchedule).toBeNull();
+    expect(items[0]!.sourceText).toBe("Elevens oppmøte kl. 10.30.");
+    expect(items[0]!.reviewFlags).toEqual([]);
+  });
+
+  it("kildeprioritet: deadlines > rememberItems > highlights > notes > details", () => {
+    const t = "Samme tekst";
+    expect(itemsOf(commonRow({ details: t, deadlines: [t] })).items[0]!.title).toBe("Frist");
+    expect(itemsOf(commonRow({ details: t, rememberItems: [t] })).items[0]!.title).toBe("Husk");
+    expect(itemsOf(commonRow({ details: t, highlights: [t] })).items[0]!.title).toBe("Viktig informasjon");
+    expect(itemsOf(commonRow({ details: t, notes: [t] })).items[0]!.title).toBe("Merknad");
+    expect(itemsOf(commonRow({ notes: [t], highlights: [t], rememberItems: [t], deadlines: [t], details: t })).items[0]!.title).toBe("Frist");
+  });
+
+  it("identisk tekst på tvers av felt gir ETT item", () => {
+    const t = "Samme tekst";
+    const { items } = itemsOf(commonRow({ details: t, deadlines: [t], notes: [t] }));
+    expect(items).toHaveLength(1);
+  });
+
+  it("whitespace-varianter dedupliseres; casing-varianter beholdes separat", () => {
+    const ws = itemsOf(commonRow({ highlights: ["Husk bok", "Husk   bok"] }));
+    expect(ws.items).toHaveLength(1);
+    const cs = itemsOf(commonRow({ highlights: ["Husk bok", "husk bok"] }));
+    expect(cs.items).toHaveLength(2);
+    expect(cs.items[0]!.itemId).not.toBe(cs.items[1]!.itemId);
+  });
+
+  it("itemId: kildefelt og confidence påvirker ikke; casing gjør", () => {
+    const a = itemsOf(commonRow({ details: "Tekst" })).items[0]!;
+    const b = itemsOf(commonRow({ deadlines: ["Tekst"] })).items[0]!; // annet kildefelt
+    expect(b.itemId).toBe(a.itemId);
+    expect(b.title).not.toBe(a.title); // title er ikke i ID
+    const lower = itemsOf(commonRow({ details: "tekst" })).items[0]!;
+    expect(lower.itemId).not.toBe(a.itemId);
+
+    const p2 = build(makeMinimalAnalysisResult({ confidence: 0.11, scheduleByDay: [commonRow({ details: "Tekst" })] }));
+    expect(p2.days[0]!.contentItems[0]!.itemId).toBe(a.itemId);
+    expect(p2.days[0]!.contentItems[0]!.confidence).toBe(0.11); // confidence følger result
+  });
+
+  it("itemId-format og ingen audienceEntryId på common", () => {
+    const i = itemsOf(commonRow({ details: "Tekst" })).items[0]!;
+    expect(i.itemId).toMatch(/^school-item-h[0-9a-f]{8}$/);
+    expect(i.audienceEntries).toEqual([]);
+  });
+
+  it("flere rader samme dato dedupliseres; samme tekst ulik dag/weekday-only gir ulik ID", () => {
+    const same = build(makeMinimalAnalysisResult({ scheduleByDay: [
+      commonRow({ details: "T" }), commonRow({ details: "T" }),
+    ] }));
+    expect(same.days[0]!.contentItems).toHaveLength(1);
+
+    const other = build(makeMinimalAnalysisResult({ scheduleByDay: [
+      dayRow("2026-06-15", "Mandag", "T"), dayRow("2026-06-16", "Tirsdag", "T"), dayRow(null, "onsdag", "T"),
+    ] }));
+    const ids = other.days.map((d) => d.contentItems[0]!.itemId);
+    expect(new Set(ids).size).toBe(3); // ulik dag + weekday-only → ulike ID
+  });
+
+  it("common dedupliseres IKKE mot per_audience med samme tekst", () => {
+    const p = build(makeMinimalAnalysisResult({
+      scheduleByDay: [commonRow({ details: "2STC: 10.30-11.00" })],
+      classScheduleEntries: [classEntry({ date: MON, dayLabel: "mandag", classCodes: ["2STC"], start: "10:30", sourceText: "2STC: 10.30-11.00" })],
+    }));
+    const items = p.days[0]!.contentItems;
+    expect(items).toHaveLength(2);
+    expect(items[0]!.audienceScope).toBe("per_audience"); // tidsfestet først
+    expect(items[1]!.audienceScope).toBe("common");
+    expect(items[0]!.itemId).not.toBe(items[1]!.itemId);
+  });
+
+  it("sortering: tidsfestet per_audience → untimed per_audience → common", () => {
+    const p = build(makeMinimalAnalysisResult({
+      scheduleByDay: [commonRow({ details: "Felles" })],
+      classScheduleEntries: [
+        classEntry({ date: MON, dayLabel: "mandag", classCodes: ["2STC"], activityTitle: "Untimed klasse" }),
+        classEntry({ date: MON, dayLabel: "mandag", classCodes: ["2STC"], start: "08:00", activityTitle: "Timed klasse" }),
+      ],
+    }));
+    // common-itemets title er den faste kildeetiketten, ikke sourceText («Felles»).
+    expect(p.days[0]!.contentItems.map((i) => i.title)).toEqual([
+      "Timed klasse",
+      "Untimed klasse",
+      "Skoleinformasjon",
+    ]);
+    expect(p.days[0]!.contentItems.map((i) => i.audienceScope)).toEqual([
+      "per_audience",
+      "per_audience",
+      "common",
+    ]);
+  });
+
+  it("common-items gir aldri review; complete uten child class og ved ambiguous/no_signal", () => {
+    const row = commonRow({ details: "Betinget: muntlig eksamen for noen." });
+    const noCtx = itemsOf(row, EMPTY_CTX);
+    expect(noCtx.p.reviewFlags).toEqual([]);
+    expect(noCtx.p.structureStatus).toBe("complete");
+
+    const ctxChildren: PortalImportContext = { knownPersons: [], children: makeChildren() };
+    const noSignal = build(makeMinimalAnalysisResult({ targetGroup: null, title: "", description: "", scheduleByDay: [row] }), ctxChildren);
+    expect(noSignal.personMatchStatus).toBe("child_unresolved");
+    expect(noSignal.reviewFlags).toEqual([]);
+    expect(noSignal.structureStatus).toBe("complete");
+  });
+
+  it("eksisterende class-audience-review er uendret når common-items også finnes", () => {
+    const p = build(makeMinimalAnalysisResult({
+      scheduleByDay: [commonRow({ details: "Felles info" })],
+      classScheduleEntries: [classEntry({ date: MON, dayLabel: "mandag", classCodes: ["2STC"], start: "10:00" })],
+    }), EMPTY_CTX);
+    expect(p.reviewFlags).toHaveLength(1);
+    expect(p.reviewFlags[0]!.code).toBe("child_class_unresolved");
+    expect(p.structureStatus).toBe("review_required");
+    const common = p.days[0]!.contentItems.find((i) => i.audienceScope === "common")!;
+    expect(common.reviewFlags).toEqual([]);
+  });
+});
+
+describe("buildSchoolBlockProposal — eksempeluka (common)", () => {
+  it("tirsdag: ett common-item, hele teksten, ingen tid/audience/review", () => {
+    const p = build(makeSchoolBlockWeekResult());
+    const tue = p.days.find((d) => d.date === null && d.weekdayIndex === "1")!;
+    expect(tue.contentItems).toHaveLength(1);
+    const i = tue.contentItems[0]!;
+    expect(i.title).toBe("Skoleinformasjon");
+    expect(i.sourceText).toBe("Klasseavslutning for 2STC (tid avtales med lærer).");
+    expect(i.sections.descriptionLines).toEqual([i.sourceText]);
+    expect(i.audienceEntries).toEqual([]);
+    expect(i.commonSchedule).toBeNull();
+    expect(i.reviewFlags).toEqual([]);
+  });
+
+  it("onsdag: oppmøtetekst blir common, ingen commonSchedule/adjust/review", () => {
+    const p = build(makeSchoolBlockWeekResult());
+    const wed = p.days.find((d) => d.date === "2026-06-17")!;
+    expect(wed.contentItems).toHaveLength(1);
+    expect(wed.contentItems[0]!.commonSchedule).toBeNull();
+    expect(wed.dayOperation).toEqual({ op: "none" });
+    expect(wed.contentItems[0]!.reviewFlags).toEqual([]);
+  });
+
+  it("fredag: flersetningstekst blir ETT item, ingen replace_day/segmenter", () => {
+    const p = build(makeSchoolBlockWeekResult());
+    const fri = p.days.find((d) => d.date === "2026-06-19")!;
+    expect(fri.contentItems).toHaveLength(1);
+    expect(fri.contentItems[0]!.sourceText).toBe("Siste skoledag. Opplegg 09.00-12.00.");
+    expect(fri.dayOperation).toEqual({ op: "none" });
+    expect(fri.dayResolution).toBe("enrich_only");
+    expect(fri.contentItems[0]!.activityKind).toBeNull();
+  });
+
+  it("mandag/torsdag: eksisterende per_audience-items uendret", () => {
+    const p = build(makeSchoolBlockWeekResult(), { knownPersons: [], children: makeChildren() });
+    const mon = p.days.find((d) => d.date === "2026-06-15")!;
+    expect(mon.contentItems[0]!.audienceScope).toBe("per_audience");
+    expect(mon.contentItems[0]!.audienceEntries[0]!.classCodes).toEqual(["2STC"]);
+    const thu = p.days.find((d) => d.date === "2026-06-18")!;
+    expect(thu.contentItems.every((i) => i.audienceScope === "per_audience")).toBe(true);
+    expect(thu.contentItems).toHaveLength(2); // pulje (deduplisert) + 2STC-spesifikk
+  });
+});
+
 describe("buildSchoolBlockProposal — renhet og dagsskall", () => {
   it("muterer ikke result", () => {
     const result = makeSchoolBlockWeekResult();
@@ -596,10 +827,9 @@ describe("buildSchoolBlockProposal — renhet og dagsskall", () => {
     }
   });
 
-  it("ingen common items bygges fra scheduleByDay ennå (kun classScheduleEntries)", () => {
-    // Resultat UTEN classScheduleEntries → dager finnes, men ingen content items.
+  it("scheduleByDay-rad uten content-felt gir dag uten items", () => {
     const p = build(makeMinimalAnalysisResult({
-      scheduleByDay: [dayRow("2026-06-15", "Mandag", "masse detaljer, husk gymtøy")],
+      scheduleByDay: [dayRow("2026-06-15", "Mandag", null)],
     }));
     expect(p.days).toHaveLength(1);
     expect(p.days[0]!.contentItems).toEqual([]);

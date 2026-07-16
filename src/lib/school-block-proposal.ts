@@ -23,6 +23,7 @@ import {
 import type {
   AIAnalysisResult,
   ClassScheduleEntry,
+  DayScheduleEntry,
   PortalEventPersonMatchStatus,
   SchoolBlockAudienceEntry,
   SchoolBlockContentItem,
@@ -385,15 +386,124 @@ function earliestEnd(item: SchoolBlockContentItem): string | null {
   return ends.length > 0 ? ends.sort()[0]! : null;
 }
 
-/** Items: første kjente start (kjent før null) → første kjente end → title → itemId. */
+/** per_audience før common (tie-break når begge er untimed). */
+function audienceScopeRank(item: SchoolBlockContentItem): number {
+  return item.audienceScope === "per_audience" ? 0 : 1;
+}
+
+/** Manglende tekst FØR ikke-manglende. */
+function compareOptionalText(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (a === null) return -1;
+  if (b === null) return 1;
+  return a < b ? -1 : 1;
+}
+
+/**
+ * Items: første kjente start (kjent før null) → første kjente end → audience-scope
+ * (per_audience før common) → title → sourceText → itemId. Tidsfeltene dominerer, så den
+ * tidligere class-item-semantikken er uendret; common-items er alltid untimed og havner sist.
+ */
 function compareItems(a: SchoolBlockContentItem, b: SchoolBlockContentItem): number {
   const s = compareKnownTimeFirst(earliestStart(a), earliestStart(b));
   if (s !== 0) return s;
   const e = compareKnownTimeFirst(earliestEnd(a), earliestEnd(b));
   if (e !== 0) return e;
+  const scope = audienceScopeRank(a) - audienceScopeRank(b);
+  if (scope !== 0) return scope;
   if (a.title !== b.title) return a.title < b.title ? -1 : 1;
+  const text = compareOptionalText(a.sourceText, b.sourceText);
+  if (text !== 0) return text;
   if (a.itemId !== b.itemId) return a.itemId < b.itemId ? -1 : 1;
   return 0;
+}
+
+/* ── Steg 2B: common-items fra scheduleByDay ──────────────────────────────────
+ * Kildeenheter: hele `details` (ÉN enhet, aldri splittet) + hvert ikke-blankt element i
+ * `highlights`/`rememberItems`/`deadlines`/`notes`. `time` ignoreres fullstendig i dette
+ * steget (ingen commonSchedule, ingen parsing, ikke i ID/sortering/review).
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Kildefelt i DEDUPE-PRIORITERT rekkefølge (index = prioritet, lavest vinner): den mest
+ * spesifikke strukturerte kilden vinner over den generelle `details`-oppsummeringen.
+ * Titlene angir KUN hvilket allerede strukturert kildefelt teksten kom fra.
+ */
+function commonSourceFieldsInPriorityOrder(
+  day: DayScheduleEntry,
+): Array<{ raws: readonly (string | null)[]; title: string }> {
+  return [
+    { raws: day.deadlines, title: "Frist" },
+    { raws: day.rememberItems, title: "Husk" },
+    { raws: day.highlights, title: "Viktig informasjon" },
+    { raws: day.notes, title: "Merknad" },
+    { raws: [day.details], title: "Skoleinformasjon" },
+  ];
+}
+
+type CommonUnit = { dayKey: string; text: string; priority: number; title: string };
+
+/**
+ * Samle sikre common-kildeenheter per semantisk dag. Dedupliserer identisk normalisert tekst
+ * (casing-SENSITIVT) innen samme dag — på tvers av rader, felt og innad i samme array — og
+ * velger representasjon deterministisk etter kildeprioritet (aldri inputrekkefølge).
+ */
+function collectCommonUnits(result: AIAnalysisResult): CommonUnit[] {
+  const best = new Map<string, CommonUnit>();
+  for (const day of result.scheduleByDay) {
+    const seed = seedFromRow(day.date, day.dayLabel);
+    if (!seed) continue; // ingen sikker dag → ingen dag og ingen common-item
+    const fields = commonSourceFieldsInPriorityOrder(day);
+    for (let priority = 0; priority < fields.length; priority++) {
+      const field = fields[priority]!;
+      for (const raw of field.raws) {
+        const text = normalizeText(raw); // trim + kollaps whitespace, casing bevart
+        if (text === null) continue;
+        const key = `${seed.key}\u0000${text}`;
+        const existing = best.get(key);
+        if (!existing || priority < existing.priority) {
+          best.set(key, { dayKey: seed.key, text, priority, title: field.title });
+        }
+      }
+    }
+  }
+  return [...best.values()];
+}
+
+/** Identisk tekst på samme dag → samme ID, uansett kildefelt/title/confidence/rekkefølge. */
+function commonItemIdFor(dayKey: string, text: string): string {
+  const material = serializeMaterial([
+    "school-item",
+    "schedule-by-day",
+    dayKey,
+    "message",
+    "enrich",
+    text,
+  ]);
+  return `school-item-h${djb2Hex(material)}`;
+}
+
+/** Ikke-destruktivt common message/enrich-item. Aldri audience, tid eller review-flagg. */
+function buildCommonItem(unit: CommonUnit, confidence: number): SchoolBlockContentItem {
+  return {
+    itemId: commonItemIdFor(unit.dayKey, unit.text),
+    title: unit.title,
+    contentType: "message",
+    action: "enrich",
+    subject: null,
+    subjectKey: null,
+    customLabel: null,
+    audienceScope: "common",
+    commonSchedule: null,
+    audienceEntries: [],
+    resolvedChildAudience: null,
+    sections: { descriptionLines: [unit.text] },
+    activityKind: null,
+    evidence: null,
+    sourceText: unit.text,
+    confidence,
+    reviewFlags: [],
+  };
 }
 
 /** Deterministisk duplikat-preferanse: høyest confidence, deretter minste visnings-signatur. */
@@ -404,7 +514,7 @@ function isPreferredDuplicate(
   if (candidate.confidence !== existing.confidence) {
     return candidate.confidence > existing.confidence;
   }
-  const sig = (i: SchoolBlockContentItem) => i.audienceEntries[0]!.classCodes.join("");
+  const sig = (i: SchoolBlockContentItem) => i.audienceEntries[0]!.classCodes.join("\u0001");
   return sig(candidate) < sig(existing);
 }
 
@@ -430,11 +540,20 @@ function collectContentItemsByDay(
     }
   }
   const byDay = new Map<string, SchoolBlockContentItem[]>();
-  for (const { item, dayKey } of byItemId.values()) {
+  const push = (dayKey: string, item: SchoolBlockContentItem): void => {
     const list = byDay.get(dayKey) ?? [];
     list.push(item);
     byDay.set(dayKey, list);
+  };
+  for (const { item, dayKey } of byItemId.values()) push(dayKey, item);
+
+  // Common-items fra scheduleByDay. Dedupliseres KUN mot andre common-items (eget
+  // ID-materiale «schedule-by-day» ≠ «class-schedule-entry»), aldri mot per_audience-items.
+  for (const unit of collectCommonUnits(result)) {
+    if (!dayIdByKey.has(unit.dayKey)) continue;
+    push(unit.dayKey, buildCommonItem(unit, result.confidence));
   }
+
   for (const list of byDay.values()) list.sort(compareItems);
   return byDay;
 }
