@@ -21,6 +21,12 @@ export type AnalysisDocumentKind =
   | "activity_plan"
   | "event_doc"
   | "text"
+  /**
+   * Bredt skoledokument (klasseplaner, prøver, lekser, beskjeder, klokkeslett). Egen type slik
+   * at `schoolBlockProposal` senere kan produseres additivt uten å gjenbruke `activity_plan`.
+   * NB: gir foreløpig KUN eksplisitt modellruting — ingen overlay-boost (se selectInitialAnalysisModel).
+   */
+  | "school"
   | "auto";
 
 export type AnalysisSourceRoute = "image" | "text" | "pdf" | "docx";
@@ -103,7 +109,7 @@ export function getImageInitialAnalysisModel(): string {
 
 /**
  * Velger første modell basert på dokument-type og kilde.
- * - timetable / activity_plan → alltid sterk
+ * - timetable / activity_plan / school → alltid sterk
  * - event_doc / text → lett
  * - auto + tekst/PDF/Word → lett
  * - auto + bilde → lett (eskalering skjer i routed-analyse ved svakhet/feil)
@@ -128,6 +134,15 @@ export function selectInitialAnalysisModel(
       model: strong,
       tier: "strong",
       reason: "document_kind:activity_plan→strong",
+    };
+  }
+  // Bredt skoledokument: `classScheduleEntries` er kritisk strukturert output, og de øvrige
+  // skole-typene bruker allerede sterk modell. Eksplisitt gren — ALDRI light-fallthrough.
+  if (kind === "school") {
+    return {
+      model: strong,
+      tier: "strong",
+      reason: "document_kind:school→strong",
     };
   }
   if (kind === "event_doc") {
@@ -194,6 +209,7 @@ export function parseDocumentKind(raw: unknown): AnalysisDocumentKind | undefine
     v === "activity_plan" ||
     v === "event_doc" ||
     v === "text" ||
+    v === "school" ||
     v === "auto"
   ) {
     return v as AnalysisDocumentKind;

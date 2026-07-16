@@ -86,7 +86,7 @@ type Bundle = {
 
 async function bundleOf(
   result: AIAnalysisResult,
-  documentKind?: "event_doc" | "activity_plan" | "text" | "auto",
+  documentKind?: "event_doc" | "activity_plan" | "text" | "auto" | "school",
   includeDebug = false,
 ): Promise<Bundle> {
   return (await toPortalBundle(result, "text", documentKind, includeDebug, {
@@ -114,11 +114,19 @@ describe("documentKind-veto mot overlay-ruting", () => {
     expect(bundle.schoolWeekOverlayProposal).toBeTruthy();
   });
 
-  it("DEGRADERING: uke-25-form med text/auto → overlay uendret (kun event_doc vetoer)", async () => {
-    for (const kind of ["text", "auto"] as const) {
+  it("DEGRADERING: uke-25-form med text/auto/school → overlay uendret (kun event_doc vetoer)", async () => {
+    // `school` er ny og foreløpig ruting-inert: den følger den generiske, innholdsbaserte
+    // rutingen (som text/auto) og vetoer ikke. Fixturen får overlay fra innholdet («Uke 25»
+    // + skolebevis + 5 dager), så dette isolerer at ny type ikke endrer eksisterende ruting.
+    for (const kind of ["text", "auto", "school"] as const) {
       const bundle = await bundleOf(uke25Result(), kind);
       expect(bundle.schoolWeekOverlayProposal, `kind=${kind}`).toBeTruthy();
     }
+  });
+
+  it("school: toPortalBundle aksepterer typen, men bundelen har ennå ingen schoolBlockProposal", async () => {
+    const bundle = await bundleOf(uke25Result(), "school");
+    expect("schoolBlockProposal" in bundle).toBe(false);
   });
 
   it("daySignal-GULVET: éndags-dokument MED activity_plan → fortsatt INGEN overlay", async () => {
