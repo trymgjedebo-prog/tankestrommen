@@ -2427,7 +2427,8 @@ async function runRoutedVisionLikeAnalysisCore(
   runWithModel: (model: string) => Promise<RoutedModelCallResult>,
   modelCallContext: ModelCallTraceContext,
 ): Promise<{ result: AIAnalysisResult; modelTrace: AnalysisModelTrace }> {
-  const strong = getStrongAnalysisModel();
+  // Modality-trygt eskaleringsmål fra routingplanen (null = ingen eskalering, bl.a. for bilde).
+  const escalationModel = initial.escalationModel;
   const trace = emptyAnalysisModelTrace(initial);
   const tokenUsageCalls: NonNullable<AnalysisModelTrace["tokenUsageCalls"]> = [];
 
@@ -2467,30 +2468,37 @@ async function runRoutedVisionLikeAnalysisCore(
     if (initial.tier === "light") {
       const weak = analysisLooksWeakForEscalation(result);
       if (weak.weak) {
-        trace.reasons.push(`escalate:weak:${weak.reason ?? "unknown"}`);
-        result = await run(strong);
-        trace.escalated = true;
-        trace.finalModel = strong;
-        console.log("[analysis-model] escalated (weak)", { finalModel: strong });
+        if (escalationModel !== null) {
+          trace.reasons.push(`escalate:weak:${weak.reason ?? "unknown"}`);
+          result = await run(escalationModel);
+          trace.escalated = true;
+          trace.finalModel = escalationModel;
+          console.log("[analysis-model] escalated (weak)", { finalModel: escalationModel });
+        } else {
+          // Modality-safe: ingen trygg eskaleringsmodell (bilde) → behold første gyldige resultat,
+          // send ALDRI `image_url` videre til strong.
+          trace.reasons.push("escalation:skipped:no_safe_image_escalation_model");
+        }
       }
     }
     if (tokenUsageCalls.length > 0) trace.tokenUsageCalls = tokenUsageCalls;
     return { result, modelTrace: trace };
   } catch (err) {
-    if (initial.tier === "light") {
+    if (initial.tier === "light" && escalationModel !== null) {
       trace.reasons.push(
         `escalate:error:${err instanceof Error ? err.message : String(err)}`,
       );
-      const result = await run(strong);
+      const result = await run(escalationModel);
       trace.escalated = true;
-      trace.finalModel = strong;
+      trace.finalModel = escalationModel;
       console.warn("[analysis-model] escalated (error)", {
-        finalModel: strong,
+        finalModel: escalationModel,
         err,
       });
       if (tokenUsageCalls.length > 0) trace.tokenUsageCalls = tokenUsageCalls;
       return { result, modelTrace: trace };
     }
+    // Ingen trygg eskalering (bilde, eller strong-tier) → boble den opprinnelige feilen urørt.
     throw err;
   }
 }

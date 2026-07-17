@@ -80,70 +80,102 @@ describe("analysis-model-router", () => {
   });
 
   describe("selectInitialAnalysisModel", () => {
-    const pick = (documentKind: AnalysisDocumentKind | undefined, sourceRoute: "image" | "text" = "text") =>
-      selectInitialAnalysisModel({ documentKind, sourceRoute });
+    const pick = (
+      documentKind: AnalysisDocumentKind | undefined,
+      sourceRoute: "image" | "text" | "pdf" | "docx" = "text",
+    ) => selectInitialAnalysisModel({ documentKind, sourceRoute });
 
-    it("NY: school → strong med eksplisitt reason (aldri light-fallthrough)", () => {
-      const out = pick("school");
-      expect(out.tier).toBe("strong");
-      expect(out.model).toBe(getStrongAnalysisModel());
-      expect(out.reason).toBe("document_kind:school→strong");
+    // Ulike modeller for image vs. strong, så «image ≠ strong»-bevisene er meningsfulle.
+    function setDistinctModels() {
+      process.env.OPENAI_ANALYSIS_MODEL_IMAGE = "test-image-model";
+      process.env.OPENAI_ANALYSIS_MODEL_STRONG = "test-strong-model";
+      process.env.OPENAI_ANALYSIS_MODEL_LIGHT = "test-light-model";
+    }
+
+    describe("modality-first: ALLE bildekilder → image-initial, ingen strong-eskalering", () => {
+      const kinds: Array<[AnalysisDocumentKind | undefined, string]> = [
+        ["school", "source:image+document_kind:school→image_initial"],
+        ["activity_plan", "source:image+document_kind:activity_plan→image_initial"],
+        ["timetable", "source:image+document_kind:timetable→image_initial"],
+        ["event_doc", "source:image+document_kind:event_doc→image_initial"],
+        ["text", "source:image+document_kind:text→image_initial"],
+        ["auto", "source:image+document_kind:auto→image_initial"],
+        [undefined, "source:image+document_kind:auto→image_initial"],
+      ];
+      for (const [kind, reason] of kinds) {
+        it(`${kind ?? "manglende"} + image → image_initial (tier light, escalationModel null)`, () => {
+          setDistinctModels();
+          const out = pick(kind, "image");
+          expect(out.model).toBe(getImageInitialAnalysisModel());
+          expect(out.model).not.toBe(getStrongAnalysisModel()); // aldri strong for bilde
+          expect(out.tier).toBe("light");
+          expect(out.escalationModel).toBeNull();
+          expect(out.reason).toBe(reason);
+        });
+      }
     });
 
-    it("school → strong også for bildekilde (ikke image-initial/light)", () => {
-      const out = pick("school", "image");
-      expect(out.tier).toBe("strong");
-      expect(out.model).toBe(getStrongAnalysisModel());
-      expect(out.reason).toBe("document_kind:school→strong");
+    it("school + text/pdf/docx → strong, ingen eskalering", () => {
+      for (const route of ["text", "pdf", "docx"] as const) {
+        expect(pick("school", route)).toEqual({
+          model: getStrongAnalysisModel(),
+          tier: "strong",
+          reason: "document_kind:school→strong",
+          escalationModel: null,
+        });
+      }
     });
 
-    it("UENDRET: timetable og activity_plan → strong", () => {
+    it("UENDRET: timetable og activity_plan (ikke-bilde) → strong, escalationModel null", () => {
       expect(pick("timetable")).toEqual({
         model: getStrongAnalysisModel(),
         tier: "strong",
         reason: "document_kind:timetable→strong",
+        escalationModel: null,
       });
-      expect(pick("activity_plan")).toEqual({
+      expect(pick("activity_plan", "pdf")).toEqual({
         model: getStrongAnalysisModel(),
         tier: "strong",
         reason: "document_kind:activity_plan→strong",
+        escalationModel: null,
       });
     });
 
-    it("UENDRET: event_doc og text → light", () => {
+    it("UENDRET: event_doc og text → light med strong som eskaleringsmål", () => {
       expect(pick("event_doc")).toEqual({
         model: getLightAnalysisModel(),
         tier: "light",
         reason: "document_kind:event_doc→light",
+        escalationModel: getStrongAnalysisModel(),
       });
       expect(pick("text")).toEqual({
         model: getLightAnalysisModel(),
         tier: "light",
         reason: "document_kind:text→light",
+        escalationModel: getStrongAnalysisModel(),
       });
     });
 
-    it("UENDRET: auto/manglende følger kildeavhengig light-/image-initial-adferd", () => {
+    it("UENDRET: auto/manglende (ikke-bilde) → light med strong som eskaleringsmål", () => {
       expect(pick("auto", "text")).toEqual({
         model: getLightAnalysisModel(),
         tier: "light",
         reason: "auto:source:text→light",
+        escalationModel: getStrongAnalysisModel(),
       });
-      expect(pick(undefined, "text")).toEqual({
+      expect(pick(undefined, "pdf")).toEqual({
         model: getLightAnalysisModel(),
         tier: "light",
-        reason: "auto:source:text→light",
+        reason: "auto:source:pdf→light",
+        escalationModel: getStrongAnalysisModel(),
       });
-      const img = pick("auto", "image");
-      expect(img.tier).toBe("light");
-      expect(img.model).toBe(getImageInitialAnalysisModel());
-      expect(img.reason).toBe("auto:source:image→light_then_maybe_escalate");
     });
 
-    it("school bruker den konfigurerte sterke modellen (ikke et hardkodet navn)", () => {
-      process.env.OPENAI_ANALYSIS_MODEL_STRONG = "test-strong-model";
-      expect(pick("school").model).toBe("test-strong-model");
-      expect(pick("school").model).toBe(getStrongAnalysisModel());
+    it("school + image bruker den konfigurerte image-modellen (ikke strong, ikke hardkodet navn)", () => {
+      setDistinctModels();
+      expect(pick("school", "image").model).toBe("test-image-model");
+      expect(pick("school", "image").model).toBe(getImageInitialAnalysisModel());
+      expect(pick("school", "text").model).toBe("test-strong-model"); // tekst beholder strong
     });
   });
 });
