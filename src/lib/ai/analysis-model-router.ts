@@ -108,25 +108,51 @@ export function getImageInitialAnalysisModel(): string {
 }
 
 /**
- * Velger første modell basert på dokument-type og kilde.
- * - timetable / activity_plan / school → alltid sterk
- * - event_doc / text → lett
- * - auto + tekst/PDF/Word → lett
- * - auto + bilde → lett (eskalering skjer i routed-analyse ved svakhet/feil)
+ * Resultat av modellvalg. `escalationModel` er den EKSPLISITTE, modality-trygge modellen et
+ * light-kall får eskalere til; `null` = ingen eskalering (bl.a. for ALLE bildekilder, som aldri
+ * skal sende `image_url` til den generiske — potensielt ikke-vision — strong-modellen).
+ */
+export type AnalysisModelRoutingSelection = {
+  model: string;
+  tier: "light" | "strong";
+  reason: string;
+  escalationModel: string | null;
+};
+
+/**
+ * Velger første modell (og trygt eskaleringsmål) basert på kilde og dokument-type.
+ * - MODALITY-FIRST: enhver bildekilde → image-initial-modellen, uansett documentKind, og ALDRI
+ *   eskalering til strong (bilde må aldri treffe en ikke-bildekapabel modell).
+ * - timetable / activity_plan / school (ikke-bilde) → alltid sterk
+ * - event_doc / text → lett, eskalerer til strong
+ * - auto + tekst/PDF/Word → lett, eskalerer til strong
  */
 export function selectInitialAnalysisModel(
   input: AnalysisModelRoutingInput,
-): { model: string; tier: "light" | "strong"; reason: string } {
+): AnalysisModelRoutingSelection {
   const light = getLightAnalysisModel();
   const strong = getStrongAnalysisModel();
   const imageInitial = getImageInitialAnalysisModel();
   const kind = (input.documentKind ?? "auto").toLowerCase() as AnalysisDocumentKind;
+
+  // Modality-first: alle bildekilder bruker den bildekapable modellen og eskalerer aldri til
+  // strong. Har presedens over documentKind, så school/activity_plan/timetable + bilde ikke
+  // lenger ruter `image_url` til en tekst-strong-modell.
+  if (input.sourceRoute === "image") {
+    return {
+      model: imageInitial,
+      tier: "light",
+      reason: `source:image+document_kind:${kind}→image_initial`,
+      escalationModel: null,
+    };
+  }
 
   if (kind === "timetable") {
     return {
       model: strong,
       tier: "strong",
       reason: "document_kind:timetable→strong",
+      escalationModel: null,
     };
   }
   if (kind === "activity_plan") {
@@ -134,6 +160,7 @@ export function selectInitialAnalysisModel(
       model: strong,
       tier: "strong",
       reason: "document_kind:activity_plan→strong",
+      escalationModel: null,
     };
   }
   // Bredt skoledokument: `classScheduleEntries` er kritisk strukturert output, og de øvrige
@@ -143,6 +170,7 @@ export function selectInitialAnalysisModel(
       model: strong,
       tier: "strong",
       reason: "document_kind:school→strong",
+      escalationModel: null,
     };
   }
   if (kind === "event_doc") {
@@ -150,6 +178,7 @@ export function selectInitialAnalysisModel(
       model: light,
       tier: "light",
       reason: "document_kind:event_doc→light",
+      escalationModel: strong,
     };
   }
   if (kind === "text") {
@@ -157,24 +186,16 @@ export function selectInitialAnalysisModel(
       model: light,
       tier: "light",
       reason: "document_kind:text→light",
+      escalationModel: strong,
     };
   }
 
-  // auto
-  if (input.sourceRoute === "image") {
-    const sameAsLight = imageInitial === light;
-    return {
-      model: imageInitial,
-      tier: "light",
-      reason: sameAsLight
-        ? "auto:source:image→light_then_maybe_escalate"
-        : "auto:source:image→image_env_then_maybe_escalate",
-    };
-  }
+  // auto (ikke-bilde: tekst/PDF/Word)
   return {
     model: light,
     tier: "light",
     reason: `auto:source:${input.sourceRoute}→light`,
+    escalationModel: strong,
   };
 }
 
