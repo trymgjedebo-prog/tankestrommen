@@ -76,3 +76,58 @@ describe("schoolDayOperationSignals delt promptkontrakt", () => {
     expect(S).toContain("illustrate meaning only — do NOT match these exact phrases as a rule");
   });
 });
+
+/**
+ * Låser at feltet nå er SYNLIG i det primære JSON-skjelettet i BÅDE image- og text-prompten
+ * (ikke bare i den vedlagte detaljseksjonen), slik at den lettere bildemodellen ikke lenger
+ * ledes til å utelate additive top-level-felt. Regresjon for produksjonsfeilen der image-route
+ * emitterte null schoolDayOperationSignals.
+ */
+describe("schoolDayOperationSignals i primært JSON-skjelett", () => {
+  const DETAIL_MARKER = "=== OPTIONAL FIELD: schoolDayOperationSignals ===";
+  const SKELETON_KEY = '"schoolDayOperationSignals": []';
+
+  it("image-skjelettet nevner feltet FØR den detaljerte seksjonen", () => {
+    const key = SYSTEM_PROMPT.indexOf(SKELETON_KEY);
+    const detail = SYSTEM_PROMPT.indexOf(DETAIL_MARKER);
+    expect(key).toBeGreaterThanOrEqual(0);
+    expect(detail).toBeGreaterThan(0);
+    expect(key).toBeLessThan(detail);
+  });
+
+  it("text-skjelettet nevner feltet FØR den detaljerte seksjonen", () => {
+    const key = TEXT_SYSTEM_PROMPT.indexOf(SKELETON_KEY);
+    const detail = TEXT_SYSTEM_PROMPT.indexOf(DETAIL_MARKER);
+    expect(key).toBeGreaterThanOrEqual(0);
+    expect(detail).toBeGreaterThan(0);
+    expect(key).toBeLessThan(detail);
+  });
+
+  it("begge prompts bruker samme top-level-feltnavn i skjelettet", () => {
+    expect(SYSTEM_PROMPT).toContain(SKELETON_KEY);
+    expect(TEXT_SYSTEM_PROMPT).toContain(SKELETON_KEY);
+  });
+
+  it("begge prompts sier at feltet utelates uten et sikkert signal", () => {
+    expect(SYSTEM_PROMPT).toContain("UTELAT feltet helt når ingen sikker dagsoperasjon finnes");
+    expect(TEXT_SYSTEM_PROMPT).toContain(
+      'Omit "schoolDayOperationSignals" entirely when there is no certain whole-day operation',
+    );
+  });
+
+  it("image-prompten sier ikke lenger at bare et skjelett uten feltet er tillatt", () => {
+    expect(SYSTEM_PROMPT).not.toContain("nøyaktig disse nøklene");
+    expect(SYSTEM_PROMPT).toContain(
+      "de eksplisitt definerte valgfrie top-level-feltene",
+    );
+  });
+
+  it("vilkårlige ukjente felter er fortsatt ikke tillatt", () => {
+    expect(SYSTEM_PROMPT).toContain("Ikke finn opp andre felter");
+  });
+
+  it("den detaljerte konservative kontrakten er fortsatt inkludert ordrett i begge prompts", () => {
+    expect(SYSTEM_PROMPT).toContain(S);
+    expect(TEXT_SYSTEM_PROMPT).toContain(S);
+  });
+});

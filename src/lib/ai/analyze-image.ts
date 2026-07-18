@@ -71,7 +71,7 @@ VIKTIG dato-regel for ukeplaner:
 - Ikke la date stå tom når uke-nummer + ukedag gjør beregning mulig.
 - Ved norsk tekst, formater dato som: "mandag 27. mars 2023".
 
-Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøyaktig disse nøklene:
+Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøklene i skjemaet under. Ta også med de eksplisitt definerte valgfrie top-level-feltene lenger ned (f.eks. schoolDayOperationSignals) når kilden støtter dem. Ikke finn opp andre felter. Skjemaets nøkler:
 - title: kort tittel på norsk (string)
 - schedule: en LISTE med tidspunkter. Hvert element er et objekt med:
   - date: dato som tekst (f.eks. "fredag 10. april 2025"), eller null hvis ukjent (string | null)
@@ -111,6 +111,7 @@ Svar med ETT JSON-objekt (ingen markdown-kodeblokker) med nøyaktig disse nøkle
   - confidence: tall 0–1 for OCR/lesbarhet (number)
 - schoolWeeklyProfile: null ELLER et objekt for FAST UKENTLIG TIMEPLAN (samme fag/timer hver uke, typisk «Timeplan», «Ukeskjema», tabell med klokkeslett + fag mandag–fredag). IKKE bruk dette for A-plan, aktivitetsplan for én bestemt uke, invitasjoner eller endagshendelser – da null.
   Når schoolWeeklyProfile er utfylt: sett schedule til [] og scheduleByDay til [] (unngå duplikat kalenderdata).
+- schoolDayOperationSignals: valgfri LISTE ("schoolDayOperationSignals": []) med strukturerte dagsoperasjoner — forsinket skolestart, tidligere skoleslutt, eller heldags spesialprogram som erstatter ordinær undervisning. Ta KUN med når HELE elevens skoledag påvirkes. UTELAT feltet helt når ingen sikker dagsoperasjon finnes; ikke returner en tom liste dersom den detaljerte kontrakten krever utelatelse. Detaljert, konservativ semantikk følger i seksjonen «OPTIONAL FIELD: schoolDayOperationSignals» under.
 
 GRID-TIMEPLAN – LES LAYOUTEN FØR DU TOLKER TEKSTEN:
   Timeplaner er en 2D-ruter. Du MÅ tolke hver fagboks ut fra HVOR den står visuelt:
@@ -2004,8 +2005,11 @@ Return this JSON shape:
     "weekdays": object whose keys are "0"–"4" (Monday=0 … Friday=4), or man/tir/ons/tor/fre. Each value is either:
       { "useSimpleDay": true, "schoolStart": "HH:MM", "schoolEnd": "HH:MM" }
       or { "useSimpleDay": false, "lessons": [ { "subjectKey": string, "customLabel": string | null, "start": "HH:MM", "end": "HH:MM", "room": string | null, "teacher": string | null, "lessonSubcategory": string | null } ] }
-  }
+  },
+  "schoolDayOperationSignals": []
 }
+
+Omit "schoolDayOperationSignals" entirely when there is no certain whole-day operation; do NOT return an empty list when the detailed contract requires omission. The detailed, conservative rules follow in the "OPTIONAL FIELD: schoolDayOperationSignals" section below.
 
 Use English weekday keys only. subjectKey: lowercase slug from Norwegian subject name (norsk, matematikk, engelsk). customLabel when extra detail is needed. room/teacher: classroom and teacher when stated in the source, else null. lessonSubcategory: resolved track for electives/language subjects (e.g. "Tysk", "Programmering") when evident, else null. Times 24h HH:MM.
 
