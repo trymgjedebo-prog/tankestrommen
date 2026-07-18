@@ -252,6 +252,60 @@ export interface ClassScheduleEntry {
   confidence: number;
 }
 
+/**
+ * Strukturert dagsoperasjons-signal (rå analysenivå). Additivt, valgfritt felt: settes kun når
+ * modellen eksplisitt emitterer det. Beskriver at HELE elevens skoledag påvirkes — forsinket
+ * start, tidligere slutt, eller et heldekkende spesialprogram som erstatter ordinær undervisning.
+ * Fravær/tom liste = ingen strukturert dagsoperasjon (ingen eksplisitt `none`-entry i råkontrakten).
+ * Konsumeres deterministisk av `buildSchoolBlockProposal` → `SchoolBlockDayOperation`. Builderen
+ * tolker ALDRI fritekst; dette feltet er den eneste strukturerte kilden til dagsoperasjoner.
+ */
+export type SchoolDayOperationSignalOperation =
+  | "adjust_start"
+  | "adjust_end"
+  | "replace_day";
+
+/** Felles dagsscope + evidens for alle signaltyper (etter normalisering). */
+export interface SchoolDayOperationSignalBase {
+  /** Eksplisitt ISO YYYY-MM-DD etter normalisering, ellers null. Aldri gjettet. */
+  date: string | null;
+  /** Normalisert mandag–fredag-indeks ("0"–"4"), ellers null. */
+  weekdayIndex: SchoolProfileWeekdayIndex | null;
+  /** Trimmet dagsetikett fra kilden, ellers null. */
+  dayLabel: string | null;
+  /** Kort begrunnelse fra kilden, ellers null. */
+  reason: string | null;
+  /** Ikke-tom støttende kildetekst (evidens, ikke modellens resonnement). */
+  sourceText: string;
+  /** Normalisert til intervallet 0–1. */
+  confidence: number;
+}
+
+/** Hele elevens skoledag/oppmøte starter på dette tidspunktet (ingen sluttid). */
+export interface SchoolDayAdjustStartSignal extends SchoolDayOperationSignalBase {
+  operation: "adjust_start";
+  effectiveStart: string;
+}
+
+/** Hele skoledagen slutter på dette tidspunktet (ingen starttid). */
+export interface SchoolDayAdjustEndSignal extends SchoolDayOperationSignalBase {
+  operation: "adjust_end";
+  effectiveEnd: string;
+}
+
+/** Ordinær undervisning erstattes av et heldekkende spesialprogram (nullable samlet start/slutt). */
+export interface SchoolDayReplaceSignal extends SchoolDayOperationSignalBase {
+  operation: "replace_day";
+  activityKind: SchoolBlockActivityKind;
+  effectiveStart: string | null;
+  effectiveEnd: string | null;
+}
+
+export type SchoolDayOperationSignal =
+  | SchoolDayAdjustStartSignal
+  | SchoolDayAdjustEndSignal
+  | SchoolDayReplaceSignal;
+
 export interface AIAnalysisResult {
   title: string;
   schedule: TimeSlot[];
@@ -265,6 +319,12 @@ export interface AIAnalysisResult {
    * settes kun når modellen emitterer det (ingen prompt gjør det ennå). Utelates når tom.
    */
   classScheduleEntries?: ClassScheduleEntry[];
+  /**
+   * Strukturerte dagsoperasjons-signaler (forsinket start / tidligere slutt / erstatningsdag).
+   * Additivt, valgfritt: settes kun når modellen emitterer det. Utelates når tom. Konsumeres av
+   * `buildSchoolBlockProposal` for deterministisk `dayOperation`/`dayResolution`.
+   */
+  schoolDayOperationSignals?: SchoolDayOperationSignal[];
   description: string;
   category: EventCategory;
   targetGroup: string | null;

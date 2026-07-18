@@ -9,7 +9,9 @@ import { extractClassCodes, normalizeClassCode } from "@/lib/school-class-schedu
 import { normalizeSchoolTime, schoolMinutesToTime } from "@/lib/school-time";
 import { detectIsoWeekdayFromLabel, normalizeSchoolWeekdayIndex } from "@/lib/school-weekday";
 import { normalizeClassScheduleEntriesRaw } from "@/lib/class-schedule-normalize";
+import { normalizeSchoolDayOperationSignalsRaw } from "@/lib/school-day-operation-signals-normalize";
 import { CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION } from "@/lib/ai/class-schedule-entries-prompt";
+import { SCHOOL_DAY_OPERATION_SIGNALS_PROMPT_SECTION } from "@/lib/ai/school-day-operation-signals-prompt";
 import type {
   AIAnalysisResult,
   AnalysisModelTrace,
@@ -145,6 +147,8 @@ GRID-TIMEPLAN – LES LAYOUTEN FØR DU TOLKER TEKSTEN:
   Tider: 24-timersformat HH:MM. Sorter lessons innen hver dag etter start tid, stigende.
 
 ${CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION}
+
+${SCHOOL_DAY_OPERATION_SIGNALS_PROMPT_SECTION}
 
 Hvis bildet ikke inneholder lesbar tekst, sett lav confidence og forklar kort i description.`;
 
@@ -1880,6 +1884,14 @@ export function normalizeAIAnalysisResult(
       const classScheduleEntries = normalizeClassScheduleEntriesRaw(o.classScheduleEntries);
       return classScheduleEntries ? { classScheduleEntries } : {};
     })(),
+    ...(() => {
+      // Additivt/valgfritt: begge prompt-flytene ber om dette (delt prompt-seksjon).
+      // Normaliseres deterministisk og utelates når ingen gyldig dagsoperasjon gjenstår.
+      const schoolDayOperationSignals = normalizeSchoolDayOperationSignalsRaw(
+        o.schoolDayOperationSignals,
+      );
+      return schoolDayOperationSignals ? { schoolDayOperationSignals } : {};
+    })(),
     description:
       typeof o.description === "string"
         ? o.description
@@ -1997,7 +2009,9 @@ Return this JSON shape:
 
 Use English weekday keys only. subjectKey: lowercase slug from Norwegian subject name (norsk, matematikk, engelsk). customLabel when extra detail is needed. room/teacher: classroom and teacher when stated in the source, else null. lessonSubcategory: resolved track for electives/language subjects (e.g. "Tysk", "Programmering") when evident, else null. Times 24h HH:MM.
 
-${CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION}`;
+${CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION}
+
+${SCHOOL_DAY_OPERATION_SIGNALS_PROMPT_SECTION}`;
 
 function getOpenAIClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
