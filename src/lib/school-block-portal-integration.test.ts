@@ -10,6 +10,7 @@ import { toPortalBundle } from "@/lib/portal-bundle";
 import {
   makeChildren,
   makeSchoolBlockWeekResult,
+  makeSchoolBlockWeekResultWithDayOperations,
 } from "@/lib/fixtures/school-block-week.fixture";
 import type { PortalImportContext } from "@/lib/portal-import-person";
 import type { AIAnalysisResult, SchoolBlockProposal } from "@/lib/types";
@@ -197,5 +198,69 @@ describe("schoolBlockProposal — portalintegrasjon", () => {
     // Eksisterende klassefiltrerte konsumenter bygger fortsatt sin output.
     expect(Array.isArray(bundle.items)).toBe(true);
     expect(bundle.schoolBlockProposal).toBeTruthy();
+  });
+});
+
+describe("schoolBlockProposal — dagsoperasjoner gjennom portalen", () => {
+  async function opsBundle(): Promise<Bundle> {
+    return bundleOf(makeSchoolBlockWeekResultWithDayOperations(), "school", MATCHED_CTX());
+  }
+
+  it("onsdag → adjust_start 10:30 (hours_adjusted); fredag → replace_day/activity_day 09:00–12:00 (full_replace)", async () => {
+    const p = (await opsBundle()).schoolBlockProposal!;
+
+    const wed = p.days.find((d) => d.date === "2026-06-17")!;
+    expect(wed.dayOperation).toMatchObject({ op: "adjust_start", effectiveStart: "10:30" });
+    expect(wed.dayResolution).toBe("hours_adjusted");
+
+    const fri = p.days.find((d) => d.date === "2026-06-19")!;
+    expect(fri.dayOperation).toMatchObject({
+      op: "replace_day",
+      activityKind: "activity_day",
+      effectiveStart: "09:00",
+      effectiveEnd: "12:00",
+    });
+    expect(fri.dayResolution).toBe("full_replace");
+  });
+
+  it("mandag/tirsdag/torsdag beholder none/enrich_only (ingen signaler)", async () => {
+    const p = (await opsBundle()).schoolBlockProposal!;
+    const mon = p.days.find((d) => d.date === "2026-06-15")!;
+    const tue = p.days.find((d) => d.date === null && d.weekdayIndex === "1")!;
+    const thu = p.days.find((d) => d.date === "2026-06-18")!;
+    for (const d of [mon, tue, thu]) {
+      expect(d.dayOperation).toEqual({ op: "none" });
+      expect(d.dayResolution).toBe("enrich_only");
+    }
+  });
+
+  it("eksisterende content-items og classScheduleEntries-audience er UENDRET av signalene", async () => {
+    const withOps = (await opsBundle()).schoolBlockProposal!;
+    const without = (await bundleOf(makeSchoolBlockWeekResult(), "school", MATCHED_CTX()))
+      .schoolBlockProposal!;
+
+    // Torsdagens pulje beholder alle tre klassekoder + egen 2STC-rad uendret.
+    const thu = withOps.days.find((d) => d.date === "2026-06-18")!;
+    const pulje = thu.contentItems.find((i) => i.audienceEntries[0]?.classCodes.length === 3)!;
+    expect(pulje.audienceEntries[0]!.classCodes).toEqual(["2STA", "2STC", "2STE"]);
+
+    // contentItems er identiske med/uten signaler (signaler rører kun dayOperation/dayResolution).
+    for (const d of withOps.days) {
+      const match = without.days.find((x) => x.dayId === d.dayId)!;
+      expect(d.contentItems).toEqual(match.contentItems);
+    }
+  });
+
+  it("ingen tid/operasjon lekker mellom dager (kun de to signaldagene endres)", async () => {
+    const p = (await opsBundle()).schoolBlockProposal!;
+    const changed = p.days.filter((d) => d.dayOperation.op !== "none").map((d) => d.date);
+    expect(new Set(changed)).toEqual(new Set(["2026-06-17", "2026-06-19"]));
+  });
+
+  it("andre documentKinds emitterer ikke schoolBlockProposal pga. dette feltet", async () => {
+    for (const kind of ["auto", "activity_plan", "event_doc", "timetable", "text"] as const) {
+      const bundle = await bundleOf(makeSchoolBlockWeekResultWithDayOperations(), kind);
+      expect("schoolBlockProposal" in bundle, `kind=${kind}`).toBe(false);
+    }
   });
 });

@@ -28,8 +28,11 @@ import type {
   SchoolBlockAudienceEntry,
   SchoolBlockContentItem,
   SchoolBlockDay,
+  SchoolBlockDayOperation,
+  SchoolBlockDayResolution,
   SchoolBlockProposal,
   SchoolBlockReviewFlag,
+  SchoolDayOperationSignal,
   SchoolProfileWeekdayIndex,
 } from "@/lib/types";
 
@@ -596,27 +599,202 @@ function dedupeAndSortFlags(flags: SchoolBlockReviewFlag[]): SchoolBlockReviewFl
   return [...seen.values()].sort(compareFlags);
 }
 
+/* ── Steg 3: dagsoperasjoner fra schoolDayOperationSignals ─────────────────────
+ * Rene, deterministiske mappinger fra NORMALISERTE signaler til dags-operasjoner. Builderen
+ * leser ALDRI fritekst (details/description/highlights) — kun det strukturerte signalfeltet.
+ * Et signal matches til en EKSISTERENDE dag (aldri en ny dag) etter prioritet dato →
+ * weekdayIndex → dayLabel-avledet ukedag, og brukes aldri på flere dager. Nøyaktig ett gyldig
+ * signal for en dag → operasjonen; flere ULIKE operasjoner → ingen operasjon + conflicting_actions.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const CONFLICTING_DAY_ACTIONS_MESSAGE =
+  "Flere motstridende dagsoperasjoner for samme dag – ingen ble valgt automatisk.";
+
+type DayOperationResolution =
+  | { kind: "operation"; dayOperation: SchoolBlockDayOperation }
+  | { kind: "conflict" };
+
+/** dayResolution er ALLTID avledet av dayOperation (invariant, kan aldri drifte). */
+function resolutionForOperation(op: SchoolBlockDayOperation): SchoolBlockDayResolution {
+  switch (op.op) {
+    case "replace_day":
+      return "full_replace";
+    case "adjust_start":
+    case "adjust_end":
+      return "hours_adjusted";
+    case "none":
+      return "enrich_only";
+  }
+}
+
+/** Mandag–fredag-ukedag fra en dayLabel (samme sikre logikk som seedFromRow). */
+function weekdayFromLabel(label: string | null): SchoolProfileWeekdayIndex | null {
+  const wk = normalizeSchoolWeekdayIndex(label);
+  if (wk) return wk;
+  const isoW = detectIsoWeekdayFromLabel(label);
+  if (isoW !== null && isoW >= 1 && isoW <= 5) {
+    return String(isoW - 1) as SchoolProfileWeekdayIndex;
+  }
+  return null;
+}
+
+/**
+ * Finn dagnøkkelen et signal gjelder, eller `null` når det ikke kan matches entydig til én
+ * eksisterende dag. Prioritet: eksakt ISO-dato → weekdayIndex → dayLabel-avledet ukedag. En
+ * datofestet dag har sin ukedag avledet av datoen, så et ukedags-scopet signal matcher den også.
+ * Flertydig (flere dager deler samme ukedag) → null (ingen gjetting, ingen lekkasje).
+ */
+function resolveSignalDayKey(
+  signal: SchoolDayOperationSignal,
+  groups: DayGroup[],
+): string | null {
+  if (signal.date !== null) {
+    const g = groups.find((x) => x.date === signal.date);
+    return g ? g.key : null;
+  }
+  const wk = signal.weekdayIndex ?? weekdayFromLabel(signal.dayLabel);
+  if (wk !== null) {
+    const matches = groups.filter((x) => x.weekdayIndex === wk);
+    return matches.length === 1 ? matches[0]!.key : null;
+  }
+  return null;
+}
+
+/** Ett normalisert signal → dags-operasjon (eksisterende wire-kontrakt, ingen nye felt). */
+function dayOperationFromSignal(signal: SchoolDayOperationSignal): SchoolBlockDayOperation {
+  switch (signal.operation) {
+    case "adjust_start":
+      return {
+        op: "adjust_start",
+        effectiveStart: signal.effectiveStart,
+        reason: signal.reason,
+        confidence: signal.confidence,
+      };
+    case "adjust_end":
+      return {
+        op: "adjust_end",
+        effectiveEnd: signal.effectiveEnd,
+        reason: signal.reason,
+        confidence: signal.confidence,
+      };
+    case "replace_day":
+      return {
+        op: "replace_day",
+        activityKind: signal.activityKind,
+        effectiveStart: signal.effectiveStart,
+        effectiveEnd: signal.effectiveEnd,
+        reason: signal.reason,
+        confidence: signal.confidence,
+      };
+  }
+}
+
+/** Signatur som skiller ULIKE operasjoner (ignorerer reason/confidence/dagsscope-form). */
+function operationSignature(op: SchoolBlockDayOperation): string {
+  switch (op.op) {
+    case "adjust_start":
+      return `adjust_start|${op.effectiveStart}`;
+    case "adjust_end":
+      return `adjust_end|${op.effectiveEnd}`;
+    case "replace_day":
+      return `replace_day|${op.activityKind}|${op.effectiveStart ?? ""}|${op.effectiveEnd ?? ""}`;
+    case "none":
+      return "none";
+  }
+}
+
+function operationConfidence(op: SchoolBlockDayOperation): number {
+  return op.op === "none" ? 0 : op.confidence;
+}
+
+/** Deterministisk valg innen samme signatur: høyest confidence, deretter minste reason. */
+function isPreferredOperation(
+  candidate: SchoolBlockDayOperation,
+  existing: SchoolBlockDayOperation,
+): boolean {
+  const cc = operationConfidence(candidate);
+  const ec = operationConfidence(existing);
+  if (cc !== ec) return cc > ec;
+  const cr = candidate.op === "none" ? "" : candidate.reason ?? "";
+  const er = existing.op === "none" ? "" : existing.reason ?? "";
+  return cr < er;
+}
+
+/**
+ * Resolver alle normaliserte signaler til per-dag-operasjoner. Signaler som deler samme
+ * OPERASJONSSIGNATUR (samme handling/tider) regnes som samme operasjon og kollapses deterministisk;
+ * to ULIKE signaturer for samme dag → konflikt. Muterer aldri input.
+ */
+function resolveDayOperations(
+  result: AIAnalysisResult,
+  groups: DayGroup[],
+): Map<string, DayOperationResolution> {
+  const opsByDay = new Map<string, SchoolBlockDayOperation[]>();
+  for (const signal of result.schoolDayOperationSignals ?? []) {
+    const key = resolveSignalDayKey(signal, groups);
+    if (key === null) continue; // ingen entydig dag → droppes (ingen dag konstrueres fra signal)
+    const list = opsByDay.get(key) ?? [];
+    list.push(dayOperationFromSignal(signal));
+    opsByDay.set(key, list);
+  }
+
+  const out = new Map<string, DayOperationResolution>();
+  for (const [key, ops] of opsByDay) {
+    const bySignature = new Map<string, SchoolBlockDayOperation>();
+    for (const op of ops) {
+      const sig = operationSignature(op);
+      const existing = bySignature.get(sig);
+      if (!existing || isPreferredOperation(op, existing)) bySignature.set(sig, op);
+    }
+    if (bySignature.size >= 2) {
+      out.set(key, { kind: "conflict" });
+    } else {
+      out.set(key, { kind: "operation", dayOperation: [...bySignature.values()][0]! });
+    }
+  }
+  return out;
+}
+
 function buildDay(
   group: DayGroup,
   confidence: number,
   contentItems: SchoolBlockContentItem[],
+  resolution: DayOperationResolution | undefined,
 ): SchoolBlockDay {
   const material =
     group.date !== null
       ? ["school-day", "date", group.date]
       : ["school-day", "weekday", group.weekdayIndex!];
+  const dayId = dayIdFromMaterial(material);
+
+  let dayOperation: SchoolBlockDayOperation = { op: "none" };
+  const dayFlags: SchoolBlockReviewFlag[] = [];
+  if (resolution?.kind === "operation") {
+    dayOperation = resolution.dayOperation;
+  } else if (resolution?.kind === "conflict") {
+    // Motstridende dagsoperasjoner → behold none/enrich_only + dagsscopet review-flagg.
+    dayFlags.push({
+      code: "conflicting_actions",
+      message: CONFLICTING_DAY_ACTIONS_MESSAGE,
+      scope: { dayId },
+    });
+  }
+
   return {
-    dayId: dayIdFromMaterial(material),
+    dayId,
     date: group.date,
     weekdayIndex: group.weekdayIndex,
     dayLabel: labelForGroup(group),
     blockTitle: null,
-    dayOperation: { op: "none" },
-    dayResolution: "enrich_only",
+    dayOperation,
+    dayResolution: resolutionForOperation(dayOperation),
     contentItems,
     confidence,
     evidence: null,
-    reviewFlags: dedupeAndSortFlags(contentItems.flatMap((i) => i.reviewFlags)),
+    reviewFlags: dedupeAndSortFlags([
+      ...contentItems.flatMap((i) => i.reviewFlags),
+      ...dayFlags,
+    ]),
   };
 }
 
@@ -704,9 +882,17 @@ export function buildSchoolBlockProposal(
   }
 
   const itemsByDay = collectContentItemsByDay(result, dayIdByKey, normalizedChildClass);
+  const dayOpsByKey = resolveDayOperations(result, groups);
 
   const days = groups
-    .map((group) => buildDay(group, result.confidence, itemsByDay.get(group.key) ?? []))
+    .map((group) =>
+      buildDay(
+        group,
+        result.confidence,
+        itemsByDay.get(group.key) ?? [],
+        dayOpsByKey.get(group.key),
+      ),
+    )
     .sort(compareDays);
 
   const reviewFlags = dedupeAndSortFlags(days.flatMap((d) => d.reviewFlags));

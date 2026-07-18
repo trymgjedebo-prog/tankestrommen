@@ -7,12 +7,14 @@ import {
   makeChildren,
   makeMinimalAnalysisResult,
   makeSchoolBlockWeekResult,
+  makeSchoolBlockWeekResultWithDayOperations,
 } from "@/lib/fixtures/school-block-week.fixture";
 import type { PortalImportContext } from "@/lib/portal-import-person";
 import type {
   AIAnalysisResult,
   ClassScheduleEntry,
   DayScheduleEntry,
+  SchoolDayOperationSignal,
 } from "@/lib/types";
 
 const META: BuildSchoolBlockProposalMeta = {
@@ -986,5 +988,314 @@ describe("buildSchoolBlockProposal — renhet og dagsskall", () => {
     expect(p.days).toEqual([]);
     expect(p.structureStatus).toBe("complete");
     expect(p.reviewFlags).toEqual([]);
+  });
+});
+
+describe("buildSchoolBlockProposal — dagsoperasjoner fra schoolDayOperationSignals", () => {
+  /** Man/ons/fre-uke fra datofestede scheduleByDay-rader + valgfrie signaler. */
+  function weekResult(signals: SchoolDayOperationSignal[] = []): AIAnalysisResult {
+    return makeMinimalAnalysisResult({
+      scheduleByDay: [
+        dayRow("2026-06-15", "Mandag"),
+        dayRow("2026-06-17", "Onsdag"),
+        dayRow("2026-06-19", "Fredag"),
+      ],
+      ...(signals.length > 0 ? { schoolDayOperationSignals: signals } : {}),
+    });
+  }
+  const mon = (p: ReturnType<typeof build>) => p.days.find((d) => d.date === "2026-06-15")!;
+  const wed = (p: ReturnType<typeof build>) => p.days.find((d) => d.date === "2026-06-17")!;
+  const fri = (p: ReturnType<typeof build>) => p.days.find((d) => d.date === "2026-06-19")!;
+
+  it("uten signaler er hver dag uendret: none/enrich_only", () => {
+    const p = build(weekResult());
+    for (const d of p.days) {
+      expect(d.dayOperation).toEqual({ op: "none" });
+      expect(d.dayResolution).toBe("enrich_only");
+    }
+    expect(p.structureStatus).toBe("complete");
+  });
+
+  it("adjust_start: riktig dag, riktig tid, hours_adjusted, ingen tid på andre dager", () => {
+    const p = build(
+      weekResult([
+        {
+          operation: "adjust_start",
+          date: "2026-06-17",
+          weekdayIndex: "2",
+          dayLabel: "onsdag",
+          effectiveStart: "10:30",
+          reason: "Oppmøte 10.30",
+          sourceText: "Elevens oppmøte kl. 10.30.",
+          confidence: 0.9,
+        },
+      ]),
+    );
+    expect(wed(p).dayOperation).toEqual({
+      op: "adjust_start",
+      effectiveStart: "10:30",
+      reason: "Oppmøte 10.30",
+      confidence: 0.9,
+    });
+    expect(wed(p).dayResolution).toBe("hours_adjusted");
+    // Ingen tid/operasjon lekker til andre dager.
+    expect(mon(p).dayOperation).toEqual({ op: "none" });
+    expect(fri(p).dayOperation).toEqual({ op: "none" });
+  });
+
+  it("adjust_end: riktig dag, riktig tid, hours_adjusted", () => {
+    const p = build(
+      weekResult([
+        {
+          operation: "adjust_end",
+          date: "2026-06-17",
+          weekdayIndex: "2",
+          dayLabel: "onsdag",
+          effectiveEnd: "13:15",
+          reason: null,
+          sourceText: "Skoledagen slutter 13.15.",
+          confidence: 0.8,
+        },
+      ]),
+    );
+    expect(wed(p).dayOperation).toEqual({
+      op: "adjust_end",
+      effectiveEnd: "13:15",
+      reason: null,
+      confidence: 0.8,
+    });
+    expect(wed(p).dayResolution).toBe("hours_adjusted");
+  });
+
+  it("replace_day: activityKind, nullable + eksplisitte tider, full_replace", () => {
+    const explicit = build(
+      weekResult([
+        {
+          operation: "replace_day",
+          date: "2026-06-19",
+          weekdayIndex: "4",
+          dayLabel: "fredag",
+          activityKind: "activity_day",
+          effectiveStart: "09:00",
+          effectiveEnd: "12:00",
+          reason: "Avslutning",
+          sourceText: "Opplegg 09.00–12.00.",
+          confidence: 0.95,
+        },
+      ]),
+    );
+    expect(fri(explicit).dayOperation).toEqual({
+      op: "replace_day",
+      activityKind: "activity_day",
+      effectiveStart: "09:00",
+      effectiveEnd: "12:00",
+      reason: "Avslutning",
+      confidence: 0.95,
+    });
+    expect(fri(explicit).dayResolution).toBe("full_replace");
+
+    const nullable = build(
+      weekResult([
+        {
+          operation: "replace_day",
+          date: "2026-06-19",
+          weekdayIndex: "4",
+          dayLabel: "fredag",
+          activityKind: "trip_day",
+          effectiveStart: null,
+          effectiveEnd: null,
+          reason: null,
+          sourceText: "Turdag.",
+          confidence: 0.7,
+        },
+      ]),
+    );
+    expect(nullable.days.find((d) => d.date === "2026-06-19")!.dayOperation).toMatchObject({
+      op: "replace_day",
+      activityKind: "trip_day",
+      effectiveStart: null,
+      effectiveEnd: null,
+    });
+  });
+
+  it("dato prioriteres over motstridende dayLabel", () => {
+    const p = build(
+      weekResult([
+        {
+          operation: "adjust_start",
+          date: "2026-06-17", // onsdag
+          weekdayIndex: null,
+          dayLabel: "mandag", // motstridende label — datoen skal vinne
+          effectiveStart: "10:30",
+          reason: null,
+          sourceText: "Oppmøte 10.30.",
+          confidence: 0.9,
+        },
+      ]),
+    );
+    expect(wed(p).dayOperation).toMatchObject({ op: "adjust_start", effectiveStart: "10:30" });
+    expect(mon(p).dayOperation).toEqual({ op: "none" });
+  });
+
+  it("weekday-scopet signal matcher den datofestede dagen (samme ukedag)", () => {
+    const p = build(
+      weekResult([
+        {
+          operation: "adjust_start",
+          date: null,
+          weekdayIndex: "2", // onsdag — matcher datofestet 2026-06-17
+          dayLabel: null,
+          effectiveStart: "10:30",
+          reason: null,
+          sourceText: "Oppmøte 10.30.",
+          confidence: 0.9,
+        },
+      ]),
+    );
+    expect(wed(p).dayOperation).toMatchObject({ op: "adjust_start", effectiveStart: "10:30" });
+    expect(mon(p).dayOperation).toEqual({ op: "none" });
+    expect(fri(p).dayOperation).toEqual({ op: "none" });
+  });
+
+  it("mandagssignal lekker ikke til onsdag/fredag (brukes bare én gang)", () => {
+    const p = build(
+      weekResult([
+        {
+          operation: "adjust_start",
+          date: "2026-06-15",
+          weekdayIndex: "0",
+          dayLabel: "mandag",
+          effectiveStart: "09:30",
+          reason: null,
+          sourceText: "Oppmøte 09.30.",
+          confidence: 0.9,
+        },
+      ]),
+    );
+    expect(mon(p).dayOperation).toMatchObject({ op: "adjust_start", effectiveStart: "09:30" });
+    expect(wed(p).dayOperation).toEqual({ op: "none" });
+    expect(fri(p).dayOperation).toEqual({ op: "none" });
+  });
+
+  it("motstridende signaler samme dag: none/enrich_only + conflicting_actions + review_required", () => {
+    const p = build(
+      weekResult([
+        {
+          operation: "adjust_start",
+          date: "2026-06-17",
+          weekdayIndex: "2",
+          dayLabel: "onsdag",
+          effectiveStart: "10:30",
+          reason: null,
+          sourceText: "Oppmøte 10.30.",
+          confidence: 0.9,
+        },
+        {
+          operation: "replace_day",
+          date: "2026-06-17",
+          weekdayIndex: "2",
+          dayLabel: "onsdag",
+          activityKind: "exam_day",
+          effectiveStart: "09:00",
+          effectiveEnd: "12:00",
+          reason: null,
+          sourceText: "Heldagsprøve.",
+          confidence: 0.9,
+        },
+      ]),
+    );
+    // Konfliktdagen faller tilbake til none/enrich_only.
+    expect(wed(p).dayOperation).toEqual({ op: "none" });
+    expect(wed(p).dayResolution).toBe("enrich_only");
+    // Dagsscopet conflicting_actions-flagg peker på dagen.
+    const flag = wed(p).reviewFlags.find((f) => f.code === "conflicting_actions")!;
+    expect(flag).toBeTruthy();
+    expect(flag.scope.dayId).toBe(wed(p).dayId);
+    // Proposalet blir review_required, men andre dager beholdes uendret.
+    expect(p.structureStatus).toBe("review_required");
+    expect(mon(p).dayOperation).toEqual({ op: "none" });
+    expect(fri(p).dayOperation).toEqual({ op: "none" });
+  });
+
+  it("to identiske operasjoner (samme signatur) er IKKE konflikt — kollapses til én", () => {
+    const p = build(
+      weekResult([
+        {
+          operation: "adjust_start",
+          date: "2026-06-17",
+          weekdayIndex: "2",
+          dayLabel: "onsdag",
+          effectiveStart: "10:30",
+          reason: "a",
+          sourceText: "Oppmøte 10.30.",
+          confidence: 0.7,
+        },
+        {
+          operation: "adjust_start",
+          date: null,
+          weekdayIndex: "2",
+          dayLabel: null,
+          effectiveStart: "10:30",
+          reason: "b",
+          sourceText: "Oppmøte 10.30 (2).",
+          confidence: 0.95, // høyest confidence vinner deterministisk
+        },
+      ]),
+    );
+    expect(wed(p).dayOperation).toMatchObject({
+      op: "adjust_start",
+      effectiveStart: "10:30",
+      confidence: 0.95,
+    });
+    expect(wed(p).reviewFlags.some((f) => f.code === "conflicting_actions")).toBe(false);
+  });
+
+  it("sourceText brukes IKKE som klassifiseringsgrunnlag i builderen", () => {
+    // details/sourceText inneholder «siste skoledag» / «oppmøte», men uten signaler skjer ingenting.
+    const p = build(
+      makeMinimalAnalysisResult({
+        scheduleByDay: [
+          dayRow("2026-06-17", "Onsdag", "Elevens oppmøte kl. 10.30. Siste skoledag. Fri fra 12."),
+          dayRow("2026-06-19", "Fredag", "Heldagsprøve. Turdag. Aktivitetsdag."),
+        ],
+      }),
+    );
+    for (const d of p.days) {
+      expect(d.dayOperation).toEqual({ op: "none" });
+      expect(d.dayResolution).toBe("enrich_only");
+    }
+    expect(p.structureStatus).toBe("complete");
+  });
+
+  it("dayResolution er alltid konsistent med dayOperation (invariant)", () => {
+    const p = build(makeSchoolBlockWeekResultWithDayOperations());
+    for (const d of p.days) {
+      const expected =
+        d.dayOperation.op === "replace_day"
+          ? "full_replace"
+          : d.dayOperation.op === "adjust_start" || d.dayOperation.op === "adjust_end"
+            ? "hours_adjusted"
+            : "enrich_only";
+      expect(d.dayResolution).toBe(expected);
+    }
+  });
+
+  it("urelaterte signaler (ingen matchende dag) endrer ingenting", () => {
+    const p = build(
+      weekResult([
+        {
+          operation: "adjust_start",
+          date: "2026-06-16", // tirsdag — finnes ikke i denne uka
+          weekdayIndex: "1",
+          dayLabel: "tirsdag",
+          effectiveStart: "10:30",
+          reason: null,
+          sourceText: "Oppmøte 10.30.",
+          confidence: 0.9,
+        },
+      ]),
+    );
+    for (const d of p.days) expect(d.dayOperation).toEqual({ op: "none" });
+    expect(p.structureStatus).toBe("complete");
   });
 });

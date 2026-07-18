@@ -8,6 +8,7 @@ import type {
   AIAnalysisResult,
   ClassScheduleEntry,
   DayScheduleEntry,
+  SchoolDayOperationSignal,
 } from "@/lib/types";
 import type { PortalRelevanceChild } from "@/lib/portal-import-person";
 
@@ -160,6 +161,47 @@ export function makeSchoolBlockWeekResult(): AIAnalysisResult {
       }),
     ],
   });
+}
+
+/**
+ * Strukturerte dagsoperasjons-signaler for avslutningsuka (som modellen ville emittert etter
+ * `SCHOOL_DAY_OPERATION_SIGNALS_PROMPT_SECTION`). Onsdag: forsinket oppmøte 10:30. Fredag:
+ * heldags-avslutningsprogram 09.00–12.00 som erstatter ordinær undervisning. Ingen signaler for
+ * mandag/tirsdag (ordinær undervisning gjelder / betinget). Fabrikk → ferske objekter per kall.
+ */
+export function makeSchoolBlockDayOperationSignals(): SchoolDayOperationSignal[] {
+  return [
+    {
+      operation: "adjust_start",
+      date: "2026-06-17",
+      weekdayIndex: "2",
+      dayLabel: "onsdag",
+      effectiveStart: "10:30",
+      reason: "Elevens oppmøte kl. 10.30",
+      sourceText: "Elevens oppmøte kl. 10.30.",
+      confidence: 0.9,
+    },
+    {
+      operation: "replace_day",
+      date: "2026-06-19",
+      weekdayIndex: "4",
+      dayLabel: "fredag",
+      activityKind: "activity_day",
+      effectiveStart: "09:00",
+      effectiveEnd: "12:00",
+      reason: "Siste skoledag – felles avslutningsopplegg",
+      sourceText: "Siste skoledag. Opplegg fra kl. 09.00–12.00.",
+      confidence: 0.9,
+    },
+  ];
+}
+
+/** Avslutningsuka MED strukturerte dagsoperasjons-signaler (onsdag adjust_start, fredag replace_day). */
+export function makeSchoolBlockWeekResultWithDayOperations(): AIAnalysisResult {
+  return {
+    ...makeSchoolBlockWeekResult(),
+    schoolDayOperationSignals: makeSchoolBlockDayOperationSignals(),
+  };
 }
 
 /** Barnet dokumentet gjelder (VG2 2STC). */
