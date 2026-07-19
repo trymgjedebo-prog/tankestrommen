@@ -131,3 +131,68 @@ describe("schoolDayOperationSignals i primært JSON-skjelett", () => {
     expect(TEXT_SYSTEM_PROMPT).toContain(S);
   });
 });
+
+/**
+ * Låser adjust_start-presiseringen: et eksplisitt oppmøte-/dagsstart-tidspunkt gir fortsatt
+ * adjust_start selv om samme dagsavsnitt også inneholder en separat beskjed (bokinnlevering,
+ * påminnelse). Regresjon for produksjonsfeilen der onsdag «Elevens oppmøte kl. 10.30.
+ * Bokinnlevering …» ble tolket som none. Konservative grenser (bokinnlevering/eksamen-for-noen/
+ * enkelttime) bevares som negative kontraster.
+ */
+describe("adjust_start-presisering (oppmøte vs. andre beskjeder)", () => {
+  it("sier at et eksplisitt oppmøte-/dagsstart-tidspunkt kan gi adjust_start", () => {
+    expect(S).toContain("ADJUST_START — ATTENDANCE VS. OTHER SAME-DAY MESSAGES");
+    expect(S).toContain(
+      "when the pupil should MEET, or when the pupil's overall school day BEGINS, still yields \"adjust_start\"",
+    );
+  });
+
+  it("sier at separate beskjeder samme dag ikke automatisk opphever signalet", () => {
+    expect(S).toContain(
+      "even when the same day paragraph ALSO contains other separate messages",
+    );
+    expect(S).toContain("do NOT withhold the signal merely because the paragraph has several sentences");
+  });
+
+  it("klassifiseringen er fortsatt semantisk (hele elevens dagsstart), ikke frasebasert", () => {
+    expect(S).toContain("does this time mark when the pupil's overall school day begins?");
+  });
+
+  it("inneholder det produksjonsnære positive eksempelet (oppmøte 10.30 + bokinnlevering → adjust_start 10:30)", () => {
+    expect(S).toContain(
+      'SHOULD emit adjust_start (attendance time stands despite a separate message) — "Elevens oppmøte kl. 10.30. Bokinnlevering for alle som har hatt eksamen."',
+    );
+    expect(S).toContain("the book handover is a separate message and does NOT override the start-time signal");
+    expect(S).toContain('{"operation":"adjust_start","effectiveStart":"10:30", ...}');
+  });
+
+  it("har negativt bokinnleveringseksempel (tiden gjelder bokinnleveringen)", () => {
+    expect(S).toContain(
+      'SHOULD NOT emit adjust_start (time belongs to the book handover) — "Bokinnlevering for 2STC kl. 10.30–11.00."',
+    );
+  });
+
+  it("har negativt eksamen-for-noen-eksempel (betinget undergruppe)", () => {
+    expect(S).toContain(
+      'SHOULD NOT emit adjust_start (conditional subgroup, ordinary teaching continues) — "Muntlig eksamen for noen elever kl. 10.30. Vanlig undervisning for resten."',
+    );
+  });
+
+  it("har negativt enkelttime-eksempel", () => {
+    expect(S).toContain(
+      'SHOULD NOT emit adjust_start (a single lesson, not the pupil\'s overall start) — "Naturfag kl. 10.30."',
+    );
+  });
+
+  it("bevarer konservative grenser (subgruppe/uklart dagsscope/ingen gjetting)", () => {
+    expect(S).toContain("when it applies to some pupils but not to the pupil's overall day");
+    expect(S).toContain("when there is no clear day-level scope");
+    // Gjetteforbudet for tid er uendret.
+    expect(S).toContain("Do NOT guess a missing time");
+  });
+
+  it("presiseringen er en del av den delte seksjonen brukt identisk av image og text", () => {
+    expect(SYSTEM_PROMPT).toContain("ADJUST_START — ATTENDANCE VS. OTHER SAME-DAY MESSAGES");
+    expect(TEXT_SYSTEM_PROMPT).toContain("ADJUST_START — ATTENDANCE VS. OTHER SAME-DAY MESSAGES");
+  });
+});
