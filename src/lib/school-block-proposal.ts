@@ -20,6 +20,11 @@ import {
   normalizeSchoolWeekdayIndex,
   schoolWeekdayIndexFromIsoDate,
 } from "@/lib/school-weekday";
+import {
+  resolveSchoolDayOperationConflict,
+  schoolDayOperationFromSignal,
+  type DayOperationResolution,
+} from "@/lib/school-day-operation-resolution";
 import type {
   AIAnalysisResult,
   ClassScheduleEntry,
@@ -610,10 +615,6 @@ function dedupeAndSortFlags(flags: SchoolBlockReviewFlag[]): SchoolBlockReviewFl
 const CONFLICTING_DAY_ACTIONS_MESSAGE =
   "Flere motstridende dagsoperasjoner for samme dag – ingen ble valgt automatisk.";
 
-type DayOperationResolution =
-  | { kind: "operation"; dayOperation: SchoolBlockDayOperation }
-  | { kind: "conflict" };
-
 /** dayResolution er ALLTID avledet av dayOperation (invariant, kan aldri drifte). */
 function resolutionForOperation(op: SchoolBlockDayOperation): SchoolBlockDayResolution {
   switch (op.op) {
@@ -660,70 +661,11 @@ function resolveSignalDayKey(
   return null;
 }
 
-/** Ett normalisert signal → dags-operasjon (eksisterende wire-kontrakt, ingen nye felt). */
-function dayOperationFromSignal(signal: SchoolDayOperationSignal): SchoolBlockDayOperation {
-  switch (signal.operation) {
-    case "adjust_start":
-      return {
-        op: "adjust_start",
-        effectiveStart: signal.effectiveStart,
-        reason: signal.reason,
-        confidence: signal.confidence,
-      };
-    case "adjust_end":
-      return {
-        op: "adjust_end",
-        effectiveEnd: signal.effectiveEnd,
-        reason: signal.reason,
-        confidence: signal.confidence,
-      };
-    case "replace_day":
-      return {
-        op: "replace_day",
-        activityKind: signal.activityKind,
-        effectiveStart: signal.effectiveStart,
-        effectiveEnd: signal.effectiveEnd,
-        reason: signal.reason,
-        confidence: signal.confidence,
-      };
-  }
-}
-
-/** Signatur som skiller ULIKE operasjoner (ignorerer reason/confidence/dagsscope-form). */
-function operationSignature(op: SchoolBlockDayOperation): string {
-  switch (op.op) {
-    case "adjust_start":
-      return `adjust_start|${op.effectiveStart}`;
-    case "adjust_end":
-      return `adjust_end|${op.effectiveEnd}`;
-    case "replace_day":
-      return `replace_day|${op.activityKind}|${op.effectiveStart ?? ""}|${op.effectiveEnd ?? ""}`;
-    case "none":
-      return "none";
-  }
-}
-
-function operationConfidence(op: SchoolBlockDayOperation): number {
-  return op.op === "none" ? 0 : op.confidence;
-}
-
-/** Deterministisk valg innen samme signatur: høyest confidence, deretter minste reason. */
-function isPreferredOperation(
-  candidate: SchoolBlockDayOperation,
-  existing: SchoolBlockDayOperation,
-): boolean {
-  const cc = operationConfidence(candidate);
-  const ec = operationConfidence(existing);
-  if (cc !== ec) return cc > ec;
-  const cr = candidate.op === "none" ? "" : candidate.reason ?? "";
-  const er = existing.op === "none" ? "" : existing.reason ?? "";
-  return cr < er;
-}
-
 /**
- * Resolver alle normaliserte signaler til per-dag-operasjoner. Signaler som deler samme
- * OPERASJONSSIGNATUR (samme handling/tider) regnes som samme operasjon og kollapses deterministisk;
- * to ULIKE signaturer for samme dag → konflikt. Muterer aldri input.
+ * Resolver alle normaliserte signaler til per-dag-operasjoner. Matcher hvert signal til én
+ * eksisterende dag (`resolveSignalDayKey`), mapper til wire-operasjon og løser konflikt via den
+ * delte `school-day-operation-resolution`-modulen (mapping + konflikt/dedup deles med adapteren).
+ * Muterer aldri input.
  */
 function resolveDayOperations(
   result: AIAnalysisResult,
@@ -734,23 +676,13 @@ function resolveDayOperations(
     const key = resolveSignalDayKey(signal, groups);
     if (key === null) continue; // ingen entydig dag → droppes (ingen dag konstrueres fra signal)
     const list = opsByDay.get(key) ?? [];
-    list.push(dayOperationFromSignal(signal));
+    list.push(schoolDayOperationFromSignal(signal));
     opsByDay.set(key, list);
   }
 
   const out = new Map<string, DayOperationResolution>();
   for (const [key, ops] of opsByDay) {
-    const bySignature = new Map<string, SchoolBlockDayOperation>();
-    for (const op of ops) {
-      const sig = operationSignature(op);
-      const existing = bySignature.get(sig);
-      if (!existing || isPreferredOperation(op, existing)) bySignature.set(sig, op);
-    }
-    if (bySignature.size >= 2) {
-      out.set(key, { kind: "conflict" });
-    } else {
-      out.set(key, { kind: "operation", dayOperation: [...bySignature.values()][0]! });
-    }
+    out.set(key, resolveSchoolDayOperationConflict(ops));
   }
   return out;
 }
