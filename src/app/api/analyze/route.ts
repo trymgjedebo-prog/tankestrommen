@@ -9,6 +9,7 @@ import { djb2Hex } from "@/lib/stable-id";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 import { hasStrongSchoolEvidence, looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
+import { LANGUAGE_TRACK_SUBJECT_KEYS } from "@/lib/school-language-track";
   import { validateClientSchoolWeeklyProfile } from "@/lib/ai/analyze-image";
 import { isoWeekAndYearOfIsoDate, pickYearForWeekdayDate } from "@/lib/portal-week-year";
 import type {
@@ -7411,11 +7412,7 @@ function resolveLanguageTrack(result: AIAnalysisResult): SchoolWeekOverlayPropos
       .filter(Boolean)
       .join(" "),
   );
-  const tracks = [
-    /\btysk\b/.test(text) ? "tysk" : null,
-    /\bspansk\b/.test(text) ? "spansk" : null,
-    /\bfransk\b/.test(text) ? "fransk" : null,
-  ].filter((x): x is string => Boolean(x));
+  const tracks = LANGUAGE_TRACK_SUBJECT_KEYS.filter((k) => new RegExp(`\\b${k}\\b`).test(text));
   if (tracks.length === 1) {
     return { resolvedTrack: tracks[0], confidence: 0.8, reason: "single_track_detected" };
   }
