@@ -19,6 +19,8 @@ import {
   buildAnalysisEvidenceReport,
 } from "@/lib/analysis-evidence";
 import { buildSchoolBlockProposal } from "@/lib/school-block-proposal";
+import { buildCanonicalSchoolContentDraft } from "@/lib/canonical-school-adapter";
+import { buildNormalizedSchoolContentFacts } from "@/lib/school-content-fact";
 import type { AIAnalysisResult, SchoolWeekOverlayProposal } from "@/lib/types";
 import { currentSpan, startSpan } from "braintrust";
 
@@ -347,6 +349,21 @@ export async function toPortalBundle(
         textAnalyzePortalBundleReturned: true,
       };
     }
+    // Additivt: ett kanonisk skoleinnholds-draft (fag/kategori/dag/dagsoperasjon/audience) bygget
+    // fra de eksisterende projeksjonene + deterministisk fagplassering. Kun når et gyldig
+    // schoolBlock-grunnlag finnes; endrer ingen eksisterende output. Ingen try/catch — adapterfeil
+    // skal boble til den eksisterende failure boundary (samme som builderne over).
+    // Delt, pre-projeksjons fag/kategori-rad (samme rå kilde som schoolBlock: `normalizedUnfilteredResult`).
+    const normalizedSchoolContentFacts =
+      documentKind === "school" ? buildNormalizedSchoolContentFacts(normalizedUnfilteredResult.scheduleByDay) : [];
+    const canonicalSchoolContentDraft = buildCanonicalSchoolContentDraft({
+      schoolBlockProposal,
+      schoolWeekOverlayProposal,
+      normalizedSchoolContentFacts,
+      resolvedPersonContext: portalImport,
+      originalSourceType: sourceType,
+      sourceTitle: schoolBlockProposal?.sourceTitle ?? resultIn.title ?? "Skoleinformasjon",
+    });
     const bundleOut = {
       schemaVersion: "1.0.0",
       provenance: {
@@ -361,6 +378,7 @@ export async function toPortalBundle(
       ...(schoolProfileProposal ? { schoolProfileProposal } : {}),
       ...(schoolWeekOverlayProposal ? { schoolWeekOverlayProposal } : {}),
       ...(schoolBlockProposal ? { schoolBlockProposal } : {}),
+      ...(canonicalSchoolContentDraft ? { canonicalSchoolContentDraft } : {}),
       evidenceReport: buildAnalysisEvidenceReport(buildAnalysisCorpus(result), result),
       ...(Object.keys(debugPayload).length > 0 ? { debug: debugPayload } : {}),
     };
