@@ -14,7 +14,8 @@
     "eval:tankestrom:dry": "tsx --tsconfig tsconfig.json scripts/eval-tankestrom.ts --dry",
     "eval:tankestrom:live": "tsx --tsconfig tsconfig.json scripts/eval-tankestrom-live.ts",
     "eval:tankestrom:live:mini": "tsx --tsconfig tsconfig.json scripts/eval-tankestrom-live.ts --model=gpt-5.4-mini",
-    "eval:tankestrom:live:strong": "tsx --tsconfig tsconfig.json scripts/eval-tankestrom-live.ts --model=gpt-5.4"
+    "eval:tankestrom:live:strong": "tsx --tsconfig tsconfig.json scripts/eval-tankestrom-live.ts --model=gpt-5.4",
+    "eval:school:replay:smoke": "tsx --tsconfig tsconfig.json src/evals/school-replay/run-school-replay.ts src/evals/school-replay/fixtures/smoke"
   },
   "dependencies": {
     "braintrust": "^3.10.0",
