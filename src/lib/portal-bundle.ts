@@ -78,6 +78,21 @@ function requireRuntime(): PortalBundleRuntime {
 }
 
 /**
+ * Additiv, bakoverkompatibel run context: gjør de DIREKTE volatile feltene i toPortalBundle
+ * (`schoolBlockProposal.proposalId`, `provenance.importRunId`, `provenance.generatedAt`) injiserbare
+ * slik at replay kan gjøres deterministisk. Uten run context beholdes dagens produksjonsoppførsel
+ * (`new Date()` + `randomUUID()`). Endrer ikke wire-format, feltrekkefølge eller semantikk.
+ *
+ * Merk: tilfeldige ID-er som genereres INNE i PortalBundleRuntime-callbacks (f.eks. event/task-items
+ * og overlay-proposalId fra route.ts) er IKKE dekket her — de rapporteres separat og hører til en
+ * senere runtime-ekstraksjon.
+ */
+export type PortalBundleRunContext = {
+  now?: Date;
+  newId?: () => string;
+};
+
+/**
  * Bygg portal-import bundle (samme som `/api/analyze` i portal-modus).
  * Registreres fra `route.ts` via {@link registerPortalBundleRuntime}.
  */
@@ -87,8 +102,12 @@ export async function toPortalBundle(
   documentKind: AnalysisDocumentKind | undefined,
   includeDebug: boolean,
   portalImport: PortalImportContext = { knownPersons: [] },
+  runContext?: PortalBundleRunContext,
 ): Promise<Record<string, unknown>> {
   const deps = requireRuntime();
+  // Volatile-injeksjon: uten run context = dagens produksjonsoppførsel (randomUUID / new Date).
+  const newId = runContext?.newId ?? randomUUID;
+  const nowDate = (): Date => runContext?.now ?? new Date();
   const btPortal = Boolean(process.env.BRAINTRUST_API_KEY?.trim());
   if (btPortal) ensureBraintrustLoggerForProject();
   const portalBundleSpan = btPortal ? startSpan({ name: "portal_bundle" }) : null;
@@ -120,7 +139,7 @@ export async function toPortalBundle(
     const schoolBlockProposal =
       documentKind === "school"
         ? buildSchoolBlockProposal(normalizedUnfilteredResult, portalImport, {
-            proposalId: randomUUID(),
+            proposalId: newId(),
             originalSourceType: sourceType,
           })
         : undefined;
@@ -369,8 +388,8 @@ export async function toPortalBundle(
       provenance: {
         sourceSystem: "tankestrom",
         sourceType,
-        generatedAt: new Date().toISOString(),
-        importRunId: randomUUID(),
+        generatedAt: nowDate().toISOString(),
+        importRunId: newId(),
       },
       items: dedupedItems,
       fileErrors,

@@ -222,13 +222,19 @@ function pushSubjectLessonDiag(entry: Record<string, unknown>): void {
   subjectLessonDiagBuffer.push({ ...entry, _ts: Date.now() });
 }
 
-function diagSubjectPipeline(payload: {
-  hypothesisId: string;
-  phase: string;
-  location: string;
-  data: Record<string, unknown>;
-  runId?: string;
-}): void {
+function diagSubjectPipeline(
+  payload: {
+    hypothesisId: string;
+    phase: string;
+    location: string;
+    data: Record<string, unknown>;
+    runId?: string;
+  },
+  // Additivt: replay/offline kan sette `false` for å GARANTERE at ingen diagnostisk fetch/logg
+  // kjøres. Default `true` bevarer dagens produksjonsoppførsel uendret. Påvirker aldri semantikk.
+  enabled = true,
+): void {
+  if (!enabled) return;
   const body = {
     sessionId: "f55091",
     timestamp: Date.now(),
@@ -245,8 +251,12 @@ function diagSubjectPipeline(payload: {
   }).catch(() => {});
 }
 
-function flushSubjectLessonDiagBuffer(flushReason: string): void {
+function flushSubjectLessonDiagBuffer(flushReason: string, enabled = true): void {
   if (subjectLessonDiagBuffer.length === 0) return;
+  if (!enabled) {
+    subjectLessonDiagBuffer.length = 0; // tøm bufferet, men ingen diagnostisk emit/fetch
+    return;
+  }
   diagSubjectPipeline({
     hypothesisId: "H2",
     phase: "aggregate_normalizeSchoolProfileLesson",
@@ -1113,6 +1123,7 @@ function normalizeSchoolWeeklyProfileRaw(
     targetGroup?: string | null;
     description?: string | null;
   },
+  enableDiagnostics = true,
 ): { profile: SchoolWeeklyProfile | null; debug: SchoolWeeklyProfileDebug } {
   clearSubjectLessonDiagBuffer();
   const debug: SchoolWeeklyProfileDebug = {
@@ -1122,11 +1133,11 @@ function normalizeSchoolWeeklyProfileRaw(
     rawRoot: raw,
   };
   if (raw === null || raw === undefined) {
-    flushSubjectLessonDiagBuffer("raw_null");
+    flushSubjectLessonDiagBuffer("raw_null", enableDiagnostics);
     return { profile: null, debug };
   }
   if (typeof raw !== "object") {
-    flushSubjectLessonDiagBuffer("raw_not_object");
+    flushSubjectLessonDiagBuffer("raw_not_object", enableDiagnostics);
     return { profile: null, debug };
   }
   const o = raw as Record<string, unknown>;
@@ -1211,10 +1222,10 @@ function normalizeSchoolWeeklyProfileRaw(
   }
 
   if (Object.keys(weekdays).length === 0) {
-    flushSubjectLessonDiagBuffer("weekdays_empty");
+    flushSubjectLessonDiagBuffer("weekdays_empty", enableDiagnostics);
     return { profile: null, debug };
   }
-  flushSubjectLessonDiagBuffer("profile_ok");
+  flushSubjectLessonDiagBuffer("profile_ok", enableDiagnostics);
   return { profile: { gradeBand, weekdays }, debug };
 }
 
@@ -1554,13 +1565,25 @@ export function normalizeClassLocationsRaw(raw: unknown): ClassLocation[] | unde
   return out.length > 0 ? out : undefined;
 }
 
+/**
+ * Additive, bakoverkompatible options for parsing/normalisering. `now` injiserer klokka som brukes
+ * til årsinferens (deterministisk replay). `enableDiagnostics: false` garanterer at ingen diagnostisk
+ * fetch/logg kjøres. Ingen av dem endrer semantiske normaliseringsregler. Default = dagens oppførsel.
+ */
+export type NormalizeAIAnalysisOptions = {
+  now?: Date;
+  enableDiagnostics?: boolean;
+};
+
 export function normalizeAIAnalysisResult(
   data: unknown,
-  sourceText?: string
+  sourceText?: string,
+  options?: NormalizeAIAnalysisOptions,
 ): AIAnalysisResult {
   if (!data || typeof data !== "object") {
     throw new Error("Ugyldig JSON fra modellen");
   }
+  const diagnosticsEnabled = options?.enableDiagnostics ?? true;
   const o = data as Record<string, unknown>;
 
   const extractedRaw =
@@ -1577,7 +1600,7 @@ export function normalizeAIAnalysisResult(
     .join("\n");
   const weekYear = inferIsoWeekAndYearFromContext(
     weekInferenceContext,
-    new Date().getFullYear()
+    (options?.now ?? new Date()).getFullYear()
   );
 
   const parentDays = inferParentDayDates(normalizeParentDays(o.days), weekYear);
@@ -1629,21 +1652,25 @@ export function normalizeAIAnalysisResult(
       targetGroup: targetGroupForGradeContext,
       description: descriptionForGradeContext,
     },
+    diagnosticsEnabled,
   );
   const schoolWeeklyProfile = schoolWeeklyProfileResult.profile;
   const schoolWeeklyProfileDebug = schoolWeeklyProfileResult.debug;
 
   if (schoolWeeklyProfile) {
-    diagSubjectPipeline({
-      hypothesisId: "H2b",
-      phase: "after_normalize_full_schoolWeeklyProfile",
-      location: "analyze-image.ts:normalizeAIAnalysisResult",
-      data: {
-        note: "Sammenlign med H1: samme slot skal ha samme subjectKey med mindre normalisering endret den.",
-        normalizedSchoolWeeklyProfileSummary:
-          summarizeNormalizedSchoolProfileForDiag(schoolWeeklyProfile),
+    diagSubjectPipeline(
+      {
+        hypothesisId: "H2b",
+        phase: "after_normalize_full_schoolWeeklyProfile",
+        location: "analyze-image.ts:normalizeAIAnalysisResult",
+        data: {
+          note: "Sammenlign med H1: samme slot skal ha samme subjectKey med mindre normalisering endret den.",
+          normalizedSchoolWeeklyProfileSummary:
+            summarizeNormalizedSchoolProfileForDiag(schoolWeeklyProfile),
+        },
       },
-    });
+      diagnosticsEnabled,
+    );
   }
 
   if (schoolWeeklyProfileDebug.rawRoot !== undefined && schoolWeeklyProfileDebug.rawRoot !== null) {
@@ -1864,35 +1891,9 @@ function chatCompletionOutputTokenParam(
   return { max_tokens: maxOutput };
 }
 
-function parseAIResponse(content: string | null | undefined): AIAnalysisResult {
-  if (!content) {
-    throw new Error("Tom respons fra OpenAI");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content) as unknown;
-  } catch {
-    throw new Error("Kunne ikke tolke JSON fra modellen");
-  }
-  if (parsed && typeof parsed === "object") {
-    const swp = (parsed as Record<string, unknown>).schoolWeeklyProfile;
-    if (swp !== null && swp !== undefined) {
-      diagSubjectPipeline({
-        hypothesisId: "H1",
-        phase: "after_openai_before_normalize",
-        location: "analyze-image.ts:parseAIResponse",
-        data: {
-          rawSchoolWeeklyProfileSummary: summarizeRawSchoolProfileForDiag(swp),
-        },
-      });
-    }
-  }
-  return normalizeAIAnalysisResult(parsed);
-}
-
-function parseAIResponseWithSource(
+function parseAIResponse(
   content: string | null | undefined,
-  sourceText: string
+  options?: NormalizeAIAnalysisOptions,
 ): AIAnalysisResult {
   if (!content) {
     throw new Error("Tom respons fra OpenAI");
@@ -1906,17 +1907,80 @@ function parseAIResponseWithSource(
   if (parsed && typeof parsed === "object") {
     const swp = (parsed as Record<string, unknown>).schoolWeeklyProfile;
     if (swp !== null && swp !== undefined) {
-      diagSubjectPipeline({
-        hypothesisId: "H1",
-        phase: "after_openai_before_normalize",
-        location: "analyze-image.ts:parseAIResponseWithSource",
-        data: {
-          rawSchoolWeeklyProfileSummary: summarizeRawSchoolProfileForDiag(swp),
+      diagSubjectPipeline(
+        {
+          hypothesisId: "H1",
+          phase: "after_openai_before_normalize",
+          location: "analyze-image.ts:parseAIResponse",
+          data: {
+            rawSchoolWeeklyProfileSummary: summarizeRawSchoolProfileForDiag(swp),
+          },
         },
-      });
+        options?.enableDiagnostics ?? true,
+      );
     }
   }
-  return normalizeAIAnalysisResult(parsed, sourceText);
+  return normalizeAIAnalysisResult(parsed, undefined, options);
+}
+
+function parseAIResponseWithSource(
+  content: string | null | undefined,
+  sourceText: string,
+  options?: NormalizeAIAnalysisOptions,
+): AIAnalysisResult {
+  if (!content) {
+    throw new Error("Tom respons fra OpenAI");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch {
+    throw new Error("Kunne ikke tolke JSON fra modellen");
+  }
+  if (parsed && typeof parsed === "object") {
+    const swp = (parsed as Record<string, unknown>).schoolWeeklyProfile;
+    if (swp !== null && swp !== undefined) {
+      diagSubjectPipeline(
+        {
+          hypothesisId: "H1",
+          phase: "after_openai_before_normalize",
+          location: "analyze-image.ts:parseAIResponseWithSource",
+          data: {
+            rawSchoolWeeklyProfileSummary: summarizeRawSchoolProfileForDiag(swp),
+          },
+        },
+        options?.enableDiagnostics ?? true,
+      );
+    }
+  }
+  return normalizeAIAnalysisResult(parsed, sourceText, options);
+}
+
+/**
+ * ÉN offentlig, ren parse-/normaliseringssøm for rå modelltekst (`completion.choices[0].message
+ * .content`). Gjenbruker NØYAKTIG den samme interne produksjonsparseren (`parseAIResponse` /
+ * `parseAIResponseWithSource`) og `normalizeAIAnalysisResult` — ingen ny JSON-parser, ingen
+ * parallelle coercion-regler. Ugyldig/tom JSON gir samme feil som produksjon. `sourceText`, `now`
+ * (årsinferens) og `enableDiagnostics` er additive; uten options er oppførselen identisk med i dag.
+ * Muterer aldri input.
+ */
+export type ParseAndNormalizeModelResponseOptions = {
+  sourceText?: string;
+  now?: Date;
+  enableDiagnostics?: boolean;
+};
+
+export function parseAndNormalizeModelResponse(
+  rawModelContent: string | null | undefined,
+  options?: ParseAndNormalizeModelResponseOptions,
+): AIAnalysisResult {
+  const normalizeOptions: NormalizeAIAnalysisOptions = {
+    now: options?.now,
+    enableDiagnostics: options?.enableDiagnostics,
+  };
+  return options?.sourceText !== undefined
+    ? parseAIResponseWithSource(rawModelContent, options.sourceText, normalizeOptions)
+    : parseAIResponse(rawModelContent, normalizeOptions);
 }
 
 type RoutedOpenAIUsage = {
@@ -2059,7 +2123,9 @@ async function runAnalysisJsonCompletion(opts: {
     );
   }
 
-  return { result: parseAIResponse(raw), usage };
+  // Produksjonen bruker samme offentlige parse-/normaliseringssøm som replay (uten options →
+  // identisk dagens oppførsel: dagens klokke, diagnostikk på).
+  return { result: parseAndNormalizeModelResponse(raw), usage };
 }
 
 async function analyzeImageWithModel(
