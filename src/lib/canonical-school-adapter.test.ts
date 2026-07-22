@@ -77,7 +77,7 @@ function ctx(wp: SchoolWeeklyProfile | null): PortalImportContext {
   return { knownPersons: [], ...(wp ? { relevanceContext: { schoolProfile: wp } } : {}) };
 }
 function build(b: SchoolBlockProposal | undefined, facts: NormalizedSchoolContentFact[], wp: SchoolWeeklyProfile | null, o: SchoolWeekOverlayProposal | undefined = undefined) {
-  return buildCanonicalSchoolContentDraft({ schoolBlockProposal: b, schoolWeekOverlayProposal: o, normalizedSchoolContentFacts: facts, resolvedPersonContext: ctx(wp), originalSourceType: "text", sourceTitle: "Uke" });
+  return buildCanonicalSchoolContentDraft({ schoolBlockProposal: b, languageTrack: o?.languageTrack, normalizedSchoolContentFacts: facts, resolvedPersonContext: ctx(wp), originalSourceType: "text", sourceTitle: "Uke" });
 }
 const subjKeys = (items: { subjectKey: string | null }[]) => items.map((i) => i.subjectKey).sort();
 const allItems = (day: { subjectItems: unknown[]; audienceItems: unknown[]; generalDayMessages: unknown[] }) => [...(day.subjectItems as { sourceText: string | null }[]), ...(day.audienceItems as { sourceText: string | null }[]), ...(day.generalDayMessages as { sourceText: string | null }[])];
@@ -242,6 +242,41 @@ describe("child-audience-filtrering (§10 — bevart)", () => {
   });
 });
 
+describe("eksplisitt languageTrack-kontrakt (uten overlay-proposal)", () => {
+  const day = (items: ReturnType<typeof commonItem>[]) =>
+    block([blockDay({ weekdayIndex: FRI, date: "2026-03-06", contentItems: items })]);
+  const spanskFact = () => [fact({ subjectKey: "spansk", sectionKey: "iTimen", text: "Gloser", originalSourceText: "Spansk: Gloser", date: "2026-03-06", weekdayIndex: FRI })];
+  const draftWith = (lt: SchoolWeekOverlayProposal["languageTrack"] | undefined) =>
+    buildCanonicalSchoolContentDraft({ schoolBlockProposal: day([commonItem("Spansk: Gloser")]), languageTrack: lt, normalizedSchoolContentFacts: spanskFact(), resolvedPersonContext: ctx(null), originalSourceType: "text", sourceTitle: "Uke" });
+
+  it("single track (eksplisitt objekt): spansk berikes, fransk-fakta ville droppes — som overlay-input ga", () => {
+    const d = buildCanonicalSchoolContentDraft({
+      schoolBlockProposal: day([commonItem("Spansk: Gloser"), commonItem("Fransk: Gloser")]),
+      languageTrack: { resolvedTrack: "spansk", confidence: 0.8, reason: "single_track_detected" },
+      normalizedSchoolContentFacts: [
+        ...spanskFact(),
+        fact({ subjectKey: "fransk", sectionKey: "iTimen", text: "Gloser", originalSourceText: "Fransk: Gloser", date: "2026-03-06", weekdayIndex: FRI }),
+      ],
+      resolvedPersonContext: ctx(null), originalSourceType: "text", sourceTitle: "Uke",
+    })!.days[0]!;
+    expect(subjKeys(d.subjectItems)).toEqual(["spansk"]);
+    expect(allItems(d).some((i) => i.sourceText === "Fransk: Gloser")).toBe(false);
+  });
+
+  it("multiple tracks (resolvedTrack null, 0.45): identisk med null-track — uklart spor → review-dagsnivå", () => {
+    const multi = draftWith({ resolvedTrack: null, confidence: 0.45, reason: "multiple_tracks_detected" })!.days[0]!;
+    expect(multi.subjectItems).toEqual([]);
+    expect(multi.generalDayMessages.some((i) => i.sourceText === "Spansk: Gloser")).toBe(true);
+  });
+
+  it("no track: languageTrack undefined og {resolvedTrack: null} gir IDENTISK draft (låst ekvivalens)", () => {
+    const withUndefined = draftWith(undefined);
+    const withNullObj = draftWith({ resolvedTrack: null, confidence: 0.35, reason: "no_track_detected" });
+    expect(withUndefined).toEqual(withNullObj); // adapteren leser kun resolvedTrack
+    expect(withUndefined!.days[0]!.subjectItems).toEqual([]);
+  });
+});
+
 describe("språkspor-policy (§9/§10)", () => {
   it("profil har tysk → tysk berikes, spansk utelates helt (ikke dagsmelding)", () => {
     const wp = profile({ [FRI]: [{ subjectKey: "tysk", start: "09:00", end: "10:00" }] });
@@ -321,7 +356,7 @@ describe("synlig tekst + evidens + determinisme + immutability", () => {
     const o = overlayTrack(null);
     const facts = [fact({ subjectKey: "matematikk", sectionKey: "iTimen", text: "X", originalSourceText: "Matte: X", date: "2026-03-02", weekdayIndex: MON })];
     const bpSnap = JSON.stringify(bp), oSnap = JSON.stringify(o), fSnap = JSON.stringify(facts);
-    buildCanonicalSchoolContentDraft({ schoolBlockProposal: bp, schoolWeekOverlayProposal: o, normalizedSchoolContentFacts: facts, resolvedPersonContext: ctx(wp), originalSourceType: "text", sourceTitle: "Uke" });
+    buildCanonicalSchoolContentDraft({ schoolBlockProposal: bp, languageTrack: o.languageTrack, normalizedSchoolContentFacts: facts, resolvedPersonContext: ctx(wp), originalSourceType: "text", sourceTitle: "Uke" });
     expect(JSON.stringify(bp)).toBe(bpSnap);
     expect(JSON.stringify(o)).toBe(oSnap);
     expect(JSON.stringify(facts)).toBe(fSnap);

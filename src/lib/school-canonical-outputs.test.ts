@@ -51,7 +51,7 @@ function assemblyInputFor(resultIn: AIAnalysisResult, ctx: PortalImportContext, 
   return {
     normalizedResult, filteredResult,
     documentKind: documentKind as never, sourceType: "text",
-    personContext: ctx, schoolWeekOverlayProposal: overlay,
+    personContext: ctx, languageTrack: overlay?.languageTrack,
     proposalId, fallbackSourceTitle: resultIn.title,
   };
 }
@@ -167,7 +167,16 @@ describe("PRODUKSJONSPARITET: toPortalBundle canonical-felter === buildSchoolCan
     await assertParity(makeSchoolBlockWeekResultWithDayOperations(), { knownPersons: [], children: makeChildren() });
   });
 
-  it("ukeplan med fag-prefiks + profil (overlay bygges i produksjonen)", async () => {
+  it("ukeplan med fag-prefiks + profil (overlay bygges; tysk+spansk → multiple_tracks_detected)", async () => {
     await assertParity(makeSubjectWeekResult(), CTX());
+  });
+
+  it("ukeplan med KUN tysk (overlay bygges; single_track_detected)", async () => {
+    const single = makeSubjectWeekResult();
+    single.scheduleByDay = [
+      { dayLabel: "Mandag", date: "2026-03-16", time: null, details: "Norsk i timen: Les kapittel 2.\nTysk i timen: Beskriv bildet.", highlights: [], rememberItems: [], deadlines: [], notes: [] },
+      { dayLabel: "Tirsdag", date: "2026-03-17", time: null, details: "Matematikk: Oppgaver kapittel 5.", highlights: [], rememberItems: [], deadlines: [], notes: [] },
+    ];
+    await assertParity(single, CTX());
   });
 });
