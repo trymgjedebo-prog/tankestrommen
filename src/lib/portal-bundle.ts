@@ -14,13 +14,7 @@ import {
   normalizePortalProposalEventItem,
   type PortalImportContext,
 } from "@/lib/portal-import-person";
-import {
-  buildAnalysisCorpus,
-  buildAnalysisEvidenceReport,
-} from "@/lib/analysis-evidence";
-import { buildSchoolBlockProposal } from "@/lib/school-block-proposal";
-import { buildCanonicalSchoolContentDraft } from "@/lib/canonical-school-adapter";
-import { buildNormalizedSchoolContentFacts } from "@/lib/school-content-fact";
+import { buildSchoolCanonicalOutputs } from "@/lib/school-canonical-outputs";
 import type { AIAnalysisResult, SchoolWeekOverlayProposal } from "@/lib/types";
 import { currentSpan, startSpan } from "braintrust";
 
@@ -133,16 +127,6 @@ export async function toPortalBundle(
       normalizedUnfilteredResult,
       portalImport.relevanceContext?.classCode,
     );
-    // Additivt: kun for `documentKind: "school"`. `proposalId` er en per-kjøring instans-ID
-    // (randomUUID), i tråd med alle andre proposaltyper. Ingen try/catch — builderfeil skal boble
-    // til den eksisterende failure boundary rundt toPortalBundle.
-    const schoolBlockProposal =
-      documentKind === "school"
-        ? buildSchoolBlockProposal(normalizedUnfilteredResult, portalImport, {
-            proposalId: newId(),
-            originalSourceType: sourceType,
-          })
-        : undefined;
     const { proposal: schoolProfileProposal, decision: schoolProfileDecision } =
       deps.decideSchoolProfileProposal(result, sourceType, documentKind);
     const {
@@ -368,21 +352,21 @@ export async function toPortalBundle(
         textAnalyzePortalBundleReturned: true,
       };
     }
-    // Additivt: ett kanonisk skoleinnholds-draft (fag/kategori/dag/dagsoperasjon/audience) bygget
-    // fra de eksisterende projeksjonene + deterministisk fagplassering. Kun når et gyldig
-    // schoolBlock-grunnlag finnes; endrer ingen eksisterende output. Ingen try/catch — adapterfeil
-    // skal boble til den eksisterende failure boundary (samme som builderne over).
-    // Delt, pre-projeksjons fag/kategori-rad (samme rå kilde som schoolBlock: `normalizedUnfilteredResult`).
-    const normalizedSchoolContentFacts =
-      documentKind === "school" ? buildNormalizedSchoolContentFacts(normalizedUnfilteredResult.scheduleByDay) : [];
-    const canonicalSchoolContentDraft = buildCanonicalSchoolContentDraft({
-      schoolBlockProposal,
-      schoolWeekOverlayProposal,
-      normalizedSchoolContentFacts,
-      resolvedPersonContext: portalImport,
-      originalSourceType: sourceType,
-      sourceTitle: schoolBlockProposal?.sourceTitle ?? resultIn.title ?? "Skoleinformasjon",
-    });
+    // ÉN delt canonical-sammenstilling (schoolBlock + facts + canonical draft + evidence) — samme
+    // funksjon som en senere canonical replay-runner bruker. Identisk gating/kilder/rekkefølge som
+    // den tidligere inline-koden; `proposalId` trekkes fortsatt kun for `documentKind: "school"`.
+    // Ingen try/catch — builder-/adapterfeil skal boble til den eksisterende failure boundary.
+    const { schoolBlockProposal, canonicalSchoolContentDraft, evidenceReport } =
+      buildSchoolCanonicalOutputs({
+        normalizedResult: normalizedUnfilteredResult,
+        filteredResult: result,
+        documentKind,
+        sourceType,
+        personContext: portalImport,
+        schoolWeekOverlayProposal,
+        proposalId: documentKind === "school" ? newId() : undefined,
+        fallbackSourceTitle: resultIn.title,
+      });
     const bundleOut = {
       schemaVersion: "1.0.0",
       provenance: {
@@ -398,7 +382,7 @@ export async function toPortalBundle(
       ...(schoolWeekOverlayProposal ? { schoolWeekOverlayProposal } : {}),
       ...(schoolBlockProposal ? { schoolBlockProposal } : {}),
       ...(canonicalSchoolContentDraft ? { canonicalSchoolContentDraft } : {}),
-      evidenceReport: buildAnalysisEvidenceReport(buildAnalysisCorpus(result), result),
+      evidenceReport,
       ...(Object.keys(debugPayload).length > 0 ? { debug: debugPayload } : {}),
     };
     portalBundleSpan?.log({
