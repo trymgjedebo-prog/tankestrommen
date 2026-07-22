@@ -363,7 +363,8 @@ export async function toPortalBundle(
         documentKind,
         sourceType,
         personContext: portalImport,
-        schoolWeekOverlayProposal,
+        // Eneste oversettelsen fra overlay til canonical: kun det besluttede språksporresultatet.
+        languageTrack: schoolWeekOverlayProposal?.languageTrack,
         proposalId: documentKind === "school" ? newId() : undefined,
         fallbackSourceTitle: resultIn.title,
       });

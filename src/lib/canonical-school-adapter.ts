@@ -35,7 +35,7 @@ import {
   sectionKeyToContentType,
   type NormalizedSchoolContentFact,
 } from "@/lib/school-content-fact";
-import { isLanguageTrackSubjectKey } from "@/lib/school-language-track";
+import { isLanguageTrackSubjectKey, type SchoolLanguageTrackResolution } from "@/lib/school-language-track";
 import { resolveSchoolSubjectPlacement } from "@/lib/school-subject-placement";
 import type { PortalImportContext } from "@/lib/portal-import-person";
 import type {
@@ -46,13 +46,16 @@ import type {
   SchoolBlockReviewCode,
   SchoolProfileWeekdayIndex,
   SchoolWeeklyProfile,
-  SchoolWeekOverlayProposal,
 } from "@/lib/types";
 
 export interface CanonicalSchoolAdapterInput {
   schoolBlockProposal: SchoolBlockProposal | undefined;
-  /** Kun for `languageTrack` (delt semantikk); fag hentes fra `normalizedSchoolContentFacts`. */
-  schoolWeekOverlayProposal: SchoolWeekOverlayProposal | undefined;
+  /**
+   * Det allerede besluttede språksporresultatet (i produksjonen: overlayens `languageTrack`; i
+   * replay: resultatet fra `resolveSchoolLanguageTrack`). Adapteren kjører ALDRI resolveren selv
+   * og mottar ikke lenger hele overlay-proposalet — fag hentes fra `normalizedSchoolContentFacts`.
+   */
+  languageTrack: SchoolLanguageTrackResolution | undefined;
   /** Delt, pre-projeksjons fag/kategori-rad (fra `buildNormalizedSchoolContentFacts`). */
   normalizedSchoolContentFacts: readonly NormalizedSchoolContentFact[];
   resolvedPersonContext: PortalImportContext;
@@ -230,7 +233,7 @@ export function buildCanonicalSchoolContentDraft(
   if (!block || !Array.isArray(block.days) || block.days.length === 0) return null;
 
   const childProfile = input.resolvedPersonContext.relevanceContext?.schoolProfile ?? null;
-  const overlayTrack = input.schoolWeekOverlayProposal?.languageTrack?.resolvedTrack ?? null;
+  const overlayTrack = input.languageTrack?.resolvedTrack ?? null;
 
   // Fordel fakta til autoritative schoolBlock-dager via dag-identitet (aldri overlay dailyActions).
   const factsByDayId = new Map<string, NormalizedSchoolContentFact[]>();

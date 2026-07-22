@@ -21,6 +21,14 @@ export function isLanguageTrackSubjectKey(subjectKey: string | null | undefined)
   return typeof subjectKey === "string" && LANGUAGE_TRACK_SET.has(subjectKey);
 }
 
+/**
+ * Det besluttede språksporresultatet for et dokument — samme objektform som overlayens
+ * `languageTrack` (én semantikk, ikke en ny variant). Canonical-pipelinen mottar dette EKSPLISITT
+ * i stedet for hele `SchoolWeekOverlayProposal`, slik at replay kan levere resultatet fra
+ * `resolveSchoolLanguageTrack` direkte uten å bygge et kunstig overlay-proposal.
+ */
+export type SchoolLanguageTrackResolution = SchoolWeekOverlayProposal["languageTrack"];
+
 /** Privat kopi (repo-konvensjon, identisk med de øvrige): små bokstaver + å→a, ø→o, æ→e. */
 function normalizeNorwegianLetters(input: string): string {
   return input

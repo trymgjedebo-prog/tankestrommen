@@ -7,8 +7,9 @@
  *   4. `evidenceReport`                 (ALLTID, fra KLASSEFILTRERT result — som i dag)
  *
  * Operasjonsrekkefølge, gating, kilder (ufiltrert vs. filtrert result), `sourceTitle`-fallback og
- * språksporinput (hele `schoolWeekOverlayProposal` videresendes; adapteren leser kun `languageTrack`)
- * er identiske med den tidligere inline-koden. Ingen builder er kopiert eller endret.
+ * språksporinput (det allerede besluttede `languageTrack`-resultatet leveres EKSPLISITT — assembly
+ * kjenner ikke overlay-proposalet) er identiske med den tidligere inline-koden. Ingen builder er
+ * kopiert eller endret.
  *
  * Volatile verdier (proposalId) leveres UTENFRA — funksjonen bruker aldri klokke/tilfeldighet.
  * Ren: ingen Next.js/OpenAI/env/nettverk/sideeffekter; muterer aldri input.
@@ -23,8 +24,9 @@ import { buildCanonicalSchoolContentDraft } from "@/lib/canonical-school-adapter
 import type { CanonicalSchoolContentDraft } from "@/lib/school-content-canonical";
 import { buildNormalizedSchoolContentFacts, type NormalizedSchoolContentFact } from "@/lib/school-content-fact";
 import { buildSchoolBlockProposal } from "@/lib/school-block-proposal";
+import type { SchoolLanguageTrackResolution } from "@/lib/school-language-track";
 import type { PortalImportContext } from "@/lib/portal-import-person";
-import type { AIAnalysisResult, SchoolBlockProposal, SchoolWeekOverlayProposal } from "@/lib/types";
+import type { AIAnalysisResult, SchoolBlockProposal } from "@/lib/types";
 
 export type BuildSchoolCanonicalOutputsInput = {
   /** Portal-normalisert (coerced), IKKE klassefiltrert — kilden for schoolBlock + facts. */
@@ -34,8 +36,11 @@ export type BuildSchoolCanonicalOutputsInput = {
   documentKind: AnalysisDocumentKind | undefined;
   sourceType: string;
   personContext: PortalImportContext;
-  /** Eksisterende overlay-proposal (eller undefined); adapteren leser kun `languageTrack` av den. */
-  schoolWeekOverlayProposal: SchoolWeekOverlayProposal | undefined;
+  /**
+   * Det allerede besluttede språksporresultatet (produksjonen: overlayens `languageTrack`; replay:
+   * `resolveSchoolLanguageTrack(normalizedResult)`). Assembly kjenner IKKE overlay-proposalet.
+   */
+  languageTrack: SchoolLanguageTrackResolution | undefined;
   /** Per-kjøring instans-ID for schoolBlockProposal. PÅKREVD når documentKind === "school". */
   proposalId: string | undefined;
   /** Fallback for draftens sourceTitle (produksjonen sender rå `resultIn.title`). */
@@ -81,7 +86,7 @@ export function buildSchoolCanonicalOutputs(
   // 3. Canonical draft — ubetinget kall (adapteren returnerer null uten schoolBlock-grunnlag).
   const canonicalSchoolContentDraft = buildCanonicalSchoolContentDraft({
     schoolBlockProposal,
-    schoolWeekOverlayProposal: input.schoolWeekOverlayProposal,
+    languageTrack: input.languageTrack,
     normalizedSchoolContentFacts,
     resolvedPersonContext: input.personContext,
     originalSourceType: input.sourceType,
