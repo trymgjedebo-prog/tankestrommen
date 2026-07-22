@@ -276,3 +276,80 @@ describe("determinisme, immutabilitet og rekkefølge", () => {
     expect(r.checks.map((c) => c.id)).toEqual([...ALL_CHECKS].reverse().map((c) => c.id));
   });
 });
+
+describe("activityKind i day_operation-checken (utvidelse)", () => {
+  const KIND_CHECK: SchoolReplaySemanticCheck = { id: "c-kind", description: "fridag", kind: "day_operation", date: "2026-03-31", expected: { op: "replace_day", activityKind: "free_day" } };
+  const withDayOp = (op: unknown): SchoolCanonicalReplayResult => {
+    const r = clone(makeReplay());
+    (r.outputs.canonicalSchoolContentDraft!.days[1]! as { dayOperation: unknown }).dayOperation = op;
+    return r;
+  };
+  const FREE_DAY_OP = { op: "replace_day", activityKind: "free_day", effectiveStart: null, effectiveEnd: null, reason: null, confidence: 0.9 };
+
+  it("korrekt activityKind består; faktisk verdi vises i actual", () => {
+    const r = evaluateSchoolReplaySemantics(withDayOp(FREE_DAY_OP), expectationsOf([KIND_CHECK]));
+    expect(r.checks[0]!).toMatchObject({ status: "pass", category: "DAY_OPERATION" });
+    expect((r.checks[0]!.actual as { activityKind: string }).activityKind).toBe("free_day");
+  });
+  it("feil activityKind feiler som DAY_OPERATION", () => {
+    const r = evaluateSchoolReplaySemantics(withDayOp({ ...FREE_DAY_OP, activityKind: "exam_day" }), expectationsOf([KIND_CHECK]));
+    expect(r.checks[0]!).toMatchObject({ status: "fail", category: "DAY_OPERATION" });
+    expect((r.checks[0]!.actual as { activityKind: string }).activityKind).toBe("exam_day");
+  });
+  it("manglende activityKind feiler ISOLERT: faktisk op matcher, kun kind-feltet mangler", () => {
+    // Med vilje ugyldig runtime-data (replace_day UTEN activityKind) — målrettet cast er nødvendig.
+    const opWithoutKind = { op: "replace_day", effectiveStart: null, effectiveEnd: null, reason: null, confidence: 0.9 } as unknown;
+    const r = evaluateSchoolReplaySemantics(withDayOp(opWithoutKind), expectationsOf([KIND_CHECK]));
+    expect(r.checks[0]!).toMatchObject({ status: "fail", category: "DAY_OPERATION" });
+    // actual viser at operation faktisk er replace_day og at activityKind mangler.
+    const actual = r.checks[0]!.actual as { op: string; activityKind?: unknown };
+    expect(actual.op).toBe("replace_day");
+    expect(actual.activityKind).toBeUndefined();
+  });
+  it("activityKind ignoreres når expectations ikke oppgir feltet", () => {
+    const noKind: SchoolReplaySemanticCheck = { ...KIND_CHECK, id: "c-nokind", expected: { op: "replace_day" } };
+    const r = evaluateSchoolReplaySemantics(withDayOp({ ...FREE_DAY_OP, activityKind: "exam_day" }), expectationsOf([noKind]));
+    expect(r.checks[0]!.status).toBe("pass");
+  });
+  it("eksisterende adjust_start-check fungerer uendret", () => {
+    const r = evaluateSchoolReplaySemantics(makeReplay(), expectationsOf([DAY_OP_CHECK]));
+    expect(r.checks[0]!).toMatchObject({ status: "pass", category: "DAY_OPERATION" });
+  });
+});
+
+describe("activityKind-validering", () => {
+  const rawWith = (activityKind: unknown): unknown => ({
+    schemaVersion: "1.0.0",
+    fixtureId: "x",
+    checks: [{ id: "k1", description: "d", kind: "day_operation", date: "2026-03-31", expected: { op: "replace_day", activityKind } }],
+  });
+  it("gyldig activity kind godtas", () => {
+    expect(validateSchoolReplayExpectations(rawWith("exam_day")).checks).toHaveLength(1);
+  });
+  it("ugyldig activity kind avvises med presis feil", () => {
+    expect(() => validateSchoolReplayExpectations(rawWith("holiday"))).toThrow("'expected.activityKind' må være en av");
+  });
+  it("expectations uten activity kind godtas (bakoverkompatibelt)", () => {
+    const raw = { schemaVersion: "1.0.0", fixtureId: "x", checks: [{ id: "k1", description: "d", kind: "day_operation", date: "2026-03-31", expected: { op: "adjust_start", effectiveStart: "10:30" } }] };
+    expect(validateSchoolReplayExpectations(raw).checks).toHaveLength(1);
+  });
+
+  const rawWithOp = (op: string, activityKind?: unknown): unknown => ({
+    schemaVersion: "1.0.0",
+    fixtureId: "x",
+    checks: [{ id: "k1", description: "d", kind: "day_operation", date: "2026-03-31", expected: { op, ...(activityKind !== undefined ? { activityKind } : {}) } }],
+  });
+  it("replace_day + free_day og replace_day + exam_day godtas", () => {
+    expect(validateSchoolReplayExpectations(rawWithOp("replace_day", "free_day")).checks).toHaveLength(1);
+    expect(validateSchoolReplayExpectations(rawWithOp("replace_day", "exam_day")).checks).toHaveLength(1);
+  });
+  it("adjust_start + free_day og none + free_day avvises (activityKind kun på replace_day)", () => {
+    expect(() => validateSchoolReplayExpectations(rawWithOp("adjust_start", "free_day")))
+      .toThrow(`'expected.activityKind' er bare tillatt når 'expected.op' er "replace_day".`);
+    expect(() => validateSchoolReplayExpectations(rawWithOp("none", "free_day")))
+      .toThrow(`'expected.activityKind' er bare tillatt når 'expected.op' er "replace_day".`);
+  });
+  it("replace_day uten forventet activityKind godtas", () => {
+    expect(validateSchoolReplayExpectations(rawWithOp("replace_day")).checks).toHaveLength(1);
+  });
+});

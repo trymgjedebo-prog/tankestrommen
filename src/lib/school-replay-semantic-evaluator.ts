@@ -115,9 +115,11 @@ export function evaluateSchoolReplaySemantics(
       let status: "pass" | "fail" = "fail";
       if (day && actualOp && actualOp.op === check.expected.op) {
         const rec = actualOp as unknown as Record<string, unknown>;
+        // activityKind sammenlignes KUN når forventningen oppgir feltet; manglende/feil kind → fail.
+        const kindOk = check.expected.activityKind === undefined || rec.activityKind === check.expected.activityKind;
         const startOk = check.expected.effectiveStart === undefined || rec.effectiveStart === check.expected.effectiveStart;
         const endOk = check.expected.effectiveEnd === undefined || rec.effectiveEnd === check.expected.effectiveEnd;
-        if (startOk && endOk) status = "pass";
+        if (kindOk && startOk && endOk) status = "pass";
       }
       return {
         ...base,

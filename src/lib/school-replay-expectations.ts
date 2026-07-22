@@ -12,6 +12,7 @@
  * Runtime-valideringen her er lett og dependency-fri (ingen Zod), med presise feil per check.
  * Ren modul: ingen filsystem/nettverk/env/klokke/tilfeldighet.
  */
+import type { SchoolBlockActivityKind } from "@/lib/types";
 
 export type SchoolReplayFailureCategory =
   | "DAY_OPERATION"
@@ -44,6 +45,8 @@ export type SchoolReplayDayOperationCheck = CheckBase & {
   date: string;
   expected: {
     op: "none" | "replace_day" | "adjust_start" | "adjust_end";
+    /** Valgfri: sammenlignes KUN når oppgitt (relevant for replace_day). */
+    activityKind?: SchoolBlockActivityKind;
     effectiveStart?: string;
     effectiveEnd?: string;
   };
@@ -109,6 +112,20 @@ const KINDS = new Set<SchoolReplayCheckKind>([
   "source_coverage",
 ]);
 const OPS = new Set(["none", "replace_day", "adjust_start", "adjust_end"]);
+/**
+ * UTTØMMENDE compile-time-kontrakt mot produksjonstypen: `satisfies Record<SchoolBlockActivityKind,
+ * true>` gir TypeScript-feil både når et union-medlem MANGLER her og når et ekstra ugyldig medlem
+ * legges til — listen kan ikke drive fra `SchoolBlockActivityKind`.
+ */
+const ACTIVITY_KIND_RECORD = {
+  exam_day: true,
+  trip_day: true,
+  activity_day: true,
+  free_day: true,
+  other: true,
+} satisfies Record<SchoolBlockActivityKind, true>;
+const ACTIVITY_KIND_LIST = Object.keys(ACTIVITY_KIND_RECORD) as SchoolBlockActivityKind[];
+const ACTIVITY_KINDS = new Set<string>(ACTIVITY_KIND_LIST);
 const COVERAGES = new Set(["full", "partial"]);
 const SCOPES = new Set(["canonical_draft"]);
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -166,6 +183,13 @@ export function validateSchoolReplayExpectations(raw: unknown): SchoolReplayExpe
       if (!c.expected || typeof c.expected !== "object") checkFail(index, id, "'expected' må være et objekt.");
       const e = c.expected as Record<string, unknown>;
       if (typeof e.op !== "string" || !OPS.has(e.op)) checkFail(index, id, `'expected.op' må være en av: ${[...OPS].join(", ")}.`);
+      if (e.activityKind !== undefined && (typeof e.activityKind !== "string" || !ACTIVITY_KINDS.has(e.activityKind))) {
+        checkFail(index, id, `'expected.activityKind' må være en av: ${ACTIVITY_KIND_LIST.join(", ")}.`);
+      }
+      // activityKind finnes kun på replace_day i produksjonstypen — andre kombinasjoner er ugyldige.
+      if (e.activityKind !== undefined && e.op !== "replace_day") {
+        checkFail(index, id, `'expected.activityKind' er bare tillatt når 'expected.op' er "replace_day".`);
+      }
       if (e.effectiveStart !== undefined) requireNonEmptyString(e.effectiveStart, index, id, "expected.effectiveStart");
       if (e.effectiveEnd !== undefined) requireNonEmptyString(e.effectiveEnd, index, id, "expected.effectiveEnd");
     } else if (kind === "subject_placement") {

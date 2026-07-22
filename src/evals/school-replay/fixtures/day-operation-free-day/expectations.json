@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "day-operation-free-day",
+  "checks": [
+    {
+      "id": "monday-normal-day",
+      "description": "Mandag med ordinær undervisning skal ha day operation none",
+      "kind": "day_operation",
+      "date": "2026-04-20",
+      "expected": {
+        "op": "none"
+      }
+    },
+    {
+      "id": "wednesday-free-day",
+      "description": "Onsdag med eksplisitt stengt skole skal erstattes som fridag",
+      "kind": "day_operation",
+      "date": "2026-04-22",
+      "expected": {
+        "op": "replace_day",
+        "activityKind": "free_day"
+      }
+    }
+  ]
+}
