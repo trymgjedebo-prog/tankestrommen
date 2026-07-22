@@ -9,7 +9,7 @@ import { djb2Hex } from "@/lib/stable-id";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
 import { hasStrongSchoolEvidence, looksLikeSchoolClassSchedule } from "@/lib/school-class-schedule";
-import { LANGUAGE_TRACK_SUBJECT_KEYS } from "@/lib/school-language-track";
+import { resolveSchoolLanguageTrack } from "@/lib/school-language-track";
   import { validateClientSchoolWeeklyProfile } from "@/lib/ai/analyze-image";
 import { isoWeekAndYearOfIsoDate, pickYearForWeekdayDate } from "@/lib/portal-week-year";
 import type {
@@ -7406,22 +7406,6 @@ function computeOverlaySectionsPipeline(
   );
 }
 
-function resolveLanguageTrack(result: AIAnalysisResult): SchoolWeekOverlayProposal["languageTrack"] {
-  const text = normalizeNorwegianLetters(
-    [result.title, result.description, ...result.scheduleByDay.map((d) => d.details ?? "")]
-      .filter(Boolean)
-      .join(" "),
-  );
-  const tracks = LANGUAGE_TRACK_SUBJECT_KEYS.filter((k) => new RegExp(`\\b${k}\\b`).test(text));
-  if (tracks.length === 1) {
-    return { resolvedTrack: tracks[0], confidence: 0.8, reason: "single_track_detected" };
-  }
-  if (tracks.length > 1) {
-    return { resolvedTrack: null, confidence: 0.45, reason: "multiple_tracks_detected" };
-  }
-  return { resolvedTrack: null, confidence: 0.35, reason: "no_track_detected" };
-}
-
 type OverlayNoiseFilterDebug = {
   weeklySummaryTrace: Array<{ candidate: string; kept: boolean; reason: string }>;
   days: Partial<
@@ -8102,7 +8086,7 @@ function buildSchoolWeekOverlayProposal(
   documentKind?: AnalysisDocumentKind,
 ): { proposal: SchoolWeekOverlayProposal | undefined; noiseDebug: OverlayNoiseFilterDebug } {
   const noiseDebug: OverlayNoiseFilterDebug = { weeklySummaryTrace: [], days: {} };
-  const languageTrack = resolveLanguageTrack(result);
+  const languageTrack = resolveSchoolLanguageTrack(result);
   const multiTrack = languageTrack.reason === "multiple_tracks_detected";
   const policy = overlayTextPolicyFor(documentKind);
 
