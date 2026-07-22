@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "1.0.0",
+  "now": "2026-04-01T10:00:00.000Z",
+  "sourceType": "text",
+  "proposalId": "replay-smoke-proposal-1",
+  "languageTrack": {
+    "resolvedTrack": "tysk",
+    "confidence": 0.8,
+    "reason": "single_track_detected"
+  },
+  "personContext": {
+    "knownPersons": [],
+    "relevanceContext": {
+      "classCode": "2STC",
+      "schoolProfile": {
+        "gradeBand": "vg2",
+        "weekdays": {
+          "0": {
+            "useSimpleDay": false,
+            "lessons": [
+              { "subjectKey": "norsk", "customLabel": null, "start": "08:00", "end": "09:00" },
+              { "subjectKey": "tysk", "customLabel": null, "start": "09:00", "end": "10:00" }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
