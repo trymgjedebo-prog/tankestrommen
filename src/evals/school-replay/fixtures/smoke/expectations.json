@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "smoke",
+  "checks": [
+    {
+      "id": "tuesday-adjust-start",
+      "description": "Tirsdag skal starte kl. 10.30 (adjust_start)",
+      "kind": "day_operation",
+      "date": "2026-03-31",
+      "expected": {
+        "op": "adjust_start",
+        "effectiveStart": "10:30"
+      }
+    },
+    {
+      "id": "monday-norwegian-placement",
+      "description": "Norskoppgaven skal ligge under Norsk på mandag, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-03-30",
+      "subjectKey": "norsk",
+      "textContains": "Les kapittel 2",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "monday-german-placement",
+      "description": "Tyskoppgaven skal ligge under Tysk på mandag, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-03-30",
+      "subjectKey": "tysk",
+      "textContains": "Beskriv bildet",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "spanish-must-not-leak",
+      "description": "Spansk (utenfor barnets språkspor) skal ikke lekke til canonical dagsinnhold",
+      "kind": "language_exclusion",
+      "textContains": "Spansk",
+      "scope": "canonical_draft",
+      "maxMatches": 0
+    },
+    {
+      "id": "remember-pc-once",
+      "description": "Påminnelsen om oppladet PC skal vises som maks ett logisk item",
+      "kind": "max_occurrences",
+      "textContains": "Husk oppladet PC",
+      "scope": "canonical_draft",
+      "maxMatches": 1
+    },
+    {
+      "id": "norwegian-source-coverage",
+      "description": "Norskfakta med Les kapittel 2 skal ha full source coverage",
+      "kind": "source_coverage",
+      "subjectKey": "norsk",
+      "textContains": "Les kapittel 2",
+      "expectedCoverage": "full",
+      "minMatches": 1
+    }
+  ]
+}
