@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "duplication-single-logical-item",
+  "checks": [
+    {
+      "id": "reminder-counts-as-one-logical-item",
+      "description": "Påminnelsen finnes i flere felt av samme item (sourceText + seksjonslinje), men telles som ETT logisk item",
+      "kind": "max_occurrences",
+      "textContains": "Husk gymtøy og innesko",
+      "scope": "canonical_draft",
+      "maxMatches": 1
+    }
+  ]
+}

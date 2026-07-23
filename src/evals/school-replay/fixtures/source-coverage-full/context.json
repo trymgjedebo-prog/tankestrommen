@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0.0",
+  "now": "2026-05-12T09:00:00.000Z",
+  "sourceType": "text",
+  "proposalId": "replay-coverage-full-proposal-1",
+  "languageTrack": null,
+  "personContext": {
+    "knownPersons": [],
+    "relevanceContext": {
+      "classCode": "2STC",
+      "schoolProfile": {
+        "gradeBand": "vg2",
+        "weekdays": {
+          "0": { "useSimpleDay": false, "lessons": [ { "subjectKey": "naturfag", "customLabel": null, "start": "08:00", "end": "09:30" } ] }
+        }
+      }
+    }
+  }
+}

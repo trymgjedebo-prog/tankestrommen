@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "duplication-no-residual-leak",
+  "checks": [
+    {
+      "id": "norsk-text-placed-under-norsk",
+      "description": "Fagteksten skal ligge under norsk, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-11",
+      "subjectKey": "norsk",
+      "textContains": "Les kapittel 9",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "norsk-text-no-residual-copy",
+      "description": "Fagteksten skal IKKE ha en residual-kopi — maks ett logisk item i hele canonical draft",
+      "kind": "max_occurrences",
+      "textContains": "Les kapittel 9",
+      "scope": "canonical_draft",
+      "maxMatches": 1
+    },
+    {
+      "id": "reminder-no-duplicate",
+      "description": "Dagsmeldingen skal finnes maks én gang i hele canonical draft",
+      "kind": "max_occurrences",
+      "textContains": "Ta med matpakke",
+      "scope": "canonical_draft",
+      "maxMatches": 1
+    }
+  ]
+}
