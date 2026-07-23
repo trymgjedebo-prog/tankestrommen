@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "subject-placement-multi-subject",
+  "checks": [
+    {
+      "id": "norsk-reading-under-norsk",
+      "description": "Norsk-leseoppgaven skal ligge under norsk, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "norsk",
+      "textContains": "Les kapittel 4",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "norsk-reflection-under-norsk",
+      "description": "Norsk-refleksjonsnotatet skal ligge under norsk som eget innhold, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "norsk",
+      "textContains": "Lever refleksjonsnotatet",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "matte-tasks-under-matematikk",
+      "description": "Matematikkoppgavene skal ligge under matematikk, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "matematikk",
+      "textContains": "Gjør oppgave 5–8",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "tysk-gloser-under-tysk",
+      "description": "Tysk-glosene skal ligge under tysk, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "tysk",
+      "textContains": "Øv på glosene",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "norsk-text-not-under-matematikk",
+      "description": "Norsk-teksten skal ha null treff under matematikk",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "matematikk",
+      "textContains": "Les kapittel 4",
+      "minMatches": 0,
+      "maxMatches": 0
+    },
+    {
+      "id": "matte-text-not-under-norsk",
+      "description": "Matematikk-teksten skal ha null treff under norsk",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "norsk",
+      "textContains": "Gjør oppgave 5–8",
+      "minMatches": 0,
+      "maxMatches": 0
+    },
+    {
+      "id": "tysk-text-not-under-norsk",
+      "description": "Tysk-teksten skal ha null treff under norsk",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "norsk",
+      "textContains": "Øv på glosene",
+      "minMatches": 0,
+      "maxMatches": 0
+    },
+    {
+      "id": "tysk-text-not-under-matematikk",
+      "description": "Tysk-teksten skal ha null treff under matematikk",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "matematikk",
+      "textContains": "Øv på glosene",
+      "minMatches": 0,
+      "maxMatches": 0
+    }
+  ]
+}
