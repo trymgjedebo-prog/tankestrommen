@@ -353,3 +353,45 @@ describe("activityKind-validering", () => {
     expect(validateSchoolReplayExpectations(rawWithOp("replace_day")).checks).toHaveLength(1);
   });
 });
+
+describe("subject_placement kant-tester (zero-match, feil dag, maxMatches, logisk telling)", () => {
+  const base = makeReplay();
+  const zeroCheck = (subjectKey: string, textContains: string, date = "2026-03-30"): SchoolReplaySemanticCheck =>
+    ({ id: "z-" + subjectKey, description: "zero", kind: "subject_placement", date, subjectKey, textContains, minMatches: 0, maxMatches: 0 });
+
+  it("zero-match består når teksten ikke finnes under angitt fag (dagen finnes)", () => {
+    const r = evaluateSchoolReplaySemantics(base, expectationsOf([zeroCheck("tysk", "Les kapittel 2")]));
+    expect(r.checks[0]!).toMatchObject({ status: "pass", category: "SUBJECT_PLACEMENT" });
+    expect(r.checks[0]!.actual).toEqual({ matchCount: 0 });
+  });
+  it("zero-match feiler når teksten FINNES under angitt fag og dato", () => {
+    const r = evaluateSchoolReplaySemantics(base, expectationsOf([zeroCheck("norsk", "Les kapittel 2")]));
+    expect(r.checks[0]!).toMatchObject({ status: "fail", category: "SUBJECT_PLACEMENT" });
+    expect(r.checks[0]!.actual).toEqual({ matchCount: 1 });
+  });
+  it("korrekt fag, FEIL (eksisterende) dag → SUBJECT_PLACEMENT-fail", () => {
+    // Teksten ligger under norsk 2026-03-30; å kreve den på den eksisterende tirsdagen feiler.
+    const wrongDay: SchoolReplaySemanticCheck = { ...SUBJ_CHECK, id: "wd", date: "2026-03-31" };
+    const r = evaluateSchoolReplaySemantics(base, expectationsOf([wrongDay]));
+    expect(r.checks[0]!).toMatchObject({ status: "fail", category: "SUBJECT_PLACEMENT" });
+    expect(r.checks[0]!.evidence.dayFound).toBe(true); // dagen finnes — feilen er plasseringen
+  });
+  it("to items med samme matchende tekst feiler når maxMatches er 1", () => {
+    const dup = clone(base);
+    const day = dup.outputs.canonicalSchoolContentDraft!.days[0]!;
+    const norsk = day.subjectItems.find((i) => i.subjectKey === "norsk")!;
+    day.subjectItems.push({ ...clone(norsk), itemId: "dup-subj-1" });
+    const r = evaluateSchoolReplaySemantics(dup, expectationsOf([SUBJ_CHECK]));
+    expect(r.checks[0]!).toMatchObject({ status: "fail", category: "SUBJECT_PLACEMENT" });
+    expect(r.checks[0]!.actual).toEqual({ matchCount: 2 });
+  });
+  it("samme item med teksten i flere felter telles fortsatt som ETT treff", () => {
+    const multi = clone(base);
+    const day = multi.outputs.canonicalSchoolContentDraft!.days[0]!;
+    const norsk = day.subjectItems.find((i) => i.subjectKey === "norsk")!;
+    norsk.sections = { ...norsk.sections, descriptionLines: ["Les kapittel 2."] };
+    const r = evaluateSchoolReplaySemantics(multi, expectationsOf([SUBJ_CHECK]));
+    expect(r.checks[0]!).toMatchObject({ status: "pass" });
+    expect(r.checks[0]!.actual).toEqual({ matchCount: 1 });
+  });
+});

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "subject-placement-day-scope",
+  "checks": [
+    {
+      "id": "monday-text-on-monday",
+      "description": "Mandagsteksten skal ligge under norsk på mandag, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "norsk",
+      "textContains": "Les kapittel 6",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "tuesday-text-on-tuesday",
+      "description": "Tirsdagsteksten skal ligge under norsk på tirsdag, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-05",
+      "subjectKey": "norsk",
+      "textContains": "Skriv sammendrag av kapittel 7",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "monday-text-not-on-tuesday",
+      "description": "Mandagsteksten skal ha null treff under norsk på tirsdag",
+      "kind": "subject_placement",
+      "date": "2026-05-05",
+      "subjectKey": "norsk",
+      "textContains": "Les kapittel 6",
+      "minMatches": 0,
+      "maxMatches": 0
+    },
+    {
+      "id": "tuesday-text-not-on-monday",
+      "description": "Tirsdagsteksten skal ha null treff under norsk på mandag",
+      "kind": "subject_placement",
+      "date": "2026-05-04",
+      "subjectKey": "norsk",
+      "textContains": "Skriv sammendrag",
+      "minMatches": 0,
+      "maxMatches": 0
+    }
+  ]
+}
