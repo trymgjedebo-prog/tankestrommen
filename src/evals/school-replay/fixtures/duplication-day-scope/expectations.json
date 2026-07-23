@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "duplication-day-scope",
+  "checks": [
+    {
+      "id": "reminder-global-twice-is-legitimate",
+      "description": "Samme påminnelse på to dager er legitim — globalt maks to logiske items",
+      "kind": "max_occurrences",
+      "textContains": "Husk drikkeflaske",
+      "scope": "canonical_draft",
+      "maxMatches": 2
+    },
+    {
+      "id": "reminder-monday-once",
+      "description": "På mandag skal påminnelsen finnes maks én gang (datoscopet)",
+      "kind": "max_occurrences",
+      "textContains": "Husk drikkeflaske",
+      "scope": "canonical_draft",
+      "date": "2026-05-11",
+      "maxMatches": 1
+    },
+    {
+      "id": "reminder-wednesday-once",
+      "description": "På onsdag skal påminnelsen finnes maks én gang (datoscopet)",
+      "kind": "max_occurrences",
+      "textContains": "Husk drikkeflaske",
+      "scope": "canonical_draft",
+      "date": "2026-05-13",
+      "maxMatches": 1
+    }
+  ]
+}
