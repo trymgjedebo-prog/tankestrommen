@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "day-operation-exam-day",
+  "checks": [
+    {
+      "id": "monday-normal-day",
+      "description": "Mandag med ordinær undervisning skal ha day operation none",
+      "kind": "day_operation",
+      "date": "2026-04-20",
+      "expected": {
+        "op": "none"
+      }
+    },
+    {
+      "id": "thursday-exam-day",
+      "description": "Torsdag med heldagsprøve 09.00–13.00 skal erstattes som eksamensdag med eksplisitte tider",
+      "kind": "day_operation",
+      "date": "2026-04-23",
+      "expected": {
+        "op": "replace_day",
+        "activityKind": "exam_day",
+        "effectiveStart": "09:00",
+        "effectiveEnd": "13:00"
+      }
+    }
+  ]
+}
