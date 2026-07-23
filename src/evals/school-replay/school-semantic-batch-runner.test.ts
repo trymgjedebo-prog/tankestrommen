@@ -5,6 +5,8 @@
  * SYNTETISKE rapporter (ekte fixtures endres aldri for å lage røde tilfeller).
  */
 import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
@@ -156,13 +158,66 @@ describe("operasjonelle feil", () => {
     }
   });
 
-  it("manglende fixture-mappe kaster (load-feil), ikke rapporteres som semantic failure", () => {
-    expect(() =>
+  it("manglende fixture-mappe → kontrollert fixture_load_failed UTEN absolutt sti i meldingen", () => {
+    const run = () =>
       runSchoolReplaySemanticBatch({
         fixturesRoot: FIXTURES_ROOT,
-        manifest: [{ fixtureId: "finnes-ikke", dir: "finnes-ikke", family: "DAY_OPERATION" }],
-      }),
-    ).toThrow();
+        manifest: [{ fixtureId: "finnes-ikke", dir: "finnes-ikke-dir", family: "DAY_OPERATION" }],
+      });
+    expect(run).toThrow(SchoolSemanticBatchOperationalError);
+    try {
+      run();
+      expect.unreachable("skulle kastet");
+    } catch (err) {
+      const e = err as SchoolSemanticBatchOperationalError;
+      expect(e.code).toBe("fixture_load_failed");
+      // Trygg identifikasjon: fixtureId + relativ dir — aldri den (absolutte) fixturesRoot-en.
+      expect(e.message).toContain("finnes-ikke");
+      expect(e.message).toContain("finnes-ikke-dir");
+      expect(e.message).not.toContain(FIXTURES_ROOT);
+    }
+  });
+
+  it("ødelagt expectations.json → kontrollert expectations_load_failed uten rå feilmelding/sti", () => {
+    // Syntetisk fixture-mappe i OS-temp — ALDRI i den ekte fixture-katalogen.
+    const tmpRoot = mkdtempSync(join(tmpdir(), "school-batch-test-"));
+    try {
+      const dir = join(tmpRoot, "broken-expectations");
+      mkdirSync(dir);
+      writeFileSync(join(dir, "model-response.txt"), "{}", "utf8");
+      writeFileSync(join(dir, "source.txt"), "kilde", "utf8");
+      writeFileSync(
+        join(dir, "context.json"),
+        JSON.stringify({
+          schemaVersion: "1.0.0",
+          now: "2026-05-12T09:00:00.000Z",
+          sourceType: "text",
+          proposalId: "tmp-proposal",
+          languageTrack: null,
+          personContext: { knownPersons: [] },
+        }),
+        "utf8",
+      );
+      writeFileSync(join(dir, "expectations.json"), "{ikke gyldig json", "utf8");
+      const run = () =>
+        runSchoolReplaySemanticBatch({
+          fixturesRoot: tmpRoot,
+          manifest: [{ fixtureId: "broken-expectations", dir: "broken-expectations", family: "DAY_OPERATION" }],
+        });
+      try {
+        run();
+        expect.unreachable("skulle kastet");
+      } catch (err) {
+        const e = err as SchoolSemanticBatchOperationalError;
+        expect(e).toBeInstanceOf(SchoolSemanticBatchOperationalError);
+        expect(e.code).toBe("expectations_load_failed");
+        expect(e.message).toContain("broken-expectations");
+        expect(e.message).not.toContain(tmpRoot);
+        expect(e.message).not.toContain("gyldig JSON"); // rå loader-melding lekker ikke
+      }
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });
 

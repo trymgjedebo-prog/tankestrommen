@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { runSchoolSemanticBatchCliOnce } from "./run-school-semantic-batch";
 import {
   resolveSchoolSemanticBatchExitCode,
+  runSchoolReplaySemanticBatch,
   SchoolSemanticBatchOperationalError,
   aggregateSchoolReplaySemanticBatch,
   type SchoolReplaySemanticBatchReport,
@@ -48,7 +49,7 @@ describe("CLI-funksjonen (importert, med injiserte dependencies)", () => {
 
   it("happy path in-process: exit 0, gyldig JSON med passed=true og elleve fixtures", () => {
     const writes: string[] = [];
-    const code = runSchoolSemanticBatchCliOnce({ writeStdout: (t) => writes.push(t) });
+    const code = runSchoolSemanticBatchCliOnce({ args: [], writeStdout: (t) => writes.push(t) });
     expect(code).toBe(0);
     const stdout = writes.join("");
     expect(stdout.endsWith("\n")).toBe(true);
@@ -101,6 +102,7 @@ describe("CLI-funksjonen (importert, med injiserte dependencies)", () => {
     ]);
     const writes: string[] = [];
     const code = runSchoolSemanticBatchCliOnce({
+      args: [],
       runBatch: () => failingReport,
       writeStdout: (t) => writes.push(t),
     });
@@ -116,9 +118,33 @@ describe("CLI-funksjonen (importert, med injiserte dependencies)", () => {
     expect("error" in parsed).toBe(false);
   });
 
-  it("operasjonell feil → exit 2 med stabil maskinlesbar feilrapport", () => {
+  it("usage: ethvert argument → exit 2 med usage_error, og batchen startes ALDRI", () => {
+    const writes: string[] = [];
+    let batchStarted = false;
+    const code = runSchoolSemanticBatchCliOnce({
+      args: ["--uventet-flagg"],
+      runBatch: () => {
+        batchStarted = true;
+        throw new Error("skal aldri kalles");
+      },
+      writeStdout: (t) => writes.push(t),
+    });
+    expect(code).toBe(2);
+    expect(batchStarted).toBe(false);
+    const stdout = writes.join("");
+    expect(stdout.endsWith("\n")).toBe(true);
+    expect(JSON.parse(stdout)).toEqual({
+      schemaVersion: "1.0.0",
+      mode: "canonical_school_semantic_batch",
+      passed: false,
+      error: { code: "usage_error", message: "CLI-en godtar ingen argumenter." },
+    });
+  });
+
+  it("kontrollert operasjonell feil → exit 2 med stabil kode og kontrollert melding", () => {
     const writes: string[] = [];
     const code = runSchoolSemanticBatchCliOnce({
+      args: [],
       runBatch: () => {
         throw new SchoolSemanticBatchOperationalError("manifest_fixture_id_mismatch", "syntetisk operasjonell feil");
       },
@@ -134,18 +160,52 @@ describe("CLI-funksjonen (importert, med injiserte dependencies)", () => {
     });
   });
 
-  it("ukjent exception → exit 2 med fallback-feilkoden batch_run_failed", () => {
+  it("kontrollert runner-feil gjennom CLI-laget: fixture_load_failed uten absolutt fixturesRoot", () => {
+    // Ekte runner mot absolutt root og syntetisk manifest (ekte fixtures urørt): meldingen skal
+    // identifisere via fixtureId/relativ dir — aldri via den absolutte roten.
+    const absoluteFixturesRoot = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
     const writes: string[] = [];
     const code = runSchoolSemanticBatchCliOnce({
+      args: [],
+      runBatch: () =>
+        runSchoolReplaySemanticBatch({
+          fixturesRoot: absoluteFixturesRoot,
+          manifest: [{ fixtureId: "finnes-ikke", dir: "finnes-ikke-dir", family: "DAY_OPERATION" }],
+        }),
+      writeStdout: (t) => writes.push(t),
+    });
+    expect(code).toBe(2);
+    const stdout = writes.join("");
+    const parsed = JSON.parse(stdout);
+    expect(parsed.passed).toBe(false);
+    expect(parsed.error.code).toBe("fixture_load_failed");
+    expect(parsed.error.message).toContain("finnes-ikke");
+    expect(parsed.error.message).toContain("finnes-ikke-dir");
+    expect(stdout).not.toContain(absoluteFixturesRoot);
+  });
+
+  it("ukjent exception → exit 2 med batch_run_failed og SANERT melding (aldri rå exception-tekst)", () => {
+    const secretPath = "C:\\Users\\Trymg\\hemmelig\\fixture.json";
+    const writes: string[] = [];
+    const code = runSchoolSemanticBatchCliOnce({
+      args: [],
       runBatch: () => {
-        throw new Error("uventet");
+        throw new Error(`ENOENT: no such file or directory, open '${secretPath}'`);
       },
       writeStdout: (t) => writes.push(t),
     });
     expect(code).toBe(2);
-    const parsed = JSON.parse(writes.join(""));
+    const stdout = writes.join("");
+    const parsed = JSON.parse(stdout);
     expect(parsed.passed).toBe(false);
-    expect(parsed.error).toEqual({ code: "batch_run_failed", message: "uventet" });
+    expect(parsed.error).toEqual({
+      code: "batch_run_failed",
+      message: "Batchkjøringen feilet på grunn av en operasjonell feil.",
+    });
+    // Ingen fragmenter av den lokale stien eller rå exception-melding lekker til stdout.
+    for (const fragment of ["C:\\Users", "Trymg", "hemmelig", "fixture.json", "ENOENT", "    at "]) {
+      expect(stdout).not.toContain(fragment);
+    }
   });
 });
 
@@ -174,5 +234,33 @@ describe("ekte CLI som child process", () => {
       "DUPLICATION",
       "SOURCE_COVERAGE",
     ]);
+  }, 120_000);
+
+  it("ekstra argument → exit 2 med usage_error og ingen batchrapport", () => {
+    const require = createRequire(import.meta.url);
+    const tsxCli = require.resolve("tsx/cli");
+    let status: number | null = null;
+    let stdout = "";
+    try {
+      execFileSync(process.execPath, [tsxCli, "--tsconfig", "tsconfig.json", CLI_RELATIVE_PATH, "uventet-argument"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+      });
+      expect.unreachable("skulle avsluttet med exit 2");
+    } catch (err) {
+      const e = err as { status: number | null; stdout: string };
+      status = e.status;
+      stdout = e.stdout;
+    }
+    expect(status).toBe(2);
+    expect(stdout.endsWith("\n")).toBe(true);
+    const parsed = JSON.parse(stdout);
+    expect(parsed).toEqual({
+      schemaVersion: "1.0.0",
+      mode: "canonical_school_semantic_batch",
+      passed: false,
+      error: { code: "usage_error", message: "CLI-en godtar ingen argumenter." },
+    });
+    expect(stdout).not.toContain("fixtureReports");
   }, 120_000);
 });

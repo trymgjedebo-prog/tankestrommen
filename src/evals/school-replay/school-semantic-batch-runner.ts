@@ -167,6 +167,21 @@ export type RunSchoolReplaySemanticBatchOptions = {
   manifest?: readonly SchoolSemanticFixtureManifestEntry[];
 };
 
+/**
+ * Pakker en operasjonell delfeil inn i en kontrollert feil med stabil kode og trygg melding.
+ * Den underliggende rå error-meldingen utelates BEVISST: den kan inneholde absolutt/lokal
+ * filsti (f.eks. fra readFileSync mot en absolutt fixturesRoot) og skal aldri nå den
+ * offentlige rapporten. Fixturen identifiseres kun via fixtureId og manifestets relative dir.
+ */
+function wrapOperational<T>(step: () => T, code: string, message: string): T {
+  try {
+    return step();
+  } catch (err) {
+    if (err instanceof SchoolSemanticBatchOperationalError) throw err;
+    throw new SchoolSemanticBatchOperationalError(code, message);
+  }
+}
+
 /** Kjører hele batchen sekvensielt i manifestrekkefølge og aggregerer rapporten. */
 export function runSchoolReplaySemanticBatch(
   options: RunSchoolReplaySemanticBatchOptions,
@@ -175,16 +190,30 @@ export function runSchoolReplaySemanticBatch(
   const fixtureReports: SchoolReplaySemanticReport[] = [];
   for (const entry of manifest) {
     const fixtureDir = join(options.fixturesRoot, entry.dir);
-    const input = loadSchoolReplayFixture(fixtureDir);
-    const expectations = loadSchoolReplayExpectations(fixtureDir);
+    const input = wrapOperational(
+      () => loadSchoolReplayFixture(fixtureDir),
+      "fixture_load_failed",
+      `Kunne ikke laste fixture «${entry.fixtureId}» (mappe «${entry.dir}»).`,
+    );
+    const expectations = wrapOperational(
+      () => loadSchoolReplayExpectations(fixtureDir),
+      "expectations_load_failed",
+      `Kunne ikke laste expectations for fixture «${entry.fixtureId}» (mappe «${entry.dir}»).`,
+    );
     if (expectations.fixtureId !== entry.fixtureId) {
       throw new SchoolSemanticBatchOperationalError(
         "manifest_fixture_id_mismatch",
         `Manifestets fixtureId «${entry.fixtureId}» matcher ikke expectations.fixtureId «${expectations.fixtureId}» i mappen «${entry.dir}».`,
       );
     }
-    const replay = runSchoolCanonicalReplayFromModelResponse(input);
-    fixtureReports.push(evaluateSchoolReplaySemantics(replay, expectations));
+    // Semantic failures er IKKE exceptions — evaluatoren rapporterer dem i rapporten (exit 1).
+    fixtureReports.push(
+      wrapOperational(
+        () => evaluateSchoolReplaySemantics(runSchoolCanonicalReplayFromModelResponse(input), expectations),
+        "replay_evaluation_failed",
+        `Replay/evaluering feilet for fixture «${entry.fixtureId}» (mappe «${entry.dir}»).`,
+      ),
+    );
   }
   return aggregateSchoolReplaySemanticBatch(fixtureReports);
 }
