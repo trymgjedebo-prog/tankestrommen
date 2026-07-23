@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "source-coverage-partial",
+  "checks": [
+    {
+      "id": "norsk-fact-partial-coverage",
+      "description": "Med ledende preamble i containeren skal norsk-faktumet ha partial source coverage",
+      "kind": "source_coverage",
+      "subjectKey": "norsk",
+      "textContains": "Les kapittel 3",
+      "expectedCoverage": "partial",
+      "minMatches": 1
+    },
+    {
+      "id": "norsk-not-subject-placed-when-partial",
+      "description": "Ved partial dekning fagplasseres ikke innholdet — hele containeren bevares på dagsnivå",
+      "kind": "subject_placement",
+      "date": "2026-05-11",
+      "subjectKey": "norsk",
+      "textContains": "Les kapittel 3",
+      "minMatches": 0,
+      "maxMatches": 0
+    },
+    {
+      "id": "preamble-preserved-once",
+      "description": "Preamble-informasjonen går ikke tapt og dupliseres ikke — maks ett logisk item",
+      "kind": "max_occurrences",
+      "textContains": "samtykkeskjemaet",
+      "scope": "canonical_draft",
+      "maxMatches": 1
+    }
+  ]
+}

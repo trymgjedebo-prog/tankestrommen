@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "source-coverage-full",
+  "checks": [
+    {
+      "id": "naturfag-fact-full-coverage",
+      "description": "Naturfag-faktumet skal ha full source coverage (hele containeren er strukturert)",
+      "kind": "source_coverage",
+      "subjectKey": "naturfag",
+      "textContains": "fotosyntesen",
+      "expectedCoverage": "full",
+      "minMatches": 1
+    },
+    {
+      "id": "naturfag-text-placed",
+      "description": "Naturfag-teksten skal ligge under naturfag, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-11",
+      "subjectKey": "naturfag",
+      "textContains": "fotosyntesen",
+      "minMatches": 1,
+      "maxMatches": 1
+    }
+  ]
+}
