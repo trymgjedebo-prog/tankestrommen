@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "language-track-unresolved",
+  "checks": [
+    {
+      "id": "unresolved-german-not-subject-placed",
+      "description": "Tysk skal ikke fagplasseres når språksporet er uavklart",
+      "kind": "subject_placement",
+      "date": "2026-05-11",
+      "subjectKey": "tysk",
+      "textContains": "Skriv fem setninger",
+      "minMatches": 0,
+      "maxMatches": 0
+    },
+    {
+      "id": "unresolved-spanish-not-subject-placed",
+      "description": "Spansk skal ikke fagplasseres når språksporet er uavklart",
+      "kind": "subject_placement",
+      "date": "2026-05-11",
+      "subjectKey": "spansk",
+      "textContains": "Repeter gloselisten",
+      "minMatches": 0,
+      "maxMatches": 0
+    },
+    {
+      "id": "unresolved-german-preserved-once",
+      "description": "Tysk-teksten skal bevares konservativt, men ikke dupliseres",
+      "kind": "max_occurrences",
+      "textContains": "Skriv fem setninger",
+      "scope": "canonical_draft",
+      "maxMatches": 1
+    },
+    {
+      "id": "unresolved-spanish-preserved-once",
+      "description": "Spansk-teksten skal bevares konservativt, men ikke dupliseres",
+      "kind": "max_occurrences",
+      "textContains": "Repeter gloselisten",
+      "scope": "canonical_draft",
+      "maxMatches": 1
+    }
+  ]
+}

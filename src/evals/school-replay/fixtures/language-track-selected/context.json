@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1.0.0",
+  "now": "2026-05-12T09:00:00.000Z",
+  "sourceType": "text",
+  "proposalId": "replay-lang-selected-proposal-1",
+  "languageTrack": {
+    "resolvedTrack": "tysk",
+    "confidence": 0.8,
+    "reason": "single_track_detected"
+  },
+  "personContext": {
+    "knownPersons": [],
+    "relevanceContext": {
+      "classCode": "2STC"
+    }
+  }
+}

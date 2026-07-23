@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0.0",
+  "now": "2026-05-12T09:00:00.000Z",
+  "sourceType": "text",
+  "proposalId": "replay-lang-unresolved-proposal-1",
+  "languageTrack": null,
+  "personContext": {
+    "knownPersons": [],
+    "relevanceContext": {
+      "classCode": "2STC"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "language-track-selected",
+  "checks": [
+    {
+      "id": "selected-german-under-german",
+      "description": "Valgt språkspor skal plasseres under tysk, nøyaktig én gang",
+      "kind": "subject_placement",
+      "date": "2026-05-11",
+      "subjectKey": "tysk",
+      "textContains": "Skriv fem setninger",
+      "minMatches": 1,
+      "maxMatches": 1
+    },
+    {
+      "id": "selected-spanish-not-subject-placed",
+      "description": "Ikke-valgt språkspor skal ikke fagplasseres",
+      "kind": "subject_placement",
+      "date": "2026-05-11",
+      "subjectKey": "spansk",
+      "textContains": "Repeter gloselisten",
+      "minMatches": 0,
+      "maxMatches": 0
+    },
+    {
+      "id": "selected-spanish-excluded-from-canonical",
+      "description": "Ikke-valgt språkspors innhold skal være ekskludert fra canonical draft",
+      "kind": "language_exclusion",
+      "textContains": "Repeter gloselisten",
+      "scope": "canonical_draft",
+      "maxMatches": 0
+    },
+    {
+      "id": "selected-spanish-label-excluded",
+      "description": "Fagetiketten Spansk skal heller ikke finnes i canonical draft",
+      "kind": "language_exclusion",
+      "textContains": "Spansk",
+      "scope": "canonical_draft",
+      "maxMatches": 0
+    }
+  ]
+}
