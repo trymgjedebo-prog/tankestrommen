@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-and-build:
@@ -37,3 +45,48 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # Required status check for branch protection på main: "school-semantic-quality-gate".
+  # `needs: test-and-build` gjør at denne checken bare består når hele testpakken og
+  # bygget også består — én required check dekker dermed hele kvalitetsgaten.
+  school-semantic-quality-gate:
+    name: school-semantic-quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: test-and-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dry eval (tankestrom structure)
+        run: |
+          set -o pipefail
+          npm run eval:tankestrom:dry 2>&1 | tee dry-eval-output.txt
+
+      - name: Check dry eval structure average
+        run: node scripts/ci/check-dry-eval.mjs dry-eval-output.txt
+
+      - name: School replay smoke
+        run: npm run --silent eval:school:replay:smoke > /dev/null
+
+      - name: School semantic smoke
+        run: npm run --silent eval:school:semantic:smoke > /dev/null
+
+      # `|| true`: valideringssteget under er selve gaten — det skal alltid få kjøre slik at
+      # firstFailure/feilrapporten vises tydelig selv når batchen gir exit 1/2.
+      - name: School semantic batch
+        run: npm run --silent eval:school:semantic:batch > semantic-batch-report.json || true
+
+      - name: Check school semantic batch report
+        run: node scripts/ci/check-semantic-batch.mjs semantic-batch-report.json
+
+      - name: TypeScript baseline
+        run: node scripts/ci/check-tsc-baseline.mjs
