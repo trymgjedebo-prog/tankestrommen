@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-and-build:
@@ -37,3 +45,61 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # Required status check for branch protection på main: "school-semantic-quality-gate".
+  # `needs: test-and-build` + `if: always()` + prerequisite-steget gjør at denne checken
+  # ALLTID rapporterer et eksplisitt resultat: består test-and-build, kjører de semantiske
+  # kontrollene; feiler/skippes/kanselleres test-and-build, blir gaten eksplisitt RØD
+  # (aldri skipped — en skipped required check ville ikke blokkert merge).
+  school-semantic-quality-gate:
+    name: school-semantic-quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: test-and-build
+    if: ${{ always() }}
+    steps:
+      - name: Verify test-and-build prerequisite
+        env:
+          TEST_AND_BUILD_RESULT: ${{ needs.test-and-build.result }}
+        run: |
+          echo "test-and-build result: $TEST_AND_BUILD_RESULT"
+          if [ "$TEST_AND_BUILD_RESULT" != "success" ]; then
+            echo "::error title=CI prerequisite::test-and-build ended with result: $TEST_AND_BUILD_RESULT — semantic quality gate fails explicitly."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dry eval (tankestrom structure)
+        run: |
+          set -o pipefail
+          npm run eval:tankestrom:dry 2>&1 | tee dry-eval-output.txt
+
+      - name: Check dry eval structure average
+        run: node scripts/ci/check-dry-eval.mjs dry-eval-output.txt
+
+      - name: School replay smoke
+        run: npm run --silent eval:school:replay:smoke > /dev/null
+
+      - name: School semantic smoke
+        run: npm run --silent eval:school:semantic:smoke > /dev/null
+
+      # `|| true`: valideringssteget under er selve gaten — det skal alltid få kjøre slik at
+      # firstFailure/feilrapporten vises tydelig selv når batchen gir exit 1/2.
+      - name: School semantic batch
+        run: npm run --silent eval:school:semantic:batch > semantic-batch-report.json || true
+
+      - name: Check school semantic batch report
+        run: node scripts/ci/check-semantic-batch.mjs semantic-batch-report.json
+
+      - name: TypeScript baseline
+        run: node scripts/ci/check-tsc-baseline.mjs
