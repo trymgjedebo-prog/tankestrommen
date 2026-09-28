@@ -17,6 +17,7 @@ import {
   type CanonicalSubject,
 } from "@/lib/school-subject";
 import { normalizeClassScheduleEntriesRaw } from "@/lib/class-schedule-normalize";
+import { renderDayDetailsFromAtomicFields } from "@/lib/day-schedule-details";
 import { normalizeSchoolDayOperationSignalsRaw } from "@/lib/school-day-operation-signals-normalize";
 import { CLASS_SCHEDULE_ENTRIES_PROMPT_SECTION } from "@/lib/ai/class-schedule-entries-prompt";
 import { SCHOOL_DAY_OPERATION_SIGNALS_PROMPT_SECTION } from "@/lib/ai/school-day-operation-signals-prompt";
@@ -222,6 +223,15 @@ function pushSubjectLessonDiag(entry: Record<string, unknown>): void {
   subjectLessonDiagBuffer.push({ ...entry, _ts: Date.now() });
 }
 
+/**
+ * Fag-/timeplan-diagnostikken (console + localhost-ingest) håndterer barnets timeplan og er derfor
+ * AV som default. Den kjører KUN ved eksplisitt `enableDiagnostics: true` fra kallstedet, og ALDRI
+ * når NODE_ENV === "production" (hard sperre — en request med schoolProfile kan ikke slå den på).
+ */
+function subjectDiagnosticsAllowed(enabled: boolean): boolean {
+  return enabled && process.env.NODE_ENV !== "production";
+}
+
 function diagSubjectPipeline(
   payload: {
     hypothesisId: string;
@@ -230,11 +240,10 @@ function diagSubjectPipeline(
     data: Record<string, unknown>;
     runId?: string;
   },
-  // Additivt: replay/offline kan sette `false` for å GARANTERE at ingen diagnostisk fetch/logg
-  // kjøres. Default `true` bevarer dagens produksjonsoppførsel uendret. Påvirker aldri semantikk.
-  enabled = true,
+  // Eksplisitt opt-in for lokal feilsøking; default AV. Påvirker aldri semantikk.
+  enabled = false,
 ): void {
-  if (!enabled) return;
+  if (!subjectDiagnosticsAllowed(enabled)) return;
   const body = {
     sessionId: "f55091",
     timestamp: Date.now(),
@@ -251,22 +260,25 @@ function diagSubjectPipeline(
   }).catch(() => {});
 }
 
-function flushSubjectLessonDiagBuffer(flushReason: string, enabled = true): void {
+function flushSubjectLessonDiagBuffer(flushReason: string, enabled = false): void {
   if (subjectLessonDiagBuffer.length === 0) return;
-  if (!enabled) {
+  if (!subjectDiagnosticsAllowed(enabled)) {
     subjectLessonDiagBuffer.length = 0; // tøm bufferet, men ingen diagnostisk emit/fetch
     return;
   }
-  diagSubjectPipeline({
-    hypothesisId: "H2",
-    phase: "aggregate_normalizeSchoolProfileLesson",
-    location: "analyze-image.ts:flushSubjectLessonDiagBuffer",
-    data: {
-      flushReason,
-      entryCount: subjectLessonDiagBuffer.length,
-      entries: subjectLessonDiagBuffer,
+  diagSubjectPipeline(
+    {
+      hypothesisId: "H2",
+      phase: "aggregate_normalizeSchoolProfileLesson",
+      location: "analyze-image.ts:flushSubjectLessonDiagBuffer",
+      data: {
+        flushReason,
+        entryCount: subjectLessonDiagBuffer.length,
+        entries: subjectLessonDiagBuffer,
+      },
     },
-  });
+    enabled,
+  );
   subjectLessonDiagBuffer.length = 0;
 }
 
@@ -435,15 +447,13 @@ function normalizeSchoolProfileLessonCandidate(
   if (subjectKey === "norsk" && !cellTextAllowsNorskSubjectEvidence(subject)) {
     // `subject` er allerede trimmet ikke-tom (asNonEmptyString); det er celle-beviset.
     const newKey = buildCustomSubjectKey(rawKey || subject);
-    console.log(
-      "[SUBJECT-ANTI-NORSK]",
-      JSON.stringify({
-        change: `subject_norsk_rejected_without_cell_evidence→${newKey}`,
-        phase: "normalizeSchoolProfileLessonCandidate",
-        subject,
-        rawKey,
-      }),
-    );
+    // Fagcelle-tekst er timeplaninnhold → kun i den default-avslåtte diagnostikk-bufferen.
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLessonCandidate",
+      location: "analyze-image.ts:SUBJECT-ANTI-NORSK",
+      data: { change: `subject_norsk_rejected_without_cell_evidence→${newKey}`, subject, rawKey },
+    });
     subjectKey = newKey;
   }
   if (
@@ -451,15 +461,12 @@ function normalizeSchoolProfileLessonCandidate(
     !cellTextAllowsMatematikkSubjectEvidence(subject)
   ) {
     const newKey = buildCustomSubjectKey(rawKey || subject);
-    console.log(
-      "[SUBJECT-ANTI-MATEMATIKK]",
-      JSON.stringify({
-        change: `subject_matematikk_rejected_without_cell_evidence→${newKey}`,
-        phase: "normalizeSchoolProfileLessonCandidate",
-        subject,
-        rawKey,
-      }),
-    );
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLessonCandidate",
+      location: "analyze-image.ts:SUBJECT-ANTI-MATEMATIKK",
+      data: { change: `subject_matematikk_rejected_without_cell_evidence→${newKey}`, subject, rawKey },
+    });
     subjectKey = newKey;
   }
   if (
@@ -468,15 +475,12 @@ function normalizeSchoolProfileLessonCandidate(
   ) {
     const prevKey = subjectKey;
     subjectKey = "kunst-og-handverk";
-    console.log(
-      "[SUBJECT-KH-VS-NATURFAG]",
-      JSON.stringify({
-        change: `subject_corrected_from_label:${prevKey}→kunst-og-handverk`,
-        phase: "normalizeSchoolProfileLessonCandidate",
-        subject,
-        rawKey,
-      }),
-    );
+    pushSubjectLessonDiag({
+      hypothesisId: "H2",
+      phase: "normalizeSchoolProfileLessonCandidate",
+      location: "analyze-image.ts:SUBJECT-KH-VS-NATURFAG",
+      data: { change: `subject_corrected_from_label:${prevKey}→kunst-og-handverk`, subject, rawKey },
+    });
   }
   if (BREAK_SUBJECT_KEYS.has(subjectKey)) return null;
   const rawWeight = typeof o.weight === "number" ? o.weight : Number(o.weight);
@@ -882,10 +886,7 @@ export function normalizeSchoolProfileLesson(
       keyCanonical: canonicalFromKey.subjectKey,
       cellCanonical: canonicalFromCellText.subjectKey,
     };
-    console.log(
-      "[SUBJECT-CONFLICT-KEY-VS-LABEL]",
-      JSON.stringify(conflictSnapshot),
-    );
+    // Samme snapshot går til den default-avslåtte diagnostikk-bufferen under — ingen ustyrt console-logg.
     pushSubjectLessonDiag({
       hypothesisId: "H2",
       phase: "subject_conflict_key_vs_label_resolved",
@@ -1123,7 +1124,7 @@ function normalizeSchoolWeeklyProfileRaw(
     targetGroup?: string | null;
     description?: string | null;
   },
-  enableDiagnostics = true,
+  enableDiagnostics = false,
 ): { profile: SchoolWeeklyProfile | null; debug: SchoolWeeklyProfileDebug } {
   clearSubjectLessonDiagBuffer();
   const debug: SchoolWeeklyProfileDebug = {
@@ -1413,29 +1414,14 @@ function normalizeParentDays(raw: unknown): ParentDayItem[] {
     );
 }
 
-function dayDetailsFromParentItem(day: ParentDayItem): string | null {
-  const sections: string[] = [];
-  if (day.highlights.length > 0) {
-    sections.push(`Høydepunkter: ${day.highlights.join("; ")}`);
-  }
-  if (day.rememberItems.length > 0) {
-    sections.push(`Husk: ${day.rememberItems.join("; ")}`);
-  }
-  if (day.deadlines.length > 0) {
-    sections.push(`Frister: ${day.deadlines.join("; ")}`);
-  }
-  if (day.notes.length > 0) {
-    sections.push(`Notater: ${day.notes.join("; ")}`);
-  }
-  return sections.length > 0 ? sections.join("\n") : null;
-}
-
 function scheduleByDayFromParentDays(days: ParentDayItem[]): DayScheduleEntry[] {
   return days.map((day) => ({
     dayLabel: day.dayLabel,
     date: day.date,
     time: day.time,
-    details: dayDetailsFromParentItem(day),
+    // Delt serialisering (se `day-schedule-details`): skole-pipelinen gjenkjenner denne bloben som
+    // redundant med de atomiske feltene under, via nøyaktig samme funksjon.
+    details: renderDayDetailsFromAtomicFields(day),
     highlights: day.highlights,
     rememberItems: day.rememberItems,
     deadlines: day.deadlines,
@@ -1567,8 +1553,9 @@ export function normalizeClassLocationsRaw(raw: unknown): ClassLocation[] | unde
 
 /**
  * Additive, bakoverkompatible options for parsing/normalisering. `now` injiserer klokka som brukes
- * til årsinferens (deterministisk replay). `enableDiagnostics: false` garanterer at ingen diagnostisk
- * fetch/logg kjøres. Ingen av dem endrer semantiske normaliseringsregler. Default = dagens oppførsel.
+ * til årsinferens (deterministisk replay). Fag-/timeplan-diagnostikk (console + localhost-ingest) er
+ * AV som default; `enableDiagnostics: true` slår den på eksplisitt, men aldri i NODE_ENV=production.
+ * Ingen av dem endrer semantiske normaliseringsregler.
  */
 export type NormalizeAIAnalysisOptions = {
   now?: Date;
@@ -1583,7 +1570,7 @@ export function normalizeAIAnalysisResult(
   if (!data || typeof data !== "object") {
     throw new Error("Ugyldig JSON fra modellen");
   }
-  const diagnosticsEnabled = options?.enableDiagnostics ?? true;
+  const diagnosticsEnabled = options?.enableDiagnostics ?? false;
   const o = data as Record<string, unknown>;
 
   const extractedRaw =
@@ -1673,7 +1660,12 @@ export function normalizeAIAnalysisResult(
     );
   }
 
-  if (schoolWeeklyProfileDebug.rawRoot !== undefined && schoolWeeklyProfileDebug.rawRoot !== null) {
+  // Hele timeplanen (inkl. lærer/rom) logges KUN under den default-avslåtte diagnostikk-gaten.
+  if (
+    subjectDiagnosticsAllowed(diagnosticsEnabled) &&
+    schoolWeeklyProfileDebug.rawRoot !== undefined &&
+    schoolWeeklyProfileDebug.rawRoot !== null
+  ) {
     const summary = {
       rawGradeBand: schoolWeeklyProfileDebug.rawGradeBand,
       resolvedGradeBand: schoolWeeklyProfileDebug.resolvedGradeBand,
@@ -1916,7 +1908,7 @@ function parseAIResponse(
             rawSchoolWeeklyProfileSummary: summarizeRawSchoolProfileForDiag(swp),
           },
         },
-        options?.enableDiagnostics ?? true,
+        options?.enableDiagnostics ?? false,
       );
     }
   }
@@ -1949,7 +1941,7 @@ function parseAIResponseWithSource(
             rawSchoolWeeklyProfileSummary: summarizeRawSchoolProfileForDiag(swp),
           },
         },
-        options?.enableDiagnostics ?? true,
+        options?.enableDiagnostics ?? false,
       );
     }
   }

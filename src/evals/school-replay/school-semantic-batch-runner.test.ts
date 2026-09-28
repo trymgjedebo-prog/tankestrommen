@@ -1,5 +1,5 @@
 /**
- * Batch-runner-tester: happy path over alle elleve ekte regression-fixtures (aggregatene
+ * Batch-runner-tester: happy path over alle tolv ekte regression-fixtures (aggregatene
  * utledes av de individuelle rapportene — aldri hardkodet check-antall), determinisme,
  * fixtureId-mismatch som operasjonell feil, og firstFailure-/aggregerings-semantikk med
  * SYNTETISKE rapporter (ekte fixtures endres aldri for å lage røde tilfeller).
@@ -84,15 +84,15 @@ function makeSyntheticReport(fixtureId: string, specs: SyntheticCheckSpec[]): Sc
 
 /* ── Happy path over de ekte fixturene ────────────────────────────────────── */
 
-describe("batch happy path (alle elleve ekte fixtures)", () => {
+describe("batch happy path (alle tolv ekte fixtures)", () => {
   it("passed=true; aggregatene tilsvarer summen av de individuelle rapportene", () => {
     const batch = runSchoolReplaySemanticBatch({ fixturesRoot: FIXTURES_ROOT });
     expect(batch.schemaVersion).toBe("1.0.0");
     expect(batch.mode).toBe("canonical_school_semantic_batch");
     expect(batch.passed).toBe(true);
     expect(batch.firstFailure).toBeNull();
-    expect(batch.summary.fixturesTotal).toBe(11);
-    expect(batch.summary.fixturesPassed).toBe(11);
+    expect(batch.summary.fixturesTotal).toBe(12);
+    expect(batch.summary.fixturesPassed).toBe(12);
     expect(batch.summary.fixturesFailed).toBe(0);
     // checksTotal utledes av de individuelle rapportene — ikke hardkodet.
     const expectedChecksTotal = batch.fixtureReports.reduce((sum, r) => sum + r.summary.total, 0);

@@ -10,6 +10,7 @@
  * Alle ID-er er deterministiske (djb2Hex over lengdeprefikset, semantisk materiale).
  */
 import { selectChildForDocument } from "@/lib/child-selection";
+import { isDayDetailsDerivedFromAtomicFields } from "@/lib/day-schedule-details";
 import type { PortalImportContext } from "@/lib/portal-import-person";
 import { normalizeClassCode } from "@/lib/school-class-schedule";
 import { djb2Hex } from "@/lib/stable-id";
@@ -427,7 +428,8 @@ function compareItems(a: SchoolBlockContentItem, b: SchoolBlockContentItem): num
 }
 
 /* ── Steg 2B: common-items fra scheduleByDay ──────────────────────────────────
- * Kildeenheter: hele `details` (ÉN enhet, aldri splittet) + hvert ikke-blankt element i
+ * Kildeenheter: hele `details` (ÉN enhet, aldri splittet — utelatt når den kun er serialiseringen
+ * av de atomiske feltene) + hvert ikke-blankt element i
  * `highlights`/`rememberItems`/`deadlines`/`notes`. `time` ignoreres fullstendig i dette
  * steget (ingen commonSchedule, ingen parsing, ikke i ID/sortering/review).
  * ──────────────────────────────────────────────────────────────────────────── */
@@ -445,7 +447,9 @@ function commonSourceFieldsInPriorityOrder(
     { raws: day.rememberItems, title: "Husk" },
     { raws: day.highlights, title: "Viktig informasjon" },
     { raws: day.notes, title: "Merknad" },
-    { raws: [day.details], title: "Skoleinformasjon" },
+    // `details` som KUN er serialiseringen av feltene over (tekstprompt-formen) er ingen egen kilde —
+    // den ville gjentatt hvert faktum. Modell-skrevet/unik `details` (f.eks. bildeformen) beholdes.
+    { raws: isDayDetailsDerivedFromAtomicFields(day) ? [] : [day.details], title: "Skoleinformasjon" },
   ];
 }
 

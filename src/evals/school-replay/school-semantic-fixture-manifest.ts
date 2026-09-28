@@ -33,6 +33,7 @@ export const SCHOOL_SEMANTIC_FIXTURE_MANIFEST: readonly SchoolSemanticFixtureMan
   { fixtureId: "duplication-single-logical-item", dir: "duplication-single-logical-item", family: "DUPLICATION" },
   { fixtureId: "duplication-no-residual-leak", dir: "duplication-no-residual-leak", family: "DUPLICATION" },
   { fixtureId: "duplication-day-scope", dir: "duplication-day-scope", family: "DUPLICATION" },
+  { fixtureId: "duplication-text-shape-details", dir: "duplication-text-shape-details", family: "DUPLICATION" },
   // 5. SOURCE_COVERAGE
   { fixtureId: "source-coverage-full", dir: "source-coverage-full", family: "SOURCE_COVERAGE" },
   { fixtureId: "source-coverage-partial", dir: "source-coverage-partial", family: "SOURCE_COVERAGE" },

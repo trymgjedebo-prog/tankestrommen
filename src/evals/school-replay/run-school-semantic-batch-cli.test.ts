@@ -47,7 +47,7 @@ describe("CLI-funksjonen (importert, med injiserte dependencies)", () => {
     expect(typeof runSchoolSemanticBatchCliOnce).toBe("function");
   });
 
-  it("happy path in-process: exit 0, gyldig JSON med passed=true og elleve fixtures", () => {
+  it("happy path in-process: exit 0, gyldig JSON med passed=true og tolv fixtures", () => {
     const writes: string[] = [];
     const code = runSchoolSemanticBatchCliOnce({ args: [], writeStdout: (t) => writes.push(t) });
     expect(code).toBe(0);
@@ -55,7 +55,7 @@ describe("CLI-funksjonen (importert, med injiserte dependencies)", () => {
     expect(stdout.endsWith("\n")).toBe(true);
     const parsed = JSON.parse(stdout) as SchoolReplaySemanticBatchReport;
     expect(parsed.passed).toBe(true);
-    expect(parsed.summary.fixturesTotal).toBe(11);
+    expect(parsed.summary.fixturesTotal).toBe(12);
     expect(parsed.firstFailure).toBeNull();
     expect("error" in parsed).toBe(false);
   });
@@ -222,7 +222,7 @@ describe("ekte CLI som child process", () => {
     expect(parsed.schemaVersion).toBe("1.0.0");
     expect(parsed.mode).toBe("canonical_school_semantic_batch");
     expect(parsed.passed).toBe(true);
-    expect(parsed.summary.fixturesTotal).toBe(11);
+    expect(parsed.summary.fixturesTotal).toBe(12);
     expect(parsed.summary.fixturesFailed).toBe(0);
     expect(parsed.summary.checksFailed).toBe(0);
     expect(parsed.firstFailure).toBeNull();

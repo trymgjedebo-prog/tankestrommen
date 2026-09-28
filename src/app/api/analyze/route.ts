@@ -5,6 +5,7 @@ import {
   type AnalysisDocumentKind,
 } from "@/lib/ai/analysis-model-router";
 import { getDeployFingerprint } from "@/lib/deploy-fingerprint";
+import { clientDebugMessageForError } from "@/lib/analyze-error-response";
 import { djb2Hex } from "@/lib/stable-id";
 import { splitDetailsIntoTableSubjectRowsWithMeta } from "@/lib/a-plan-overlay-table-split";
 import { classifyTaskIntent, type TaskIntent } from "@/lib/task-intent";
@@ -9030,7 +9031,8 @@ async function wrapResponse(
       });
     } catch (error) {
       const stage = "toPortalBundle";
-      console.error("[Tankestrom analyze failed]", { stage, error, fileName });
+      // Rått filnavn logges ikke (kan identifisere barn/familie); kildetype er nok operasjonelt.
+      console.error("[Tankestrom analyze failed]", { stage, error, sourceType });
       if (process.env.BRAINTRUST_API_KEY?.trim()) {
         ensureBraintrustLoggerForProject();
         currentSpan()?.log({
@@ -9510,9 +9512,9 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
         ));
       }
       const imageMeta = parseImageDataUrlMeta(image);
+      // Rått filnavn logges ikke (kan identifisere barn/familie) — kun ikke-identifiserende metadata.
       console.info("[Tankestrom analyze stage]", {
         stage: "image_received",
-        fileName: typeof fileName === "string" ? fileName : null,
         mimeType: imageMeta.mimeType,
         size: imageMeta.size,
       });
@@ -9549,8 +9551,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
           analysisModelTrace: routing.modelTrace,
         };
       } catch (error) {
-        const debugMessage =
-          error instanceof Error ? error.stack || error.message : String(error);
+        const debugMessage = clientDebugMessageForError(error);
         console.error("[Tankestrom analyze image_to_model failed]", error);
         return withCors(
           NextResponse.json(
@@ -9584,8 +9585,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
           "image_success",
         );
       } catch (error) {
-        const debugMessage =
-          error instanceof Error ? error.stack || error.message : String(error);
+        const debugMessage = clientDebugMessageForError(error);
         console.error("[Tankestrom analyze portal bundle failed]", error);
         return withCors(
           NextResponse.json(
@@ -9630,8 +9630,7 @@ async function handleAnalyzeRequest(request: NextRequest): Promise<NextResponse>
         },
       });
     }
-    const debugDetail =
-      err instanceof Error ? err.stack || err.message : String(err);
+    const debugDetail = clientDebugMessageForError(err);
     if (lastPortalMode) {
       return withCors(
         NextResponse.json(
@@ -9709,8 +9708,7 @@ export async function POST(request: NextRequest) {
     return await handleAnalyzeRequest(request);
   } catch (error) {
     console.error("[Tankestrom POST fatal]", error);
-    const debugMessage =
-      error instanceof Error ? error.stack || error.message : String(error);
+    const debugMessage = clientDebugMessageForError(error);
     const res = NextResponse.json(
       {
         ok: false,

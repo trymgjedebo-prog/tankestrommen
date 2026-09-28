@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0.0",
+  "fixtureId": "duplication-text-shape-details",
+  "checks": [
+    {
+      "id": "gym-once",
+      "description": "Tekstform: «Gym ute torsdag.» er ett logisk faktum — skal ikke også dukke opp i en syntetisert details-container",
+      "kind": "max_occurrences",
+      "textContains": "Gym ute torsdag",
+      "scope": "canonical_draft",
+      "date": "2026-10-08",
+      "maxMatches": 1
+    },
+    {
+      "id": "raincoat-once",
+      "description": "Tekstform: «Husk regntøy.» er ett logisk faktum — skal ikke også dukke opp i en syntetisert details-container",
+      "kind": "max_occurrences",
+      "textContains": "Husk regntøy",
+      "scope": "canonical_draft",
+      "date": "2026-10-08",
+      "maxMatches": 1
+    },
+    {
+      "id": "no-synthesized-details-container",
+      "description": "Den serverside-syntetiserte details-bloben («Høydepunkter: … Husk: …») skal ikke bli et eget canonical item",
+      "kind": "max_occurrences",
+      "textContains": "Høydepunkter:",
+      "scope": "canonical_draft",
+      "maxMatches": 0
+    }
+  ]
+}

@@ -20,6 +20,7 @@
  */
 import { expandEmbeddedSubjectHeadersInDetails, splitDetailsIntoTableSubjectRowsWithMeta, tryParseTableSubjectHeaderLine } from "@/lib/a-plan-overlay-table-split";
 import { canonicalizeSubjectFromText, slugifySubjectKey } from "@/lib/school-subject";
+import { isDayDetailsDerivedFromAtomicFields } from "@/lib/day-schedule-details";
 import { normalizeSchoolDateToIso } from "@/lib/school-date";
 import { normalizeSchoolWeekdayIndex, schoolWeekdayIndexFromIsoDate } from "@/lib/school-weekday";
 import { djb2Hex } from "@/lib/stable-id";
@@ -288,7 +289,9 @@ export function buildNormalizedSchoolContentFacts(
   for (const day of days) {
     if (!day || typeof day !== "object") continue;
     const identity = dayIdentityOf(day);
-    out.push(...factsFromDetails(identity, day.details));
+    // `details` som KUN er serialiseringen av de atomiske feltene (tekstprompt-formen) gir ingen egne
+    // fakta — de atomiske feltene under dekker dem allerede. Modell-skrevet/unik `details` parses som før.
+    if (!isDayDetailsDerivedFromAtomicFields(day)) out.push(...factsFromDetails(identity, day.details));
     out.push(...factsFromSimpleField(identity, day.highlights, "highlights"));
     out.push(...factsFromSimpleField(identity, day.rememberItems, "rememberItems"));
     out.push(...factsFromSimpleField(identity, day.deadlines, "deadlines"));
