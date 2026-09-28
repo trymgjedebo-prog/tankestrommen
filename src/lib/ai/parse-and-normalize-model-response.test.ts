@@ -84,9 +84,15 @@ describe("diagnostikk deaktivert → ingen fetch", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("default (diagnostikk på) → fetch forsøkes (bevis på at gating faktisk styrer)", () => {
+  it("default (uten options) → diagnostikken er AV: fetch kalles ikke", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
     parseAndNormalizeModelResponse(rawWithProfile(), { now: new Date("2026-06-01T00:00:00Z") });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("eksplisitt enableDiagnostics: true utenfor produksjon → fetch forsøkes (bevis på at gating faktisk styrer)", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
+    parseAndNormalizeModelResponse(rawWithProfile(), { now: new Date("2026-06-01T00:00:00Z"), enableDiagnostics: true });
     expect(fetchSpy).toHaveBeenCalled();
   });
 });

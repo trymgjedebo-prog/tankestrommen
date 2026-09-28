@@ -1,7 +1,7 @@
 /**
  * CI-validator for semantic batch-rapporten (`eval:school:semantic:batch`).
  *
- * Leser rapportfilen, validerer dagens eksplisitte kontrakt (11 fixtures / 36 checks /
+ * Leser rapportfilen, validerer dagens eksplisitte kontrakt (12 fixtures / 39 checks /
  * kategorisummer i fast rekkefølge) og presenterer `firstFailure` tydelig. Utfører ALDRI
  * egen semantisk matching — kun lesing av batchrapportens kontrollerte felter.
  *
@@ -16,13 +16,13 @@ import { resolve } from "node:path";
 
 /** Dagens forventede totalsummer — utvides bevisst sammen med nye fixtures. */
 export const EXPECTED_BATCH_TOTALS = {
-  fixturesTotal: 11,
-  checksTotal: 36,
+  fixturesTotal: 12,
+  checksTotal: 39,
   byCategory: {
     DAY_OPERATION: 4,
     SUBJECT_PLACEMENT: 19,
     LANGUAGE_TRACK: 2,
-    DUPLICATION: 9,
+    DUPLICATION: 12,
     SOURCE_COVERAGE: 2,
   },
 };

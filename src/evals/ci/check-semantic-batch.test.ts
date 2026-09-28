@@ -42,11 +42,11 @@ function makeValidReport(): SyntheticReport {
     mode: "canonical_school_semantic_batch",
     passed: true,
     summary: {
-      fixturesTotal: 11,
-      fixturesPassed: 11,
+      fixturesTotal: 12,
+      fixturesPassed: 12,
       fixturesFailed: 0,
-      checksTotal: 36,
-      checksPassed: 36,
+      checksTotal: 39,
+      checksPassed: 39,
       checksFailed: 0,
       byCategory,
     },
@@ -177,8 +177,8 @@ describe("presentasjon", () => {
   it("buildStepSummary viser fixtures, checks, kategoritotaler og firstFailure/none", () => {
     const summary = buildStepSummary(makeValidReport());
     expect(summary).toContain("PASS");
-    expect(summary).toContain("11/11");
-    expect(summary).toContain("36/36");
+    expect(summary).toContain("12/12");
+    expect(summary).toContain("39/39");
     expect(summary).toContain("firstFailure: none");
     for (const category of BATCH_CATEGORY_ORDER) expect(summary).toContain(category);
   });

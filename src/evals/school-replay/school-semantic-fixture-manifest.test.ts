@@ -1,5 +1,5 @@
 /**
- * Manifesttester: låser at det eksplisitte manifestet lister nøyaktig de elleve
+ * Manifesttester: låser at det eksplisitte manifestet lister nøyaktig de tolv
  * regression-fixturene i fast rekkefølge, at alle mapper/filer finnes, at fixtureId matcher
  * expectations, og at alle fem familier er representert — med kategoriinnhold verifisert fra
  * de FAKTISKE check-typene (via CHECK_KIND_CATEGORY), aldri inferert fra mappenavn.
@@ -24,8 +24,8 @@ const FAMILY_ORDER: SchoolReplayFailureCategory[] = [
 ];
 
 describe("school semantic fixture manifest", () => {
-  it("lister nøyaktig elleve regression-fixtures i fast, eksplisitt rekkefølge", () => {
-    expect(SCHOOL_SEMANTIC_FIXTURE_MANIFEST).toHaveLength(11);
+  it("lister nøyaktig tolv regression-fixtures i fast, eksplisitt rekkefølge", () => {
+    expect(SCHOOL_SEMANTIC_FIXTURE_MANIFEST).toHaveLength(12);
     // Låser hele rekkefølgen — en endring her er en bevisst kontraktendring.
     expect(SCHOOL_SEMANTIC_FIXTURE_MANIFEST.map((e) => e.fixtureId)).toEqual([
       "day-operation-free-day",
@@ -37,6 +37,7 @@ describe("school semantic fixture manifest", () => {
       "duplication-single-logical-item",
       "duplication-no-residual-leak",
       "duplication-day-scope",
+      "duplication-text-shape-details",
       "source-coverage-full",
       "source-coverage-partial",
     ]);
@@ -74,6 +75,7 @@ describe("school semantic fixture manifest", () => {
       "SUBJECT_PLACEMENT",
       "LANGUAGE_TRACK",
       "LANGUAGE_TRACK",
+      "DUPLICATION",
       "DUPLICATION",
       "DUPLICATION",
       "DUPLICATION",

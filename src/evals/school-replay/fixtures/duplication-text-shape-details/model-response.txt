@@ -1,0 +1,1 @@
+{"title":"Ukeplan for 2STC","targetGroup":"2STC","days":[{"dayLabel":"Torsdag","date":"2026-10-08","time":null,"highlights":["Gym ute torsdag."],"rememberItems":["Husk regntøy."],"deadlines":[],"notes":[]}],"generalImportantInfo":[],"contacts":[],"classLocations":[],"schoolWeeklyProfile":null}
